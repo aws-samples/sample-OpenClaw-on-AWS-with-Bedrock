@@ -18,7 +18,7 @@ English | [简体中文](README_CN.md)
 |-------------------|--------------|
 | Multiple API keys (Anthropic/OpenAI/etc.) | **Amazon Bedrock unified API + IAM** |
 | Single model, fixed cost | **8 models available, Nova 2 Lite (90% cheaper vs Anthropic)** |
-| x86 hardware, fixed specs | **x86/ARM flexible, Graviton recommended (20-40% savings)** |
+| x86 hardware, fixed specs | **x86/ARM/Mac flexible, Graviton recommended (20-40% savings)** |
 | Tailscale VPN | **SSM Session Manager** |
 | Manual setup | **CloudFormation (1-click)** |
 | No audit logs | **CloudTrail (automatic)** |
@@ -80,12 +80,23 @@ English | [简体中文](README_CN.md)
 
 Click to deploy:
 
+**Linux (Graviton/x86) - Recommended**
+
 | Region | Launch Stack |
 |--------|--------------|
-| **US West (Oregon)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-west-2#/stacks/create/review?stackName=clawdbot-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
-| **US East (N. Virginia)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/review?stackName=clawdbot-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
-| **EU (Ireland)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=eu-west-1#/stacks/create/review?stackName=clawdbot-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
-| **Asia Pacific (Tokyo)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=ap-northeast-1#/stacks/create/review?stackName=clawdbot-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
+| **US West (Oregon)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-west-2#/stacks/create/review?stackName=moltbot-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
+| **US East (N. Virginia)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/review?stackName=moltbot-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
+| **EU (Ireland)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=eu-west-1#/stacks/create/review?stackName=moltbot-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
+| **Asia Pacific (Tokyo)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=ap-northeast-1#/stacks/create/review?stackName=moltbot-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
+
+**macOS (EC2 Mac) - For Apple Development**
+
+| Region | Launch Stack | Monthly Cost |
+|--------|--------------|--------------|
+| **US West (Oregon)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-west-2#/stacks/create/review?stackName=moltbot-mac&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock-mac.yaml) | $468-792 |
+| **US East (N. Virginia)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/review?stackName=moltbot-mac&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock-mac.yaml) | $468-792 |
+
+> **Mac instances**: 24-hour minimum allocation, best for iOS/macOS development teams. [Learn more →](#macos-deployment)
 
 > **Note**: Using Global CRIS profiles - works in 30+ regions worldwide. Deploy in any region, requests auto-route to optimal locations.
 
@@ -345,61 +356,56 @@ Your Phone/Computer → WhatsApp/Telegram → EC2 (Moltbot) → Bedrock (Claude)
 
 ### Why EC2 + Bedrock?
 
-**🔒 Enterprise Security Without the Complexity**
+**🔒 Security**: IAM roles replace API keys—no credentials to leak. CloudTrail logs every API call for compliance.
 
-Traditional AI assistants require managing multiple API keys from different providers (Anthropic, OpenAI, DeepSeek). Each key is a security risk—if leaked, attackers can rack up bills or access your data. With Bedrock and IAM roles, there are no keys to manage or leak. The EC2 instance authenticates automatically, and every API call is logged in CloudTrail for compliance. VPC Endpoints keep all traffic within AWS's private network, meeting enterprise security requirements without complex VPN setups.
+**💰 Cost**: Multi-model strategy (Nova 90% cheaper than Claude) + Graviton (20% cheaper than x86) = $39/month total.
 
-**💰 Cost-Effective Multi-Model Strategy**
+**🛡️ Reliability**: 99.99% uptime in enterprise data centers vs home internet. Auto-restart, CloudWatch monitoring included.
 
-Bedrock's unified API lets you optimize costs by choosing the right model for each task. Use Nova Pro ($0.80/$3.20 per 1M tokens) for most conversations—73% cheaper than Claude. Switch to Claude Sonnet 4.5 for complex reasoning, or Nova Lite for simple FAQs. One customer reduced AI costs by 60% using this smart routing strategy. With Graviton ARM instances (20-40% cheaper than x86), total infrastructure cost starts at just $36/month—less than two ChatGPT Plus subscriptions, but serving your entire team.
+**📊 Transparency**: Cost Explorer tracks every dollar. CloudTrail audits every API call. No guessing.
 
-**🛡️ 24/7 Reliability You Can Trust**
+**🌐 Scale**: Deploy globally with identical config. Global CRIS auto-routes to optimal regions. Scale t4g.small to c7g.xlarge in minutes.
 
-Your Mac Mini needs to run 24/7, vulnerable to power outages, network issues, and hardware failures. EC2 instances run in enterprise data centers with redundant power and networking, achieving 99.99% uptime with multi-AZ deployment. Auto-restart on failure, CloudWatch monitoring, and AWS support coverage mean your AI assistant is more reliable than your home internet.
+**🚀 Orchestration**: Moltbot can spin up 100 Spot instances for parallel tasks, trigger Glue jobs, invoke Lambda—impossible on local hardware.
 
-**📊 Transparent Operations and Compliance**
-
-CloudTrail automatically logs every Bedrock API call—who made it, when, which model, what was processed. This audit trail is critical for regulated industries (finance, healthcare, government). Cost Explorer shows exactly what you're spending on AI vs infrastructure. Try getting that level of visibility with local deployment and scattered API bills.
-
-**🌐 Global Scale with Local Performance**
-
-Deploy in multiple regions (US, EU, Asia) with identical configuration. Global CRIS automatically routes requests to optimal locations—US users get US processing, Japan users get Japan processing. Need to handle traffic spikes? Scale from t4g.small to c7g.xlarge in minutes. Local deployment? You're stuck with whatever hardware you bought.
-
-**🚀 Cloud-Native Task Orchestration**
-
-This is where cloud deployment truly shines. Your Moltbot can orchestrate AWS services: spin up 100 Spot instances for parallel video processing ($3, 20 minutes), trigger Glue jobs for data analysis, invoke Lambda functions for automation. Local Mac Mini? Limited to single-machine performance. Cloud Moltbot? It's a command center for your entire AWS infrastructure.
-
-### What Runs on EC2
-
-- **Moltbot Gateway**: Routes messages, manages sessions (~300MB RAM)
-- **Browser Control**: Web automation when needed (~500MB RAM)
-- **Docker Sandbox**: Isolated code execution (secure)
-- **Total Usage**: ~1-2GB of 30GB disk, ~500MB-1GB RAM
-
-### Data Flow Example
+### Architecture
 
 ```
-You: "Summarize this document"
-  ↓ WhatsApp (public internet)
-EC2: Receives message, authenticates with IAM
-  ↓ VPC Endpoint (private network)
-Bedrock: Claude processes document
-  ↓ VPC Endpoint (private network)
-EC2: Formats response
-  ↓ WhatsApp (public internet)
-You: Receives summary
+┌─────────────┐
+│   You       │ Send message via WhatsApp/Telegram
+└──────┬──────┘
+       │ (Internet)
+       ▼
+┌─────────────────────────────────────────────────────┐
+│  AWS Cloud                                          │
+│                                                     │
+│  ┌──────────────┐         ┌──────────────┐        │
+│  │ EC2 Instance │────────▶│   Bedrock    │        │
+│  │  (Moltbot)   │  IAM    │ (Nova/Claude)│        │
+│  └──────────────┘  Auth   └──────────────┘        │
+│         │                        │                  │
+│         │ VPC Endpoints          │                  │
+│         │ (Private Network)      │                  │
+│         ▼                        ▼                  │
+│  ┌──────────────┐         ┌──────────────┐        │
+│  │ CloudTrail   │         │ Cost Explorer│        │
+│  │ (Audit Logs) │         │ (Billing)    │        │
+│  └──────────────┘         └──────────────┘        │
+└─────────────────────────────────────────────────────┘
+       │
+       ▼ (Internet)
+┌──────────────┐
+│   You        │ Receive response
+└──────────────┘
 
-Cost: ~$0.01 per request
-Time: 2-5 seconds
-Security: All AWS traffic via private network
+Cost: ~$0.01/request | Time: 2-5s | Security: Private network
 ```
 
 **Key Components**:
-- **EC2 Instance**: Runs Clawdbot gateway and browser control
+- **EC2 Instance**: Runs Moltbot gateway (~500MB-1GB RAM)
 - **IAM Role**: Authenticates with Bedrock (no API keys)
 - **SSM Session Manager**: Secure access without public ports
 - **VPC Endpoints**: Private network access to Bedrock
-- **Lambda Pre-Check**: Validates environment before deployment
 
 ## Cost Breakdown
 
@@ -491,147 +497,24 @@ CreateVPCEndpoints: false  # For cost optimization
 
 ## Security Features
 
-### 1. IAM Role Authentication
+IAM roles eliminate API key risks. CloudTrail logs every API call. VPC Endpoints keep traffic private. Docker sandbox isolates execution.
 
-No API keys to manage. The EC2 instance uses an IAM role to authenticate with Bedrock:
-
-```json
-{
-  "Effect": "Allow",
-  "Action": [
-    "bedrock:InvokeModel",
-    "bedrock:InvokeModelWithResponseStream"
-  ],
-  "Resource": "*"
-}
-```
-
-### 2. SSM Session Manager
-
-No SSH keys needed. Access via AWS Systems Manager:
-
-- ✅ No public ports (except optional SSH fallback)
-- ✅ Automatic session logging
-- ✅ CloudTrail audit trail
-- ✅ Session timeout controls
-
-### 3. VPC Endpoints
-
-Traffic stays within AWS network:
-
-- ✅ Bedrock API calls don't go through internet
-- ✅ Lower latency
-- ✅ Compliance-friendly
-
-### 4. Docker Sandbox
-
-Non-main sessions run in isolated Docker containers:
-
-```json
-{
-  "sandbox": {
-    "mode": "non-main",
-    "allowlist": ["bash", "read", "write"],
-    "denylist": ["browser", "gateway"]
-  }
-}
-```
-
-## Monitoring & Audit
-
-### CloudTrail Logs
-
-All Bedrock API calls are automatically logged:
-
-```bash
-aws cloudtrail lookup-events \
-  --lookup-attributes AttributeKey=EventName,AttributeValue=InvokeModel \
-  --region us-west-2
-```
-
-### CloudWatch Logs
-
-```bash
-# View setup logs
-aws logs tail /var/log/clawdbot-setup.log --follow
-
-# View SSM session logs
-aws logs tail /aws/ssm/session-logs --follow
-```
-
-### Cost Monitoring
-
-```bash
-# View Bedrock costs
-aws ce get-cost-and-usage \
-  --time-period Start=2026-01-01,End=2026-01-31 \
-  --granularity DAILY \
-  --metrics BlendedCost \
-  --filter '{"Dimensions":{"Key":"SERVICE","Values":["Amazon Bedrock"]}}'
-```
+**Full details**: [SECURITY.md](SECURITY.md)
 
 ## Troubleshooting
 
-### Pre-Check Failed
+Common issues: SSM connection, Web UI token mismatch, model configuration, port forwarding.
 
-```bash
-# View Lambda logs
-aws logs tail /aws/lambda/clawdbot-bedrock-bedrock-precheck --follow
-
-# Common issues:
-# 1. Model not enabled → Enable in Bedrock Console
-# 2. Region not supported → Use us-east-1 or us-west-2
-# 3. Permission denied → Check IAM permissions
-```
-
-### Cannot Connect via SSM
-
-```bash
-# Check SSM agent status
-aws ssm describe-instance-information \
-  --filters "Key=InstanceIds,Values=$INSTANCE_ID"
-
-# Check IAM role
-aws ec2 describe-instances \
-  --instance-ids $INSTANCE_ID \
-  --query 'Reservations[0].Instances[0].IamInstanceProfile'
-```
-
-### Bedrock API Errors
-
-```bash
-# Test Bedrock access
-aws bedrock-runtime invoke-model \
-  --model-id anthropic.claude-3-5-sonnet-20241022-v2:0 \
-  --body '{"anthropic_version":"bedrock-2023-05-31","max_tokens":10,"messages":[{"role":"user","content":"Hi"}]}' \
-  --region us-west-2 \
-  output.txt
-
-# View Clawdbot logs
-journalctl --user -u clawdbot-gateway -n 100
-```
-
-## Project Structure
-
-```
-clawdbot-aws-bedrock/
-├── README.md                          # This file
-├── cloudformation/
-│   └── clawdbot-bedrock.yaml         # Main CloudFormation template
-├── scripts/
-│   ├── bedrock-precheck.sh           # Pre-deployment check script
-│   └── deploy.sh                     # Deployment helper script
-├── lambda/
-│   └── precheck/
-│       ├── index.py                  # Lambda pre-check function
-│       └── requirements.txt          # Python dependencies
-└── docs/
-    ├── DEPLOYMENT.md                 # Detailed deployment guide
-    ├── SECURITY.md                   # Security best practices
-    └── TROUBLESHOOTING.md            # Common issues and solutions
-```
+**Full guide**: [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
 
 ## Comparison with Original Moltbot
+
+### Deployment Options
+
+| Option | Monthly Cost | Best For | Deploy |
+|--------|--------------|----------|--------|
+| **Linux (Graviton)** | $39-58 | Most users, best value | [Launch →](#quick-start) |
+| **macOS (M1/M2)** | $468-792 | iOS/macOS development | [Launch →](#macos-deployment) |
 
 ### Local Deployment (Original)
 
@@ -652,6 +535,35 @@ clawdbot-aws-bedrock/
 **Scalability**: Elastic sizing (t4g.small to c7g.xlarge), orchestrate cloud resources
 
 **Bottom line**: Cloud deployment costs similar but delivers enterprise-grade security, multi-model flexibility, and unlimited scalability. For teams, one cloud instance ($50/mo) serves 10+ people vs individual ChatGPT Plus subscriptions ($200/mo).
+
+---
+
+## macOS Deployment
+
+**For iOS/macOS development teams only.** Mac instances cost $468-792/month with 24-hour minimum allocation.
+
+### When to Use
+
+- ✅ iOS/macOS app development and CI/CD
+- ✅ Xcode build automation
+- ✅ Apple ecosystem integration (iCloud, APNs)
+- ❌ General Moltbot use (Linux is 12x cheaper)
+
+### Mac Instance Options
+
+| Type | Chip | RAM | Cost/Month | Best For |
+|------|------|-----|------------|----------|
+| mac2.metal | M1 | 16GB | $468 | Standard builds |
+| mac2-m2.metal | M2 | 24GB | $632 | Latest Silicon |
+| mac2-m2pro.metal | M2 Pro | 32GB | $792 | High performance |
+
+### Deploy Mac Version
+
+Click "Launch Stack" above in the macOS section. **Important**: You must specify an Availability Zone that supports Mac instances (check AWS Console first).
+
+**Access**: Same as Linux (SSM Session Manager + port forwarding)
+
+---
 
 ## Contributing
 
@@ -680,7 +592,7 @@ This deployment template is provided as-is. Clawdbot itself is licensed under it
 
 ---
 
-**Built by builder + Kiro for AWS customers and partners** 🦞
+**Built by builder + Kiro** 🦞
 
 *90% of this project's code was generated through conversations with Kiro AI.*
 

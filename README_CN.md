@@ -14,7 +14,7 @@
 |---------------|--------|
 | 多个 API 密钥（Anthropic/OpenAI 等） | **Amazon Bedrock 统一 API + IAM** |
 | 单一模型，固定成本 | **8 个模型可选，Nova 2 Lite（对比 Anthropic 便宜 90%）** |
-| x86 硬件，固定规格 | **x86/ARM 灵活配置，推荐 Graviton（省 20-40%）** |
+| x86 硬件，固定规格 | **x86/ARM/Mac 灵活配置，推荐 Graviton ARM（省 20-40%）** |
 | Tailscale VPN | **SSM Session Manager** |
 | 手动配置 | **CloudFormation 一键部署** |
 | 无审计日志 | **CloudTrail 自动审计** |
@@ -596,7 +596,7 @@ Clawdbot 本身有独立的许可证。参见 [Clawdbot License](https://github.
 
 ---
 
-**Built by builder + Kiro for AWS customers and partners** 🦞
+**Built by builder + Kiro** 🦞
 
 *本项目 90% 的代码由 Kiro AI 通过对话生成。*
 
