@@ -33,9 +33,10 @@ English | [简体中文](README_CN.md)
 - **No vendor lock-in**: Change models without code changes or redeployment
 
 **2. Flexible Instance Sizing with Graviton Advantage (Recommended)**
-- **x86 and ARM support**: Choose between t3/c5 (x86) or t4g/c7g (Graviton ARM)
+- **x86, ARM, and Mac support**: Choose t3/c5 (x86), t4g/c7g (Graviton ARM), or mac2 (Apple Silicon)
 - **Graviton ARM recommended**: 20-40% better price-performance than x86
 - **Cost example**: t4g.medium ($24/mo) vs t3.medium ($30/mo) - same specs, 20% savings
+- **Mac for Apple development**: mac2.metal ($468/mo) for iOS/macOS workflows
 - **Flexible sizing**: Scale from t4g.small ($12/mo) to c7g.xlarge ($108/mo) as needed
 - **Energy efficient**: Graviton uses 70% less power than x86
 
@@ -102,7 +103,15 @@ Click to deploy:
 
 **After deployment (~8 minutes), check CloudFormation Outputs tab**:
 
-> **💡 Want a more fun way?** Chat with Kiro AI to deploy! Kiro will guide you through deployment and help configure your phone. [Try Kiro deployment →](QUICK_START_KIRO.md)
+---
+
+### 🎯 Want a More Fun Way to Deploy?
+
+**Chat with Kiro AI!** Kiro will guide you through deployment and help configure your phone—no commands to remember.
+
+### 👉 **[Try Kiro Deployment →](QUICK_START_KIRO.md)** 👈
+
+---
 
 1. **Install SSM Plugin**: Click link in `Step1InstallSSMPlugin` (one-time setup)
 2. **Port Forwarding**: Copy command from `Step2PortForwarding`, run on your computer (keep terminal open)
@@ -465,23 +474,29 @@ ClawdbotModel:
 ### Instance Types
 
 ```yaml
+# Linux Instances
 InstanceType:
   # Graviton (ARM) - Recommended for best price-performance
   - t4g.small   # $12/month, 2GB RAM
   - t4g.medium  # $24/month, 4GB RAM (default)
   - t4g.large   # $48/month, 8GB RAM
-  - t4g.xlarge  # $96/month, 16GB RAM
-  - c7g.large   # $54/month, 4GB RAM, compute-optimized
   - c7g.xlarge  # $108/month, 8GB RAM, compute-optimized
   
   # x86 - Alternative for broader compatibility
   - t3.small    # $15/month, 2GB RAM
   - t3.medium   # $30/month, 4GB RAM
-  - t3.large    # $60/month, 8GB RAM
-  - c5.xlarge   # $122/month, 8GB RAM, compute-optimized
+  - c5.xlarge   # $122/month, 8GB RAM
+
+# Mac Instances (separate template: clawdbot-bedrock-mac.yaml)
+MacInstanceType:
+  - mac2.metal        # $468/month, M1, 16GB RAM
+  - mac2-m2.metal     # $632/month, M2, 24GB RAM
+  - mac2-m2pro.metal  # $792/month, M2 Pro, 32GB RAM
 ```
 
-**Graviton Benefits**: ARM-based processors offer 20-40% better price-performance than x86 instances. Recommended for most workloads.
+**Graviton Benefits**: ARM-based processors offer 20-40% better price-performance than x86.
+
+**Mac Use Cases**: iOS/macOS development, Xcode automation, Apple ecosystem integration. [Learn more →](#macos-deployment)
 
 ### VPC Endpoints
 
