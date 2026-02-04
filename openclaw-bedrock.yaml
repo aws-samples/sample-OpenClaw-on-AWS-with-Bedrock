@@ -1,0 +1,649 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'OpenClaw - AWS Native Deployment (Bedrock + SSM + VPC Endpoints)'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Basic Configuration"
+        Parameters:
+          - OpenClawModel
+          - InstanceType
+          - KeyPairName
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - CreateVPCEndpoints
+          - AllowedSSHCIDR
+
+Parameters:
+  OpenClawModel:
+    Type: String
+    Default: "global.amazon.nova-2-lite-v1:0"
+    Description: "Bedrock model ID - Nova 2 Lite offers best price-performance for everyday tasks"
+    AllowedValues:
+      - "global.amazon.nova-2-lite-v1:0"
+      - "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      - "us.amazon.nova-pro-v1:0"
+      - "global.anthropic.claude-opus-4-5-20251101-v1:0"
+      - "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+      - "global.anthropic.claude-sonnet-4-20250514-v1:0"
+      - "us.deepseek.r1-v1:0"
+      - "us.meta.llama3-3-70b-instruct-v1:0"
+
+  InstanceType:
+    Type: String
+    Default: "t4g.medium"
+    Description: "Graviton (ARM) recommended for 20-40% better price-performance. x86 also supported."
+    AllowedValues:
+      - "t4g.small"
+      - "t4g.medium"
+      - "t4g.large"
+      - "t4g.xlarge"
+      - "c7g.large"
+      - "c7g.xlarge"
+      - "t3.small"
+      - "t3.medium"
+      - "t3.large"
+      - "c5.xlarge"
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "EC2 key pair for emergency SSH access"
+
+  AllowedSSHCIDR:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: "CIDR for SSH access (recommend SSM Session Manager, set to 127.0.0.1/32 to disable SSH)"
+
+  CreateVPCEndpoints:
+    Type: String
+    Default: "true"
+    Description: "Create VPC endpoints for private network access to Bedrock and SSM"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  EnableSandbox:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+
+Conditions:
+  CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
+  AllowSSH: !Not [!Equals [!Ref AllowedSSHCIDR, "127.0.0.1/32"]]
+  UseGraviton: !Or
+    - !Equals [!Select [0, !Split ['.', !Ref InstanceType]], 't4g']
+    - !Equals [!Select [0, !Split ['.', !Ref InstanceType]], 'c7g']
+    - !Equals [!Select [0, !Split ['.', !Ref InstanceType]], 'm7g']
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      AMI: "resolve-ssm"
+    us-west-2:
+      AMI: "resolve-ssm"
+    eu-west-1:
+      AMI: "resolve-ssm"
+    ap-northeast-1:
+      AMI: "resolve-ssm"
+
+Resources:
+  # ==================== Wait Condition ====================
+  OpenClawWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  OpenClawWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: OpenClawInstance
+    Properties:
+      Handle: !Ref OpenClawWaitHandle
+      Timeout: '900'
+      Count: 1
+
+  # ==================== VPC and Network ====================
+  OpenClawVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  OpenClawInternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      InternetGatewayId: !Ref OpenClawInternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.1.0/24"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-subnet"
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.2.0/24"
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-subnet"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OpenClawVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref OpenClawInternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # VPC Endpoint Security Group
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEndpoints
+    Properties:
+      GroupDescription: "Security group for VPC endpoints"
+      VpcId: !Ref OpenClawVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref OpenClawSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpce-sg"
+
+  # Bedrock Runtime VPC Endpoint
+  BedrockRuntimeVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.bedrock-runtime'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # SSM VPC Endpoint (for Session Manager)
+  SSMVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  SSMMessagesVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  EC2MessagesVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # ==================== IAM Role ====================
+  OpenClawInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - 'arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy'
+      Policies:
+        - PolicyName: BedrockAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:InvokeModelWithResponseStream'
+                  - 'bedrock:ListFoundationModels'
+                  - 'bedrock:GetFoundationModel'
+                Resource: '*'
+        - PolicyName: SSMParameterPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ssm:PutParameter'
+                  - 'ssm:GetParameter'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instance-role"
+
+  OpenClawInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref OpenClawInstanceRole
+
+  # ==================== Security Group ====================
+  OpenClawSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "OpenClaw instance security group"
+      VpcId: !Ref OpenClawVPC
+      SecurityGroupIngress:
+        - !If
+          - AllowSSH
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: !Ref AllowedSSHCIDR
+            Description: "SSH access (fallback)"
+          - !Ref AWS::NoValue
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-sg"
+
+  # ==================== EC2 Instance ====================
+  OpenClawInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !If
+        - UseGraviton
+        - !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id}}'
+        - !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}'
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref OpenClawInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref OpenClawSecurityGroup
+          SubnetId: !Ref PublicSubnet
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Remove set -e to prevent script from stopping on errors
+          
+          exec > >(tee /var/log/openclaw-setup.log)
+          exec 2>&1
+          
+          echo "=========================================="
+          echo "OpenClaw AWS Native Setup: $(date)"
+          echo "=========================================="
+          
+          export DEBIAN_FRONTEND=noninteractive
+          
+          # System update
+          echo "[1/9] Updating system..."
+          apt-get update
+          apt-get upgrade -y
+          apt-get install -y unzip curl
+          
+          # Install AWS CLI v2
+          echo "[2/9] Installing AWS CLI..."
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "aarch64" ]; then
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+          else
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          fi
+          unzip -q awscliv2.zip
+          ./aws/install
+          rm -rf aws awscliv2.zip
+          
+          # Install SSM Agent (usually pre-installed)
+          echo "[3/9] Configuring SSM Agent..."
+          snap start amazon-ssm-agent || systemctl start amazon-ssm-agent
+          
+          # Install Docker
+          echo "[4/9] Installing Docker..."
+          curl -fsSL https://get.docker.com | sh
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ubuntu
+          
+          # Install Node.js
+          echo "[5/9] Installing Node.js..."
+          sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
+          set -e
+          cd ~
+          
+          # Install NVM (with retry)
+          for i in {1..3}; do
+            if curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash; then
+              break
+            fi
+            echo "NVM installation failed, retrying $i/3..."
+            sleep 5
+          done
+          
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+          
+          # Install Node.js 22
+          nvm install 22
+          nvm use 22
+          nvm alias default 22
+          
+          # Install OpenClaw (with timeout and retry)
+          npm config set registry https://registry.npmjs.org/
+          npm install -g openclaw@latest --timeout=300000 || {
+            echo "OpenClaw installation failed, retrying..."
+            npm cache clean --force
+            npm install -g openclaw@latest --timeout=300000
+          }
+          
+          if ! grep -q 'NVM_DIR' ~/.bashrc; then
+              echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc
+              echo '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> ~/.bashrc
+          fi
+          UBUNTU_SCRIPT
+          
+          # Configure AWS region
+          echo "[6/9] Configuring AWS..."
+          TOKEN_IMDS=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
+          if [ -n "$TOKEN_IMDS" ]; then
+            REGION=$(curl -H "X-aws-ec2-metadata-token: $TOKEN_IMDS" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
+          else
+            REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
+          fi
+          
+          # Fallback if metadata service fails
+          if [ -z "$REGION" ]; then
+            REGION="${AWS::Region}"
+          fi
+          
+          echo "Detected region: $REGION"
+          sudo -u ubuntu aws configure set region "$REGION" || echo "AWS configure failed, continuing..."
+          sudo -u ubuntu aws configure set output json || echo "AWS configure failed, continuing..."
+          
+          # Configure environment variables
+          echo "[7/9] Configuring environment variables..."
+          cat >> /home/ubuntu/.bashrc << 'EOF'
+          export AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+          export AWS_PROFILE=default
+          export OPENCLAW_MODEL="${OpenClawModel}"
+          export OPENCLAW_USE_BEDROCK=true
+          EOF
+          
+          # 启用 systemd linger
+          loginctl enable-linger ubuntu
+          systemctl start user@1000.service
+          
+          # 运行 OpenClaw onboarding
+          echo "[8/9] Configuring OpenClaw..."
+          
+          # Create config directory
+          sudo -u ubuntu mkdir -p /home/ubuntu/.openclaw
+          
+          # Generate Gateway Token
+          GATEWAY_TOKEN=$(openssl rand -hex 24)
+          
+          # Get AWS region (using IMDSv2)
+          TOKEN_IMDS=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null)
+          if [ -n "$TOKEN_IMDS" ]; then
+            AWS_REGION=$(curl -H "X-aws-ec2-metadata-token: $TOKEN_IMDS" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+            INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN_IMDS" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+          else
+            AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+            INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+          fi
+          
+          # Fallback
+          AWS_REGION=${!AWS_REGION:-"${AWS::Region}"}
+          INSTANCE_ID=${!INSTANCE_ID:-"unknown"}
+          
+          # Create Bedrock configuration file
+          sudo -u ubuntu cat > /home/ubuntu/.openclaw/openclaw.json << 'JSONEOF'
+          {
+            "gateway": {
+              "mode": "local",
+              "port": 18789,
+              "bind": "loopback",
+              "controlUi": {
+                "enabled": true,
+                "allowInsecureAuth": true
+              },
+              "auth": {
+                "mode": "token",
+                "token": "GATEWAY_TOKEN_PLACEHOLDER"
+              }
+            },
+            "models": {
+              "providers": {
+                "amazon-bedrock": {
+                  "baseUrl": "https://bedrock-runtime.REGION_PLACEHOLDER.amazonaws.com",
+                  "api": "bedrock-converse-stream",
+                  "auth": "aws-sdk",
+                  "models": [
+                    {
+                      "id": "MODEL_ID_PLACEHOLDER",
+                      "name": "Bedrock Model",
+                      "input": ["text", "image"],
+                      "contextWindow": 200000,
+                      "maxTokens": 8192
+                    }
+                  ]
+                }
+              }
+            },
+            "agents": {
+              "defaults": {
+                "model": {
+                  "primary": "amazon-bedrock/MODEL_ID_PLACEHOLDER"
+                }
+              }
+            }
+          }
+          JSONEOF
+          
+          # Replace placeholders
+          sed -i "s/GATEWAY_TOKEN_PLACEHOLDER/$GATEWAY_TOKEN/g" /home/ubuntu/.openclaw/openclaw.json
+          sed -i "s/REGION_PLACEHOLDER/$AWS_REGION/g" /home/ubuntu/.openclaw/openclaw.json
+          sed -i "s|MODEL_ID_PLACEHOLDER|${OpenClawModel}|g" /home/ubuntu/.openclaw/openclaw.json
+          
+          # Install daemon (sandbox config removed - not supported)
+          sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -c '
+          export HOME=/home/ubuntu
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+          openclaw daemon install || echo "Daemon install failed"
+          '
+          
+          # Save token
+          echo "$GATEWAY_TOKEN" > /home/ubuntu/.openclaw/gateway_token.txt
+          chown ubuntu:ubuntu /home/ubuntu/.openclaw/gateway_token.txt
+          
+          # Get instance ID and region (using IMDSv2)
+          TOKEN_IMDS=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN_IMDS" http://169.254.169.254/latest/meta-data/instance-id)
+          
+          # Save to SSM Parameter Store (so CloudFormation can retrieve it)
+          STACK_NAME="${AWS::StackName}"
+          aws ssm put-parameter \
+            --name "/openclaw/$STACK_NAME/gateway-token" \
+            --value "$GATEWAY_TOKEN" \
+            --type "SecureString" \
+            --region $AWS_REGION \
+            --overwrite || echo "Failed to save token to SSM"
+          
+          # Save instance info
+          echo "$INSTANCE_ID" > /home/ubuntu/.openclaw/instance_id.txt
+          echo "$AWS_REGION" > /home/ubuntu/.openclaw/region.txt
+          
+          # Create complete access instructions
+          echo "OpenClaw Access Instructions" > /home/ubuntu/ACCESS_INSTRUCTIONS.txt
+          echo "Run on LOCAL: aws ssm start-session --target $INSTANCE_ID --region $AWS_REGION --document-name AWS-StartPortForwardingSession --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'" >> /home/ubuntu/ACCESS_INSTRUCTIONS.txt
+          echo "Then open: http://localhost:18789/?token=$GATEWAY_TOKEN" >> /home/ubuntu/ACCESS_INSTRUCTIONS.txt
+          chown ubuntu:ubuntu /home/ubuntu/ACCESS_INSTRUCTIONS.txt
+          
+          # Create SSM access script
+          cat > /home/ubuntu/ssm-portforward.sh << 'EOF'
+          #!/bin/bash
+          INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+          REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+          TOKEN=$(cat /home/ubuntu/.openclaw/gateway_token.txt)
+          
+          echo "=========================================="
+          echo "OpenClaw SSM Port Forwarding"
+          echo "=========================================="
+          echo ""
+          echo "Run on your local computer:"
+          echo ""
+          echo "aws ssm start-session \\"
+          echo "  --target $INSTANCE_ID \\"
+          echo "  --region $REGION \\"
+          echo "  --document-name AWS-StartPortForwardingSession \\"
+          echo "  --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'"
+          echo ""
+          echo "Then open in browser:"
+          echo "http://localhost:18789/?token=$TOKEN"
+          echo ""
+          echo "=========================================="
+          EOF
+          chmod +x /home/ubuntu/ssm-portforward.sh
+          chown ubuntu:ubuntu /home/ubuntu/ssm-portforward.sh
+          
+          # 完成
+          echo "[9/9] Complete!"
+          echo "SUCCESS" > /home/ubuntu/.openclaw/setup_status.txt
+          echo "Setup completed: $(date)" >> /home/ubuntu/.openclaw/setup_status.txt
+          echo "Token: $GATEWAY_TOKEN" >> /home/ubuntu/.openclaw/setup_status.txt
+          
+          # Install cfn-bootstrap tools (for cfn-signal)
+          echo "[9/9] Installing cfn-bootstrap and signaling..."
+          apt-get install -y python3-pip 2>&1 | tee -a /var/log/openclaw-setup.log
+          pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz 2>&1 | tee -a /var/log/openclaw-setup.log
+          
+          # Find cfn-signal location
+          CFN_SIGNAL=$(which cfn-signal 2>/dev/null || find /usr -name cfn-signal 2>/dev/null | head -1)
+          
+          # Create complete URL
+          COMPLETE_URL="http://localhost:18789/?token=$GATEWAY_TOKEN"
+          
+          # Signal CloudFormation
+          if [ -n "$CFN_SIGNAL" ]; then
+            echo "Using cfn-signal: $CFN_SIGNAL"
+            $CFN_SIGNAL -e 0 -d "$COMPLETE_URL" -r "OpenClaw ready" '${OpenClawWaitHandle}'
+          else
+            echo "cfn-signal not found, using curl"
+            SIGNAL_JSON="{\"Status\":\"SUCCESS\",\"Reason\":\"OpenClaw ready\",\"UniqueId\":\"openclaw\",\"Data\":\"$COMPLETE_URL\"}"
+            curl -X PUT -H 'Content-Type:' --data-binary "$SIGNAL_JSON" '${OpenClawWaitHandle}'
+          fi
+          
+          echo "Signal sent successfully"
+          
+          echo "=========================================="
+          echo "OpenClaw installation complete!"
+          echo "Token: $GATEWAY_TOKEN"
+          echo "=========================================="
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instance"
+
+Outputs:
+  Step1InstallSSMPlugin:
+    Description: "STEP 1: Install SSM Session Manager Plugin on your local computer"
+    Value: "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+
+  Step2PortForwarding:
+    Description: "STEP 2: Run this command on LOCAL computer (keep terminal open)"
+    Value: !Sub |
+      aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
+
+  Step3AccessURL:
+    Description: "STEP 3: Open this URL in browser"
+    Value: !Select 
+      - 1
+      - !Split 
+        - '":"'
+        - !Select 
+          - 0
+          - !Split 
+            - '"}'
+            - !GetAtt OpenClawWaitCondition.Data
+
+  Step4StartChatting:
+    Description: "STEP 4: Start using OpenClaw!"
+    Value: "Connect WhatsApp, Telegram, Discord. See README: https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock"
+
+  InstanceId:
+    Description: "EC2 Instance ID (for reference)"
+    Value: !Ref OpenClawInstance
+
+  BedrockModel:
+    Description: "Bedrock model in use"
+    Value: !Ref OpenClawModel
+
+  MonthlyCost:
+    Description: "Estimated monthly cost (USD)"
+    Value: !Sub |
+      EC2 (${InstanceType}): ~$30-40
+      EBS (30GB): ~$2.40
+      VPC Endpoints: ${!If [CreateEndpoints, "~$22 ($0.01/hour per endpoint)", "$0"]}
+      Bedrock: Pay-per-use
+      Total: ~${!If [CreateEndpoints, "$55-65", "$33-43"]}/month
