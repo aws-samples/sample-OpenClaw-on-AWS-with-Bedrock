@@ -91,25 +91,25 @@ Mappings:
   MacAMIMap:
     us-east-1:
       ARM64: "ami-0420d6d86c005f1a6"
-      x86: "ami-0420d6d86c005f1a6"
+      x86: "ami-007ae6b9518910424"
     us-east-2:
-      ARM64: "ami-0c3778f70773e4e07"
-      x86: "ami-0c3778f70773e4e07"
+      ARM64: "ami-02de3974c61164b3c"
+      x86: "ami-04b891889e8b23d1d"
     us-west-2:
-      ARM64: "ami-0b819b7d6ae776d4e"
-      x86: "ami-0b819b7d6ae776d4e"
+      ARM64: "ami-0b3b28bdf71ca43d4"
+      x86: "ami-041e81610d6df2fcd"
     eu-west-1:
-      ARM64: "ami-063bab20ad71743f0"
-      x86: "ami-063bab20ad71743f0"
+      ARM64: "ami-08ccb3b977f98a0fc"
+      x86: "ami-0f3a6a8ca5f03c8cb"
     eu-central-1:
-      ARM64: "ami-0dc7194f5dead7614"
-      x86: "ami-0dc7194f5dead7614"
+      ARM64: "ami-05c7cca6b0d6bf9ba"
+      x86: "ami-0d827239b6896853e"
     ap-southeast-1:
-      ARM64: "ami-08b109887921984aa"
-      x86: "ami-08b109887921984aa"
+      ARM64: "ami-02486ff6934614a95"
+      x86: "ami-0fcb40a10e9f9b91c"
     ap-southeast-2:
-      ARM64: "ami-058d03e0176f2725a"
-      x86: "ami-058d03e0176f2725a"
+      ARM64: "ami-08e7e67c40304cadf"
+      x86: "ami-07020a94c8d2684e2"
 
 Resources:
   # ==================== Wait Condition ====================
