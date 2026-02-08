@@ -29,6 +29,7 @@ Parameters:
       - "global.amazon.nova-2-lite-v1:0"
       - "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
       - "us.amazon.nova-pro-v1:0"
+      - "global.anthropic.claude-opus-4-6-v1"
       - "global.anthropic.claude-opus-4-5-20251101-v1:0"
       - "global.anthropic.claude-haiku-4-5-20251001-v1:0"
       - "global.anthropic.claude-sonnet-4-20250514-v1:0"
@@ -384,7 +385,21 @@ Resources:
           # Get current user (ec2-user on Mac instances)
           CURRENT_USER="ec2-user"
           USER_HOME="/Users/$CURRENT_USER"
-          
+
+          # Detect region and instance ID once (IMDSv2)
+          echo "[*] Detecting instance metadata..."
+          IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
+          if [ -n "$IMDS_TOKEN" ]; then
+            AWS_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
+            INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
+          else
+            AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
+            INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
+          fi
+          AWS_REGION=${!AWS_REGION:-"${AWS::Region}"}
+          INSTANCE_ID=${!INSTANCE_ID:-"unknown"}
+          echo "Region: $AWS_REGION | Instance: $INSTANCE_ID"
+
           # System update via softwareupdate
           echo "[1/9] Checking for system updates..."
           softwareupdate --list 2>/dev/null || true
@@ -461,28 +476,15 @@ Resources:
           
           # Configure AWS region
           echo "[5/9] Configuring AWS..."
-          TOKEN_IMDS=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
-          if [ -n "$TOKEN_IMDS" ]; then
-            REGION=$(curl -H "X-aws-ec2-metadata-token: $TOKEN_IMDS" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
-          else
-            REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
-          fi
-          
-          # Fallback if metadata service fails
-          if [ -z "$REGION" ]; then
-            REGION="${AWS::Region}"
-          fi
-          
-          echo "Detected region: $REGION"
-          sudo -u $CURRENT_USER aws configure set region "$REGION" || echo "AWS configure failed, continuing..."
+          sudo -u $CURRENT_USER aws configure set region "$AWS_REGION" || echo "AWS configure failed, continuing..."
           sudo -u $CURRENT_USER aws configure set output json || echo "AWS configure failed, continuing..."
           
           # Configure environment variables
           echo "[6/9] Configuring environment variables..."
-          cat >> $USER_HOME/.zshrc << 'EOF'
-          export AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "us-east-1")
+          cat >> $USER_HOME/.zshrc << EOF
+          export AWS_REGION=$AWS_REGION
           export AWS_PROFILE=default
-          export OPENCLAW_MODEL="${OpenClawModel}"
+          export OPENCLAW_MODEL=${OpenClawModel}
           export OPENCLAW_USE_BEDROCK=true
           EOF
           
@@ -494,20 +496,6 @@ Resources:
           
           # Generate Gateway Token
           GATEWAY_TOKEN=$(openssl rand -hex 24)
-          
-          # Get AWS region (using IMDSv2)
-          TOKEN_IMDS=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null)
-          if [ -n "$TOKEN_IMDS" ]; then
-            AWS_REGION=$(curl -H "X-aws-ec2-metadata-token: $TOKEN_IMDS" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
-            INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN_IMDS" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
-          else
-            AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
-            INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
-          fi
-          
-          # Fallback
-          AWS_REGION=${!AWS_REGION:-"${AWS::Region}"}
-          INSTANCE_ID=${!INSTANCE_ID:-"unknown"}
           
           # Create Bedrock configuration file
           sudo -u $CURRENT_USER cat > $USER_HOME/.openclaw/openclaw.json << 'JSONEOF'
