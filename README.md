@@ -599,7 +599,7 @@ This deployment template is provided as-is. Clawdbot itself is licensed under it
 
 - **openclaw Issues**: [GitHub Issues](https://github.com/openclaw/openclaw/issues)
 - **AWS Bedrock**: [AWS re:Post](https://repost.aws/tags/bedrock)
-- **This Project**: [GitHub Issues](https://github.com/your-repo/clawdbot-aws-bedrock/issues)
+- **This Project**: [GitHub Issues](https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/issues)
 
 ---
 
