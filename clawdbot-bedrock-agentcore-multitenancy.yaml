@@ -565,7 +565,13 @@ Resources:
 
           snap start amazon-ssm-agent || systemctl start amazon-ssm-agent
 
-          curl -fsSL https://get.docker.com | sh
+          # Install Docker via GPG-signed apt repo
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+          chmod a+r /etc/apt/keyrings/docker.asc
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+          apt-get update
+          apt-get install -y docker-ce docker-ce-cli containerd.io
           systemctl enable docker
           systemctl start docker
           usermod -aG docker ubuntu
@@ -573,12 +579,15 @@ Resources:
           sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
           set -e
           cd ~
-          for i in {1..3}; do
-            if curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash; then
-              break
-            fi
+          # Install NVM (download first, then execute)
+          NVM_VERSION="v0.40.1"
+          for i in 1 2 3; do
+            curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${!NVM_VERSION}/install.sh" -o /tmp/nvm-install.sh && break
+            echo "NVM download attempt $i failed, retrying in 5s..."
             sleep 5
           done
+          bash /tmp/nvm-install.sh
+          rm -f /tmp/nvm-install.sh
           export NVM_DIR="$HOME/.nvm"
           [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
           nvm install 22

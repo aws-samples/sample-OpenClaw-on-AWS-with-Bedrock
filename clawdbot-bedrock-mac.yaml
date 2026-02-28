@@ -462,8 +462,11 @@ Resources:
           sudo -u $CURRENT_USER bash << 'USERSCRIPT'
           cd ~
           
-          # Install NVM
-          curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+          # Install NVM (download first, then execute)
+          NVM_VERSION="v0.40.1"
+          curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${!NVM_VERSION}/install.sh" -o /tmp/nvm-install.sh
+          bash /tmp/nvm-install.sh
+          rm -f /tmp/nvm-install.sh
           
           export NVM_DIR="$HOME/.nvm"
           [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
