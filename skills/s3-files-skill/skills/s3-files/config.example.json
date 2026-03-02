@@ -1,0 +1,6 @@
+{
+  "bucketName": "YOUR-S3-BUCKET-NAME",
+  "region": "us-west-2",
+  "defaultExpirationHours": 24,
+  "maxUploadSizeMB": 100
+}

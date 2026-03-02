@@ -1,0 +1,29 @@
+{
+  "name": "openclaw-s3-files-skill",
+  "version": "1.0.0",
+  "description": "OpenClaw skill for secure file sharing via Amazon S3 with pre-signed URLs",
+  "main": "upload.js",
+  "scripts": {
+    "upload": "node upload.js",
+    "download-url": "node download-url.js",
+    "upload-page": "node generate-upload-page.js"
+  },
+  "keywords": [
+    "openclaw",
+    "aws",
+    "s3",
+    "file-sharing",
+    "pre-signed-urls",
+    "skill"
+  ],
+  "author": "AWS Samples",
+  "license": "MIT-0",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/s3-request-presigner": "^3.0.0",
+    "@aws-sdk/s3-presigned-post": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
