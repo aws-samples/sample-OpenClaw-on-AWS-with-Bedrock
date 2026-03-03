@@ -19,11 +19,6 @@ Metadata:
         Parameters:
           - CreateVPCEndpoints
           - AllowedSSHCIDR
-      - Label:
-          default: "S3 Files Skill Configuration"
-        Parameters:
-          - CreateS3Bucket
-          - InstallS3FilesSkill
 
 Parameters:
   OpenClawModel:
@@ -82,26 +77,9 @@ Parameters:
     Type: String
     Default: "true"
     Description: "Install Docker for sandboxed execution (recommended for group chats)"
-  CreateS3Bucket:
-    Type: String
-    Default: "true"
-    Description: "Create S3 bucket for S3 Files Skill with pre-configured security settings"
-    AllowedValues:
-      - "true"
-      - "false"
-
-  InstallS3FilesSkill:
-    Type: String
-    Default: "true"
-    Description: "Install S3 Files Skill during deployment. If CreateS3Bucket=false, you must manually configure bucket name after deployment."
-    AllowedValues:
-      - "true"
-      - "false"
 
 Conditions:
   CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
-  CreateS3Resources: !Equals [!Ref CreateS3Bucket, "true"]
-  InstallSkill: !Equals [!Ref InstallS3FilesSkill, "true"]
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, "none"]]
   AllowSSH: !And
     - !Not [!Equals [!Ref AllowedSSHCIDR, ""]]
@@ -168,40 +146,6 @@ Resources:
       Handle: !Ref OpenClawWaitHandle
       Timeout: '900'
       Count: 1
-
-  # ==================== S3 Bucket for Files Skill ====================
-  OpenClawFilesBucket:
-    Type: AWS::S3::Bucket
-    Condition: CreateS3Resources
-    Properties:
-      BucketName: !Sub "${AWS::StackName}-openclaw-files"
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      VersioningConfiguration:
-        Status: Enabled
-      LifecycleConfiguration:
-        Rules:
-          - Id: DeleteOldUploads
-            Status: Enabled
-            Prefix: uploads/
-            ExpirationInDays: 7
-            NoncurrentVersionExpirationInDays: 1
-          - Id: DeleteOldUploadPages
-            Status: Enabled
-            Prefix: upload-page-
-            ExpirationInDays: 1
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-files"
-        - Key: Purpose
-          Value: "OpenClaw S3 Files Skill"
 
   # ==================== VPC and Network ====================
   OpenClawVPC:
@@ -382,23 +326,6 @@ Resources:
                   - 'ssm:PutParameter'
                   - 'ssm:GetParameter'
                 Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*'
-        - !If
-          - CreateS3Resources
-          - PolicyName: S3FilesSkillPolicy
-            PolicyDocument:
-              Version: '2012-10-17'
-              Statement:
-                - Effect: Allow
-                  Action:
-                    - 's3:PutObject'
-                    - 's3:GetObject'
-                    - 's3:DeleteObject'
-                  Resource: !Sub '${OpenClawFilesBucket.Arn}/*'
-                - Effect: Allow
-                  Action:
-                    - 's3:ListBucket'
-                  Resource: !GetAtt OpenClawFilesBucket.Arn
-          - !Ref AWS::NoValue
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance-role"
@@ -674,7 +601,7 @@ Resources:
           export NVM_DIR="$HOME/.nvm"
           [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
           openclaw gateway install || echo "Gateway install failed"
-          systemctl --user start openclaw-gateway.service || openclaw gateway || echo "Gateway start failed"
+          systemctl --user start openclaw-gateway.service || { openclaw gateway & } || echo "Gateway start failed"
           '
           
           # Wait for daemon to be ready and verify port 18789 is listening
@@ -718,11 +645,9 @@ Resources:
           # Enable Slack
           openclaw plugins enable slack || echo "Slack plugin enable failed"
           
-          # Enable iMessage
-          openclaw plugins enable imessage || echo "iMessage plugin enable failed"
-          
-          # Enable Google Chat
-          openclaw plugins enable googlechat || echo "Google Chat plugin enable failed"
+          # iMessage and Google Chat disabled (not available on Linux)
+          # openclaw plugins enable imessage
+          # openclaw plugins enable googlechat
           '
           
           # Save token
@@ -802,86 +727,6 @@ Resources:
           
           echo "Signal sent successfully"
           
-          # Install S3 Files Skill (conditional)
-          if [ "${InstallS3FilesSkill}" = "true" ]; then
-            echo "[*] Installing S3 Files Skill..."
-            echo "Waiting for OpenClaw workspace directory to be created..."
-            
-            # Wait for OpenClaw gateway to create workspace directory (can take 2-5 minutes)
-            WORKSPACE_READY=false
-            for i in $(seq 1 300); do
-              if [ -d /home/ubuntu/.openclaw/workspace ]; then
-                echo "✓ Workspace ready after $i seconds"
-                WORKSPACE_READY=true
-                break
-              fi
-              if [ $((i % 30)) -eq 0 ]; then
-                echo "  Still waiting for workspace... ($i/300 seconds)"
-              fi
-              sleep 1
-            done
-            
-            # Fallback: create workspace manually if it still doesn't exist
-            if [ "$WORKSPACE_READY" = "false" ]; then
-              echo "⚠ Workspace not created after 5 minutes, creating manually..."
-              sudo -u ubuntu mkdir -p /home/ubuntu/.openclaw/workspace
-            fi
-            
-            sudo -u ubuntu bash << 'S3_SKILL_SCRIPT'
-            export HOME=/home/ubuntu
-            export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-            
-            # Ensure workspace and skills directory exist
-            mkdir -p /home/ubuntu/.openclaw/workspace/skills
-            cd /home/ubuntu/.openclaw/workspace/skills
-            
-            # Clone just the skill directory using sparse checkout
-            echo "Cloning S3 Files Skill from repository..."
-            git clone --depth 1 --no-checkout https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock.git temp-repo 2>&1
-            cd temp-repo
-            git sparse-checkout set skills/s3-files-skill/skills/s3-files 2>&1
-            git checkout 2>&1
-            
-            # Move skill to correct location
-            mv skills/s3-files-skill/skills/s3-files ../s3-files
-            cd ..
-            rm -rf temp-repo
-            
-            # Install dependencies
-            cd s3-files
-            echo "Installing skill dependencies..."
-            npm install 2>&1
-            
-            # Configure bucket
-            if [ "${CreateS3Bucket}" = "true" ]; then
-              # Use CFN-created bucket
-              echo "Configuring skill with CloudFormation-created bucket..."
-              cat > config.json <<EOF
-          {
-            "bucketName": "${AWS::StackName}-openclaw-files",
-            "region": "${AWS::Region}",
-            "defaultExpirationHours": 24,
-            "maxUploadSizeMB": 100
-          }
-          EOF
-              echo "S3 Files Skill configured with bucket: ${AWS::StackName}-openclaw-files"
-            else
-              # Create example config (user must edit)
-              echo "Creating example config (user must configure bucket)..."
-              cp config.example.json config.json
-              echo "WARNING: S3 Files Skill installed but NOT configured!"
-              echo "EDIT ~/.openclaw/workspace/skills/s3-files/config.json with your bucket name"
-            fi
-            
-            echo "S3 Files Skill installation complete"
-          S3_SKILL_SCRIPT
-            
-            echo "S3 Files Skill installed successfully"
-          else
-            echo "Skipping S3 Files Skill installation (InstallS3FilesSkill=false)"
-          fi
-          
           echo "=========================================="
           echo "OpenClaw installation complete!"
           echo "Token: $GATEWAY_TOKEN"
@@ -940,19 +785,3 @@ Outputs:
   InstanceArchitecture:
     Description: "Instance architecture"
     Value: !FindInMap [ArchitectureMap, !Ref InstanceType, Arch]
-
-  S3BucketName:
-    Condition: CreateS3Resources
-    Description: "S3 bucket for S3 Files Skill (configure in skills/s3-files/config.json)"
-    Value: !Ref OpenClawFilesBucket
-    Export:
-      Name: !Sub "${AWS::StackName}-S3FilesBucket"
-
-  S3BucketArn:
-    Condition: CreateS3Resources
-    Description: "ARN of S3 Files bucket"
-    Value: !GetAtt OpenClawFilesBucket.Arn
-
-  S3FilesSkillInstalled:
-    Description: "S3 Files Skill installation status"
-    Value: !If [InstallSkill, "Installed and configured", "Not installed (set InstallS3FilesSkill=true to enable)"]
