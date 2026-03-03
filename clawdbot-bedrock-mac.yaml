@@ -84,6 +84,36 @@ Conditions:
   AllowSSH: !And
     - !Not [!Equals [!Ref AllowedSSHCIDR, ""]]
     - !Not [!Equals [!Ref KeyPairName, "none"]]
+  # Bedrock Mantle supported regions: https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html#bedrock-mantle-supported
+  # !Or supports max 10 conditions; split into two nested groups
+  IsUsEast1: !Equals [ !Ref "AWS::Region", "us-east-1" ]
+  IsUsEast2: !Equals [ !Ref "AWS::Region", "us-east-2" ]
+  IsUsWest2: !Equals [ !Ref "AWS::Region", "us-west-2" ]
+  IsApSoutheast3: !Equals [ !Ref "AWS::Region", "ap-southeast-3" ]
+  IsApSouth1: !Equals [ !Ref "AWS::Region", "ap-south-1" ]
+  IsApNortheast1: !Equals [ !Ref "AWS::Region", "ap-northeast-1" ]
+  IsEuCentral1: !Equals [ !Ref "AWS::Region", "eu-central-1" ]
+  IsEuWest1: !Equals [ !Ref "AWS::Region", "eu-west-1" ]
+  IsEuWest2: !Equals [ !Ref "AWS::Region", "eu-west-2" ]
+  IsEuSouth1: !Equals [ !Ref "AWS::Region", "eu-south-1" ]
+  IsEuNorth1: !Equals [ !Ref "AWS::Region", "eu-north-1" ]
+  IsSaEast1: !Equals [ !Ref "AWS::Region", "sa-east-1" ]
+  IsMantleSupportedRegion: !Or
+    - !Or
+      - Condition: IsUsEast1
+      - Condition: IsUsEast2
+      - Condition: IsUsWest2
+      - Condition: IsApSoutheast3
+      - Condition: IsApSouth1
+      - Condition: IsApNortheast1
+    - !Or
+      - Condition: IsEuCentral1
+      - Condition: IsEuWest1
+      - Condition: IsEuWest2
+      - Condition: IsEuSouth1
+      - Condition: IsEuNorth1
+      - Condition: IsSaEast1
+  CreateMantleEndpoint: !And [ Condition: CreateEndpoints, Condition: IsMantleSupportedRegion ]
   UseAppleSilicon: !Or
     - !Equals [!Ref MacInstanceType, "mac2.metal"]
     - !Equals [!Ref MacInstanceType, "mac2-m2.metal"]
@@ -228,7 +258,7 @@ Resources:
   # Bedrock Mantle VPC Endpoint (OpenAI-compatible API for Project Mantle models like Kimi K2.5)
   BedrockMantleVPCEndpoint:
     Type: AWS::EC2::VPCEndpoint
-    Condition: CreateEndpoints
+    Condition: CreateMantleEndpoint
     Properties:
       VpcId: !Ref OpenClawVPC
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.bedrock-mantle'

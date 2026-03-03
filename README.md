@@ -141,6 +141,12 @@ Click to deploy:
 
 > **Note**: Using Global CRIS profiles - works in 30+ regions worldwide. Deploy in any region, requests auto-route to optimal locations.
 
+**🇨🇳 AWS China Region (Beijing/Ningxia)**
+
+For AWS China deployments using SiliconFlow (DeepSeek, Qwen, GLM) instead of Bedrock. Download [`clawdbot-china.yaml`](clawdbot-china.yaml) and upload via CloudFormation console.
+
+**[→ Full China deployment guide (中国区部署指南)](DEPLOYMENT_CN.md)**
+
 **After deployment (~8 minutes), check CloudFormation Outputs tab**:
 
 ---
@@ -279,15 +285,7 @@ Install on your EC2 instance to forward messages between Feishu and openclaw via
 
 #### Community Skills
 
-Looking for optional third-party extensions? See [Community Skills](COMMUNITY_SKILLS.md).
-
-Featured: [openclaw-aws-backup-skill](https://github.com/genedragon/openclaw-aws-backup-skill) for S3 backup/restore with optional KMS encryption.
-
-#### Kiro CLI Skill 
-Featured: [openclaw-kirocli-skill](skills/openclaw-kirocli-skill/) - Deep integration with AWS Kiro CLI for AI-powered coding tasks.
-
-#### S3 Files Skill
-Featured: [s3-files-skill](skills/s3-files-skill/) - Upload and share files via S3 with time-limited pre-signed URLs. Generate download links, create upload pages for receiving files, and manage secure file sharing without exposing S3 buckets publicly.
+Looking for optional extensions? See [Community Skills](COMMUNITY_SKILLS.md) for skills like [S3 backup/restore](https://github.com/genedragon/openclaw-aws-backup-skill), [Kiro CLI integration](skills/openclaw-kirocli-skill/), and [S3 file sharing](skills/s3-files-skill/).
 
 ### Using openclaw
 
