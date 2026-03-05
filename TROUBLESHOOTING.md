@@ -37,8 +37,8 @@ XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u openclaw-gateway.service -n 
 # Check configuration
 cat ~/.openclaw/openclaw.json | python3 -m json.tool
 
-# Get gateway token
-cat ~/.openclaw/gateway_token.txt
+# Get gateway token from SSM Parameter Store
+bash ~/ssm-portforward.sh
 
 # Test Bedrock connection
 REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
@@ -119,8 +119,8 @@ aws ssm start-session \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 
-# 3. Get correct token (on EC2)
-cat ~/.clawdbot/gateway_token.txt
+# 3. Get correct token (on EC2, via SSM Parameter Store)
+bash ~/ssm-portforward.sh
 
 # 4. Clear browser cache
 # Chrome: Cmd+Shift+Delete (Mac) or Ctrl+Shift+Delete (Windows)
@@ -482,8 +482,11 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop clawdbot-gateway
 # Backup old config
 cp ~/.clawdbot/clawdbot.json ~/.clawdbot/clawdbot.json.backup.$(date +%s)
 
-# Get current values
-TOKEN=$(cat ~/.clawdbot/gateway_token.txt)
+# Get current values (token from SSM Parameter Store)
+IMDS_TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+STACK_NAME=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=aws:cloudformation:stack-name" --query "Tags[0].Value" --output text --region $REGION)
+TOKEN=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/gateway-token" --with-decryption --query Parameter.Value --output text --region $REGION)
 REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
 
 # Recreate config
@@ -643,7 +646,7 @@ cat /tmp/diagnostic-info.txt
 
 ```
 /home/ubuntu/.clawdbot/clawdbot.json          # Main configuration
-/home/ubuntu/.clawdbot/gateway_token.txt      # Gateway token
+# Gateway token: stored in SSM Parameter Store (not on disk)
 /home/ubuntu/.clawdbot/setup_status.txt       # Setup completion status
 /var/log/clawdbot-setup.log                   # Installation log
 /tmp/clawdbot/clawdbot-YYYY-MM-DD.log        # Daily logs
@@ -671,8 +674,8 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart clawdbot-gateway
 # Config
 cat ~/.clawdbot/clawdbot.json
 
-# Token
-cat ~/.clawdbot/gateway_token.txt
+# Token (from SSM Parameter Store)
+bash ~/ssm-portforward.sh
 
 # Test Bedrock
 aws bedrock-runtime invoke-model \

@@ -117,8 +117,9 @@
 
 1. **安装 SSM 插件**：点击 `Step1InstallSSMPlugin` 链接（一次性）
 2. **端口转发**：复制 `Step2PortForwarding` 命令，在本地运行（保持终端打开）
-3. **打开 URL**：复制 `Step3AccessURL`，在浏览器打开（已含 token）
-4. **开始使用**：在 Web UI 连接 WhatsApp/Telegram/Discord
+3. **获取 Token**：运行 `Step3GetToken` 中的命令，从 SSM Parameter Store 获取 token
+4. **打开 URL**：在浏览器打开 `http://localhost:18789/?token=<你的token>`
+5. **开始使用**：在 Web UI 连接 WhatsApp/Telegram/Discord
 
 ![CloudFormation 输出](images/20260128-105244.jpeg)
 ![openclaw Web UI](images/20260128-105059.jpg)
@@ -156,8 +157,16 @@ aws ssm start-session \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 
-# 在浏览器打开（token 在 CloudFormation 输出 Step3AccessURL 中）
-http://localhost:18789/?token=<你的token>
+# 从 SSM Parameter Store 获取 token
+TOKEN=$(aws ssm get-parameter \
+  --name /openclaw/openclaw-bedrock/gateway-token \
+  --with-decryption \
+  --query Parameter.Value \
+  --output text \
+  --region us-west-2)
+
+# 在浏览器打开
+http://localhost:18789/?token=$TOKEN
 ```
 
 ## 如何使用 openclaw

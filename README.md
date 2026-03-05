@@ -109,15 +109,15 @@ Choose this if you need:
 **Just 3 steps**:
 1. ✅ Click "Launch Stack" button below
 2. ✅ Select your EC2 key pair in the form
-3. ✅ Wait ~8 minutes → Check "Outputs" tab → Copy URL → Start using!
+3. ✅ Wait ~8 minutes → Check "Outputs" tab → Retrieve token from SSM → Start using!
 
 **What happens automatically**:
 - Creates VPC, subnets, security groups
 - Launches EC2 instance
 - Installs Node.js, openclaw
 - Configures Bedrock integration
-- Generates secure gateway token
-- Outputs ready-to-use URL with token
+- Generates secure gateway token (stored in SSM Parameter Store)
+- Outputs SSM retrieval command for token
 
 Click to deploy:
 
@@ -161,8 +161,9 @@ For AWS China deployments using SiliconFlow (DeepSeek, Qwen, GLM) instead of Bed
 
 1. **Install SSM Plugin**: Click link in `Step1InstallSSMPlugin` (one-time setup)
 2. **Port Forwarding**: Copy command from `Step2PortForwarding`, run on your computer (keep terminal open)
-3. **Open URL**: Copy URL from `Step3AccessURL`, open in browser (token included!)
-4. **Start Chatting**: Connect WhatsApp/Telegram/Discord in Web UI
+3. **Get Token**: Run the command from `Step3GetToken` to retrieve your token from SSM Parameter Store
+4. **Open URL**: Open `http://localhost:18789/?token=<your-token>` in browser
+5. **Start Chatting**: Connect WhatsApp/Telegram/Discord in Web UI
 
 
 ![CloudFormation Outputs](images/20260128-105244.jpeg)
@@ -204,8 +205,16 @@ aws ssm start-session \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 
-# Open in browser (token is shown in CloudFormation Outputs > Step3AccessURL)
-http://localhost:18789/?token=<your-token>
+# Retrieve token from SSM Parameter Store
+TOKEN=$(aws ssm get-parameter \
+  --name /openclaw/openclaw-bedrock/gateway-token \
+  --with-decryption \
+  --query Parameter.Value \
+  --output text \
+  --region us-west-2)
+
+# Open in browser
+http://localhost:18789/?token=$TOKEN
 ```
 
 ## How to Use openclaw
@@ -503,7 +512,12 @@ EnableSandbox: false  # Skip Docker installation
 
 ## Security Features
 
-IAM roles eliminate API key risks. CloudTrail logs every API call. VPC Endpoints keep traffic private. Docker sandbox isolates execution.
+- **IAM Roles** — eliminate API key risks
+- **CloudTrail** — logs every Bedrock API call
+- **VPC Endpoints** — keep traffic on private network
+- **SSM Parameter Store** — gateway token stored as SecureString, never written to disk or CloudFormation outputs
+- **Supply-Chain Protection** — Docker and NVM installed via GPG-signed repos / download-then-execute (no `curl | sh`)
+- **Docker Sandbox** — isolates code execution
 
 **Full details**: [SECURITY.md](SECURITY.md)
 
