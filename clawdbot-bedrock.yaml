@@ -78,6 +78,39 @@ Parameters:
     Default: "true"
     Description: "Install Docker for sandboxed execution (recommended for group chats)"
 
+  EnableCloudWatchAlarms:
+    Type: String
+    Default: "false"
+    Description: "Create CloudWatch alarms for CPU, disk, status check, and network"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  AlarmNotificationEmail:
+    Type: String
+    Default: ""
+    Description: "Email address for alarm notifications (optional)"
+
+  CPUAlarmThreshold:
+    Type: Number
+    Default: 80
+    Description: "CPU utilization threshold (%) for alarm"
+    MinValue: 1
+    MaxValue: 100
+
+  DiskAlarmThreshold:
+    Type: Number
+    Default: 80
+    Description: "Disk utilization threshold (%) for alarm"
+    MinValue: 1
+    MaxValue: 100
+
+  NetworkInThresholdGB:
+    Type: Number
+    Default: 1
+    Description: "Network inbound threshold (GB) for alarm (integer values only)"
+    MinValue: 1
+
 Conditions:
   CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, "none"]]
@@ -115,6 +148,10 @@ Conditions:
       - Condition: IsSaEast1
   CreateMantleEndpoint: !And [ Condition: CreateEndpoints, Condition: IsMantleSupportedRegion ]     
   EnableDocker: !Equals [!Ref EnableSandbox, "true"]
+  CreateAlarms: !Equals [!Ref EnableCloudWatchAlarms, "true"]
+  CreateAlarmNotifications: !And
+    - !Equals [!Ref EnableCloudWatchAlarms, "true"]
+    - !Not [!Equals [!Ref AlarmNotificationEmail, ""]]
 
 Mappings:
   # Architecture detection based on instance type
@@ -424,6 +461,40 @@ Resources:
           # Install SSM Agent (usually pre-installed)
           echo "[3/9] Configuring SSM Agent..."
           snap start amazon-ssm-agent || systemctl start amazon-ssm-agent
+          
+          # Install CloudWatch Agent (if alarms enabled)
+          if [ "${EnableCloudWatchAlarms}" = "true" ]; then
+            echo "[3.5/9] Installing CloudWatch Agent..."
+            ARCH=$(dpkg --print-architecture)
+            CW_BASE="https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu"
+            wget -q "$CW_BASE/$ARCH/latest/amazon-cloudwatch-agent.deb" \
+              -O /tmp/amazon-cloudwatch-agent.deb
+            dpkg -i /tmp/amazon-cloudwatch-agent.deb
+            rm /tmp/amazon-cloudwatch-agent.deb
+            
+            # Configure CloudWatch Agent for disk metrics (auto-discover devices)
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'CWEOF'
+          {
+            "metrics": {
+              "namespace": "OpenClaw",
+              "metrics_collected": {
+                "disk": {
+                  "measurement": ["used_percent"],
+                  "resources": ["/"],
+                  "metrics_collection_interval": 60,
+                  "drop_device": true
+                }
+              },
+              "append_dimensions": {
+                "InstanceId": "${!aws:InstanceId}"
+              }
+            }
+          }
+          CWEOF
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a fetch-config -m ec2 -s \
+              -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+          fi
           
           # Install Docker (if EnableSandbox=true)
           if [ "${EnableSandbox}" = "true" ]; then
@@ -770,6 +841,99 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance"
+
+  # ==================== CloudWatch Alarms ====================
+  AlarmNotificationTopic:
+    Type: AWS::SNS::Topic
+    Condition: CreateAlarmNotifications
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-alarms"
+
+  AlarmNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: CreateAlarmNotifications
+    Properties:
+      TopicArn: !Ref AlarmNotificationTopic
+      Protocol: email
+      Endpoint: !Ref AlarmNotificationEmail
+
+  CPUUtilizationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateAlarms
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-cpu-utilization"
+      AlarmDescription: "CPU utilization exceeds threshold"
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref CPUAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OpenClawInstance
+      AlarmActions:
+        - !If [CreateAlarmNotifications, !Ref AlarmNotificationTopic, !Ref "AWS::NoValue"]
+
+  StatusCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateAlarms
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-status-check"
+      AlarmDescription: "Instance status check failed"
+      MetricName: StatusCheckFailed
+      Namespace: AWS/EC2
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OpenClawInstance
+      AlarmActions:
+        - !If [CreateAlarmNotifications, !Ref AlarmNotificationTopic, !Ref "AWS::NoValue"]
+
+  DiskUtilizationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateAlarms
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-disk-utilization"
+      AlarmDescription: "Disk utilization exceeds threshold"
+      MetricName: disk_used_percent
+      Namespace: OpenClaw
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref DiskAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OpenClawInstance
+        - Name: path
+          Value: /
+      AlarmActions:
+        - !If [CreateAlarmNotifications, !Ref AlarmNotificationTopic, !Ref "AWS::NoValue"]
+
+  NetworkInAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateAlarms
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-network-in"
+      AlarmDescription: "Unusually high network traffic"
+      MetricName: NetworkIn
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Sub "${NetworkInThresholdGB}000000000"
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OpenClawInstance
+      AlarmActions:
+        - !If [CreateAlarmNotifications, !Ref AlarmNotificationTopic, !Ref "AWS::NoValue"]
 
 Outputs:
   Step1InstallSSMPlugin:

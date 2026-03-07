@@ -288,6 +288,24 @@ Uses SiliconFlow (DeepSeek, Qwen, GLM) instead of Bedrock. Requires a SiliconFlo
 
 ---
 
+### CloudWatch Alarms
+
+```yaml
+EnableCloudWatchAlarms: false  # Default: disabled
+  # When enabled:
+  # - Installs CloudWatch Agent for disk metrics
+  # - Creates CPU, disk, status check, and network alarms
+
+AlarmNotificationEmail: ""     # Optional: email for alarm notifications
+CPUAlarmThreshold: 80          # CPU % threshold (1-100)
+DiskAlarmThreshold: 80         # Disk % threshold (1-100)
+NetworkInThresholdGB: 1        # Network inbound threshold in GB (integer only)
+  # Adjust based on instance type:
+  # - t4g.small: 1-2 GB
+  # - t4g.medium: 2-5 GB  
+  # - c7g.xlarge: 5-10 GB
+```
+
 ## Security
 
 | Layer | What it does |
