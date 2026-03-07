@@ -83,7 +83,7 @@ Parameters:
 
   BedrockModelId:
     Type: String
-    Default: "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    Default: "global.amazon.nova-2-lite-v1:0"
     Description: "Bedrock model ID used by the Agent Container inside AgentCore Runtime"
 
   EnableAgentCoreMemory:
@@ -565,7 +565,13 @@ Resources:
 
           snap start amazon-ssm-agent || systemctl start amazon-ssm-agent
 
-          curl -fsSL https://get.docker.com | sh
+          # Install Docker via GPG-signed apt repo
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+          chmod a+r /etc/apt/keyrings/docker.asc
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+          apt-get update
+          apt-get install -y docker-ce docker-ce-cli containerd.io
           systemctl enable docker
           systemctl start docker
           usermod -aG docker ubuntu
@@ -573,12 +579,15 @@ Resources:
           sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
           set -e
           cd ~
-          for i in {1..3}; do
-            if curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash; then
-              break
-            fi
+          # Install NVM (download first, then execute)
+          NVM_VERSION="v0.40.1"
+          for i in 1 2 3; do
+            curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${!NVM_VERSION}/install.sh" -o /tmp/nvm-install.sh && break
+            echo "NVM download attempt $i failed, retrying in 5s..."
             sleep 5
           done
+          bash /tmp/nvm-install.sh
+          rm -f /tmp/nvm-install.sh
           export NVM_DIR="$HOME/.nvm"
           [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
           nvm install 22
@@ -720,25 +729,58 @@ Resources:
             --region $REGION \
             --overwrite || echo "Failed to save token to SSM"
 
+          # Save instance info (non-secret metadata only)
           echo "$INSTANCE_ID" > /home/ubuntu/.openclaw/instance_id.txt
           echo "$REGION" > /home/ubuntu/.openclaw/region.txt
-          echo "$GATEWAY_TOKEN" > /home/ubuntu/.openclaw/gateway_token.txt
           chown ubuntu:ubuntu /home/ubuntu/.openclaw/*.txt
+
+          # Clear token from environment
+          unset GATEWAY_TOKEN
+
+          # Create SSM access script (retrieves token from SSM at runtime — never stored on disk)
+          cat > /home/ubuntu/ssm-portforward.sh << 'SSMEOF'
+          #!/bin/bash
+          IMDS_TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+          REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
+          STACK_NAME=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=aws:cloudformation:stack-name" --query "Tags[0].Value" --output text --region $REGION)
+          TOKEN=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/gateway-token" --with-decryption --query Parameter.Value --output text --region $REGION)
+
+          echo "=========================================="
+          echo "OpenClaw SSM Port Forwarding"
+          echo "=========================================="
+          echo ""
+          echo "Run on your local computer:"
+          echo ""
+          echo "aws ssm start-session \\"
+          echo "  --target $INSTANCE_ID \\"
+          echo "  --region $REGION \\"
+          echo "  --document-name AWS-StartPortForwardingSession \\"
+          echo "  --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'"
+          echo ""
+          echo "Then open in browser:"
+          echo "http://localhost:18789/?token=$TOKEN"
+          echo ""
+          echo "=========================================="
+          SSMEOF
+          chmod +x /home/ubuntu/ssm-portforward.sh
+          chown ubuntu:ubuntu /home/ubuntu/ssm-portforward.sh
 
           apt-get install -y python3-pip 2>&1 | tee -a /var/log/openclaw-setup.log
           pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz 2>&1 | tee -a /var/log/openclaw-setup.log
 
           CFN_SIGNAL=$(which cfn-signal 2>/dev/null || find /usr -name cfn-signal 2>/dev/null | head -1)
-          COMPLETE_URL="http://localhost:18789/?token=$GATEWAY_TOKEN"
+          COMPLETE_MSG="OpenClaw ready. Retrieve token from SSM: aws ssm get-parameter --name /openclaw/$STACK_NAME/gateway-token --with-decryption --query Parameter.Value --output text --region $REGION"
 
           if [ -n "$CFN_SIGNAL" ]; then
-            $CFN_SIGNAL -e 0 -d "$COMPLETE_URL" -r "OpenClaw ready" '${OpenClawWaitHandle}'
+            $CFN_SIGNAL -e 0 -d "$COMPLETE_MSG" -r "OpenClaw ready" '${OpenClawWaitHandle}'
           else
-            SIGNAL_JSON="{\"Status\":\"SUCCESS\",\"Reason\":\"OpenClaw ready\",\"UniqueId\":\"openclaw\",\"Data\":\"$COMPLETE_URL\"}"
+            SIGNAL_JSON="{\"Status\":\"SUCCESS\",\"Reason\":\"OpenClaw ready\",\"UniqueId\":\"openclaw\",\"Data\":\"$COMPLETE_MSG\"}"
             curl -X PUT -H 'Content-Type:' --data-binary "$SIGNAL_JSON" '${OpenClawWaitHandle}'
           fi
 
           echo "OpenClaw multi-tenant installation complete!"
+          echo "Token stored in SSM Parameter Store"
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-gateway"
@@ -763,16 +805,8 @@ Outputs:
       aws ssm get-parameter --name "/openclaw/${AWS::StackName}/gateway-token" --region ${AWS::Region} --with-decryption --query 'Parameter.Value' --output text
 
   Step4AccessURL:
-    Description: "STEP 4: Open this URL in browser"
-    Value: !Select
-      - 1
-      - !Split
-        - '":"'
-        - !Select
-          - 0
-          - !Split
-            - '"}'
-            - !GetAtt OpenClawWaitCondition.Data
+    Description: "STEP 4: Open in browser (replace <token> with value from Step 3)"
+    Value: "http://localhost:18789/?token=<token>"
 
   Step5StartChatting:
     Description: "STEP 5: Start using OpenClaw!"

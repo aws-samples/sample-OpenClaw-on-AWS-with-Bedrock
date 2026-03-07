@@ -122,8 +122,8 @@ aws ssm start-session --target $INSTANCE_ID --region us-west-2
 # Switch to ubuntu user
 sudo su - ubuntu
 
-# Get token
-cat ~/.openclaw/gateway_token.txt
+# Get token from SSM Parameter Store
+aws ssm get-parameter --name /openclaw/openclaw-bedrock/gateway-token --with-decryption --query Parameter.Value --output text --region us-west-2
 ```
 
 ### Step 4: Open Web UI

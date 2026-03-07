@@ -1,0 +1,374 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>OpenClaw Admin Console</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#080b18;--side:#0b0f24;--card:rgba(13,17,40,0.8);--card2:rgba(18,23,52,0.85);
+--g1:linear-gradient(135deg,rgba(20,24,56,0.9),rgba(12,16,38,0.95));
+--g2:linear-gradient(135deg,#7c3aed,#2dd4bf);--g3:linear-gradient(135deg,#8b5cf6,#ec4899);
+--g4:linear-gradient(135deg,#06b6d4,#8b5cf6);--g5:linear-gradient(135deg,#f59e0b,#ef4444);
+--bdr:rgba(255,255,255,0.06);--bdr2:rgba(255,255,255,0.12);
+--t:#e2e8f0;--t2:#7c85a6;--t3:#4a5270;
+--pur:#8b5cf6;--pur2:#a78bfa;--teal:#2dd4bf;--pink:#ec4899;--grn:#34d399;--red:#f87171;--yel:#fbbf24;--blu:#60a5fa;
+--r:16px;--rs:10px;--anim:.3s cubic-bezier(.4,0,.2,1)}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t);height:100vh;overflow:hidden}
+.app{display:grid;grid-template-columns:260px 1fr;height:100vh}
+
+/* Sidebar */
+.side{background:var(--side);border-right:1px solid var(--bdr);display:flex;flex-direction:column;position:relative;z-index:10}
+.side::after{content:'';position:absolute;top:0;right:0;bottom:0;width:1px;background:linear-gradient(180deg,var(--pur),transparent,var(--teal))}
+.logo{padding:28px 24px 36px;font-size:24px;font-weight:900;display:flex;align-items:center;gap:12px}
+.logo-text{background:var(--g2);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.logo em{font-style:normal;font-size:28px;-webkit-text-fill-color:initial;filter:drop-shadow(0 0 8px rgba(139,92,246,0.4))}
+.nav{flex:1;padding:0 12px}
+.ni{display:flex;align-items:center;gap:14px;padding:12px 16px;margin:2px 0;color:var(--t2);cursor:pointer;
+  border-radius:var(--rs);font-size:13.5px;font-weight:500;transition:all var(--anim);position:relative}
+.ni:hover{background:rgba(139,92,246,0.08);color:var(--t)}
+.ni.on{background:rgba(139,92,246,0.12);color:var(--pur2)}
+.ni.on::before{content:'';position:absolute;left:0;top:25%;bottom:25%;width:3px;border-radius:0 3px 3px 0;background:var(--g2)}
+.ni i{font-size:18px;width:24px;text-align:center;font-style:normal}
+.ni .badge-sm{margin-left:auto;background:var(--pur);color:#fff;font-size:10px;padding:2px 7px;border-radius:10px;font-weight:700}
+.ni .coming{margin-left:auto;font-size:9px;padding:2px 8px;border-radius:10px;background:rgba(139,92,246,0.15);color:var(--pur2);font-weight:600;letter-spacing:.3px}
+.side-foot{padding:20px 24px;border-top:1px solid var(--bdr);font-size:11px;color:var(--t3);line-height:1.6}
+
+/* Main */
+.main{overflow-y:auto;position:relative;
+  background:radial-gradient(ellipse at 15% 0%,rgba(139,92,246,0.07),transparent 50%),
+  radial-gradient(ellipse at 85% 100%,rgba(45,212,191,0.05),transparent 50%),
+  radial-gradient(ellipse at 50% 50%,rgba(236,72,153,0.03),transparent 60%)}
+.main-inner{padding:36px 40px;max-width:1400px}
+.page{display:none;animation:fadeIn .4s ease}.page.on{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.hdr{margin-bottom:28px}.hdr h1{font-size:28px;font-weight:800;letter-spacing:-.5px}.hdr p{color:var(--t2);font-size:14px;margin-top:6px}
+
+/* Stat cards with glow */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:32px}
+.sc{background:var(--g1);border:1px solid var(--bdr);border-radius:var(--r);padding:22px;position:relative;overflow:hidden;
+  transition:all var(--anim);cursor:default}
+.sc:hover{border-color:var(--bdr2);transform:translateY(-2px);box-shadow:0 8px 32px rgba(0,0,0,0.3)}
+.sc::before{content:'';position:absolute;top:0;left:0;right:0;height:3px}
+.sc.c1::before{background:var(--g2)}.sc.c2::before{background:var(--g3)}.sc.c3::before{background:var(--g4)}
+.sc.c4::before{background:linear-gradient(90deg,var(--yel),var(--red))}.sc.c5::before{background:linear-gradient(90deg,var(--red),var(--pink))}
+.sc.c6::before{background:linear-gradient(90deg,var(--grn),var(--teal))}
+.sc-icon{font-size:28px;margin-bottom:10px;filter:drop-shadow(0 0 6px rgba(255,255,255,0.1))}
+.sc-val{font-size:38px;font-weight:900;letter-spacing:-1.5px;margin:4px 0;
+  background:var(--g2);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.sc.c2 .sc-val{background:var(--g3);-webkit-background-clip:text}.sc.c3 .sc-val{background:var(--g4);-webkit-background-clip:text}
+.sc.c4 .sc-val{background:linear-gradient(135deg,var(--yel),var(--red));-webkit-background-clip:text}
+.sc.c5 .sc-val{background:linear-gradient(135deg,var(--red),var(--pink));-webkit-background-clip:text}
+.sc.c6 .sc-val{background:linear-gradient(135deg,var(--grn),var(--teal));-webkit-background-clip:text}
+.sc-lbl{color:var(--t2);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.8px}
+
+/* Glow pulse for active indicator */
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.pulse{width:8px;height:8px;border-radius:50%;display:inline-block;animation:pulse 2s infinite}
+.pulse-grn{background:var(--grn);box-shadow:0 0 8px var(--grn)}.pulse-red{background:var(--red);box-shadow:0 0 8px var(--red)}
+
+/* Tables */
+.tw{background:var(--g1);border:1px solid var(--bdr);border-radius:var(--r);overflow:hidden;backdrop-filter:blur(10px)}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:14px 18px;color:var(--t2);font-size:10.5px;text-transform:uppercase;letter-spacing:1px;
+  background:rgba(255,255,255,0.02);border-bottom:1px solid var(--bdr)}
+td{padding:14px 18px;border-bottom:1px solid var(--bdr);font-size:13px}
+tr:last-child td{border-bottom:none}tr:hover td{background:rgba(139,92,246,0.04)}
+
+/* Badges */
+.b{display:inline-flex;align-items:center;gap:4px;padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600}
+.b-grn{background:rgba(52,211,153,0.12);color:var(--grn)}.b-red{background:rgba(248,113,113,0.12);color:var(--red)}
+.b-yel{background:rgba(251,191,36,0.12);color:var(--yel)}.b-pur{background:rgba(139,92,246,0.12);color:var(--pur2)}
+.b-gry{background:rgba(100,116,139,0.12);color:var(--t2)}.b-teal{background:rgba(45,212,191,0.12);color:var(--teal)}
+.b-pink{background:rgba(236,72,153,0.12);color:var(--pink)}
+
+/* Tool tags */
+.tt{display:inline-block;padding:3px 9px;margin:2px;border-radius:6px;font-size:10px;font-family:'SF Mono',ui-monospace,monospace;
+  border:1px solid var(--bdr);transition:all var(--anim)}
+.tt.on{background:rgba(52,211,153,0.1);color:var(--grn);border-color:rgba(52,211,153,0.25)}
+.tt.off{color:var(--t3)}.tt.blk{background:rgba(248,113,113,0.08);color:var(--red);border-color:rgba(248,113,113,0.2);text-decoration:line-through;opacity:.5}
+
+/* Buttons */
+.btn{padding:10px 20px;border-radius:var(--rs);border:none;cursor:pointer;font-size:12px;font-weight:600;
+  transition:all var(--anim);font-family:inherit;position:relative;overflow:hidden}
+.btn:active{transform:scale(.97)}
+.bp{background:var(--g2);color:#fff;box-shadow:0 4px 16px rgba(139,92,246,0.3)}.bp:hover{box-shadow:0 6px 24px rgba(139,92,246,0.4);transform:translateY(-1px)}
+.bg{background:rgba(52,211,153,0.12);color:var(--grn);border:1px solid rgba(52,211,153,0.25)}.bg:hover{background:rgba(52,211,153,0.2)}
+.br{background:rgba(248,113,113,0.12);color:var(--red);border:1px solid rgba(248,113,113,0.25)}.br:hover{background:rgba(248,113,113,0.2)}
+</style>
+</head>
+<body><div class="app">
+<div class="side">
+<div class="logo"><em>🦞</em><span class="logo-text">OpenClaw</span></div>
+<div class="nav">
+<div class="ni on" onclick="go('dash',this)"><i>📊</i>Dashboard</div>
+<div class="ni" onclick="go('ten',this)"><i>👥</i>Tenants</div>
+<div class="ni" onclick="go('appr',this)"><i>🔐</i>Approvals<span class="badge-sm" id="appr-count">2</span></div>
+<div class="ni" onclick="go('aud',this)"><i>📋</i>Audit Log</div>
+<div class="ni" onclick="go('demo',this)"><i>⚡</i>Live Demo</div>
+<div style="height:1px;background:var(--bdr);margin:16px 8px"></div>
+<div class="ni" onclick="go('skills',this)"><i>🧩</i>Skills<span class="coming">ROADMAP</span></div>
+<div class="ni" onclick="go('mem',this)"><i>🧠</i>Memory<span class="coming">ROADMAP</span></div>
+<div class="ni" onclick="go('tasks',this)"><i>⏰</i>Tasks<span class="coming">ROADMAP</span></div>
+<div class="ni" onclick="go('topo',this)"><i>🔗</i>Topology<span class="coming">ROADMAP</span></div>
+<div class="ni" onclick="go('usage',this)"><i>📈</i>Usage<span class="coming">ROADMAP</span></div>
+</div>
+<div class="side-foot">OpenClaw Multi-Tenant Platform<br>Admin Console v0.1<br><span style="color:var(--pur2)">Target: v1.0 June 2026</span></div>
+</div>
+<div class="main"><div class="main-inner">
+<!-- ===== DASHBOARD ===== -->
+<div id="p-dash" class="page on">
+<div class="hdr"><h1>Dashboard</h1><p>Multi-Tenant Platform Overview · <span class="pulse pulse-grn"></span> All systems operational</p></div>
+<div class="stats" id="stats"></div>
+<div style="display:grid;grid-template-columns:1fr;gap:20px">
+<div><div style="font-size:16px;font-weight:700;margin-bottom:14px">Recent Activity</div><div id="recent" class="tw"></div></div>
+</div></div>
+
+<!-- ===== TENANTS ===== -->
+<div id="p-ten" class="page">
+<div class="hdr"><h1>Tenant Management</h1><p>View and manage agent permissions per tenant</p></div>
+<div id="ten-tbl" class="tw"></div><div id="ten-edit"></div></div>
+
+<!-- ===== APPROVALS ===== -->
+<div id="p-appr" class="page">
+<div class="hdr"><h1>Approval Queue</h1><p>Pending permission requests from tenants</p></div>
+<div id="appr-list"></div></div>
+
+<!-- ===== AUDIT ===== -->
+<div id="p-aud" class="page">
+<div class="hdr"><h1>Audit Log</h1><p>Structured event stream — all tenant activity</p></div>
+<div id="aud-log" class="tw"></div></div>
+
+<!-- ===== LIVE DEMO ===== -->
+<div id="p-demo" class="page">
+<div class="hdr"><h1>Live Demo</h1><p>Send messages as different tenants — see permissions in action</p></div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+<div class="tw" style="display:flex;flex-direction:column"><div style="padding:16px 20px;border-bottom:1px solid var(--bdr);font-weight:600;font-size:14px">💬 Chat</div>
+<div id="chat" style="flex:1;padding:16px;max-height:400px;overflow-y:auto;min-height:300px"></div>
+<div style="display:flex;gap:8px;padding:14px;border-top:1px solid var(--bdr)">
+<select id="d-who" style="min-width:160px;background:rgba(255,255,255,0.04);color:var(--t);border:1px solid var(--bdr);border-radius:var(--rs);padding:10px;font-size:13px;font-family:inherit"></select>
+<input id="d-msg" placeholder="Type a message..." onkeydown="if(event.key==='Enter')send()" style="flex:1;background:rgba(255,255,255,0.04);color:var(--t);border:1px solid var(--bdr);border-radius:var(--rs);padding:10px;font-size:13px;font-family:inherit;outline:none">
+<button class="btn bp" onclick="send()">Send</button></div></div>
+<div class="tw" style="display:flex;flex-direction:column"><div style="padding:16px 20px;border-bottom:1px solid var(--bdr);font-weight:600;font-size:14px">🔍 Pipeline Details</div>
+<div id="details" style="flex:1;padding:16px;max-height:460px;overflow-y:auto"><div style="color:var(--t2);padding:40px;text-align:center">Send a message to see the pipeline</div></div></div>
+</div></div>
+
+<!-- ===== SKILLS (Roadmap) ===== -->
+<div id="p-skills" class="page">
+<div class="hdr"><h1>Skills Marketplace</h1><p>Shared skills with bundled SaaS credentials · <span class="b b-pur">ROADMAP</span></p></div>
+<div id="skills-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px"></div></div>
+
+<!-- ===== MEMORY (Roadmap) ===== -->
+<div id="p-mem" class="page">
+<div class="hdr"><h1>Shared Memory</h1><p>Cross-tenant knowledge base and memory isolation · <span class="b b-pur">ROADMAP</span></p></div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+<div class="tw" style="padding:24px"><div style="font-weight:700;margin-bottom:16px">🔒 Private Memory (per tenant)</div>
+<div id="mem-private" style="font-size:13px;color:var(--t2)"></div></div>
+<div class="tw" style="padding:24px"><div style="font-weight:700;margin-bottom:16px">🌐 Shared Knowledge Base</div>
+<div id="mem-shared" style="font-size:13px;color:var(--t2)"></div></div>
+</div></div>
+
+<!-- ===== TASKS (Roadmap) ===== -->
+<div id="p-tasks" class="page">
+<div class="hdr"><h1>Scheduled Tasks</h1><p>Team agent automation and cron jobs · <span class="b b-pur">ROADMAP</span></p></div>
+<div id="tasks-tbl" class="tw"></div></div>
+
+<!-- ===== TOPOLOGY (Roadmap) ===== -->
+<div id="p-topo" class="page">
+<div class="hdr"><h1>Agent Topology</h1><p>Organization → Department → Team → Individual agent hierarchy · <span class="b b-pur">ROADMAP</span></p></div>
+<div class="tw" style="padding:20px"><canvas id="topo-canvas" width="800" height="420" style="width:100%;border-radius:var(--rs)"></canvas></div></div>
+
+<!-- ===== USAGE (Roadmap) ===== -->
+<div id="p-usage" class="page">
+<div class="hdr"><h1>Token Usage & Cost</h1><p>Per-tenant consumption tracking and cost optimization · <span class="b b-pur">ROADMAP</span></p></div>
+<div style="display:grid;grid-template-columns:2fr 1fr;gap:20px">
+<div class="tw" style="padding:24px"><div style="font-weight:700;margin-bottom:16px">📈 Daily Token Usage (14 days)</div>
+<canvas id="usage-chart" height="200" style="width:100%"></canvas></div>
+<div class="tw" style="padding:24px"><div style="font-weight:700;margin-bottom:16px">💰 Cost by Tenant</div>
+<div id="usage-tenants"></div></div>
+</div></div>
+
+</div></div></div>
+<style>
+/* Chat bubbles */
+.msg{margin-bottom:14px;animation:fadeIn .3s ease}.msg .who{font-size:11px;color:var(--t2);margin-bottom:4px;font-weight:500}
+.msg .bbl{padding:12px 16px;border-radius:14px;font-size:13px;line-height:1.6;max-width:90%;white-space:pre-wrap}
+.msg.usr .bbl{background:var(--g2);color:#fff;margin-left:auto;border-bottom-right-radius:4px}
+.msg.agt .bbl{background:rgba(255,255,255,0.04);border:1px solid var(--bdr);border-bottom-left-radius:4px}
+.msg.sys .bbl{background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.15);font-size:11.5px;font-family:ui-monospace,monospace;color:var(--pur2)}
+.msg.vio .bbl{background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.2);font-size:11.5px;color:var(--red)}
+/* Approval cards */
+.ac{background:var(--g1);border:1px solid var(--bdr);border-radius:var(--r);padding:24px;margin-bottom:16px;transition:all var(--anim)}
+.ac:hover{border-color:var(--bdr2);box-shadow:0 4px 20px rgba(0,0,0,0.2)}
+.ac-reason{background:rgba(255,255,255,0.03);padding:14px;border-radius:var(--rs);margin:14px 0;font-size:13px;border-left:3px solid var(--pur);line-height:1.5}
+/* Permission editor */
+.pe{background:var(--g1);border:1px solid var(--bdr);border-radius:var(--r);padding:24px;margin-top:20px;animation:fadeIn .3s ease}
+.pe-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:8px;margin:16px 0}
+.pt{display:flex;align-items:center;gap:8px;padding:10px 14px;background:rgba(255,255,255,0.02);border-radius:var(--rs);cursor:pointer;
+  font-size:12px;font-weight:500;border:1px solid var(--bdr);transition:all var(--anim)}
+.pt:hover{border-color:var(--pur);box-shadow:0 0 12px rgba(139,92,246,0.15)}.pt.on{background:rgba(52,211,153,0.1);border-color:rgba(52,211,153,0.3);color:var(--grn)}
+.pt.off{color:var(--t2)}.pt.blk{background:rgba(248,113,113,0.05);border-color:rgba(248,113,113,0.15);color:var(--red);cursor:not-allowed;opacity:.5}
+/* Skill cards */
+.sk{background:var(--g1);border:1px solid var(--bdr);border-radius:var(--r);padding:22px;transition:all var(--anim)}
+.sk:hover{border-color:var(--bdr2);transform:translateY(-2px);box-shadow:0 8px 32px rgba(0,0,0,0.3)}
+.sk-icon{font-size:36px;margin-bottom:12px}.sk-name{font-size:16px;font-weight:700;margin-bottom:6px}
+.sk-desc{color:var(--t2);font-size:13px;line-height:1.5;margin-bottom:14px}
+/* Audit log entries */
+.le{display:flex;align-items:center;gap:14px;padding:12px 18px;border-bottom:1px solid var(--bdr);font-size:12px;font-family:ui-monospace,monospace;transition:background var(--anim)}
+.le:last-child{border-bottom:none}.le:hover{background:rgba(139,92,246,0.04)}
+/* Memory items */
+.mem-item{padding:14px;border-bottom:1px solid var(--bdr);font-size:13px}.mem-item:last-child{border-bottom:none}
+.mem-item strong{color:var(--t)}.mem-item p{color:var(--t2);margin-top:4px;font-size:12px}
+</style>
+<script>
+const A=async(p,m='GET',b=null)=>{const o={method:m,headers:{'Content-Type':'application/json'}};if(b)o.body=JSON.stringify(b);return(await fetch(p,o)).json()};
+const ago=iso=>{const s=Math.floor((Date.now()-new Date(iso))/1000);if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';if(s<86400)return Math.floor(s/3600)+'h';return Math.floor(s/86400)+'d'};
+const esc=s=>{const d=document.createElement('div');d.textContent=s;return d.innerHTML};
+const B=(t,c)=>`<span class="b b-${c}">${t}</span>`;
+const evB=e=>e==='permission_denied'?B('DENIED','red'):e==='approval_decision'?B('APPROVAL','pur'):B('OK','grn');
+const stB=s=>({active:B('<span class="pulse pulse-grn"></span> Active','grn'),inactive:B('Inactive','gry'),pending:B('Pending','yel'),approved:B('Approved','grn'),rejected:B('Rejected','red'),approvedd:B('Approved','grn'),rejectedd:B('Rejected','red')})[s]||B(s,'gry');
+const rB=r=>({'高':B('🔴 HIGH','red'),'中':B('🟡 MEDIUM','yel'),'低':B('🟢 LOW','grn')})[r]||B(r,'gry');
+const tt=(tools)=>{const a=['web_search','shell','browser','file','file_write','code_execution'],bl=['install_skill','load_extension','eval'];
+  return a.map(t=>tools.includes(t)?`<span class="tt on">${t}</span>`:`<span class="tt off">${t}</span>`).join('')+bl.map(t=>`<span class="tt blk">${t}</span>`).join('')};
+
+function go(id,el){document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));document.querySelectorAll('.ni').forEach(n=>n.classList.remove('on'));
+  document.getElementById('p-'+id).classList.add('on');el.classList.add('on');
+  ({dash:lDash,ten:lTen,appr:lAppr,aud:lAud,demo:lDemo,skills:lSkills,mem:lMem,tasks:lTasks,topo:lTopo,usage:lUsage})[id]?.()}
+
+async function lDash(){
+  const d=await A('/api/dashboard');
+  document.getElementById('stats').innerHTML=`
+    <div class="sc c1"><div class="sc-icon">👥</div><div class="sc-val">${d.tenants}</div><div class="sc-lbl">Total Tenants</div></div>
+    <div class="sc c2"><div class="sc-icon">⚡</div><div class="sc-val">${d.active}</div><div class="sc-lbl">Active Now</div></div>
+    <div class="sc c3"><div class="sc-icon">💬</div><div class="sc-val">${d.reqs}</div><div class="sc-lbl">Requests Today</div></div>
+    <div class="sc c4"><div class="sc-icon">🔐</div><div class="sc-val">${d.pending}</div><div class="sc-lbl">Pending Approvals</div></div>
+    <div class="sc c5"><div class="sc-icon">🛡️</div><div class="sc-val">${d.violations}</div><div class="sc-lbl">Violations</div></div>
+    <div class="sc c6"><div class="sc-icon">🪙</div><div class="sc-val">${(d.tokens/1000).toFixed(0)}k</div><div class="sc-lbl">Tokens · $${d.cost_today}</div></div>`;
+  document.getElementById('appr-count').textContent=d.pending;
+  const a=await A('/api/audit');
+  document.getElementById('recent').innerHTML='<table><tr><th>Time</th><th>Event</th><th>Tenant</th><th>Detail</th><th>Latency</th></tr>'+
+    a.events.slice(0,10).map(e=>`<tr><td style="color:var(--t3)">${ago(e.ts)} ago</td><td>${evB(e.ev)}</td><td style="color:var(--teal)">${e.tid}</td><td style="color:var(--t2)">${e.tool||'—'}</td><td style="color:var(--t3)">${e.ms}ms</td></tr>`).join('')+'</table>'}
+
+async function lTen(){
+  const d=await A('/api/tenants');
+  document.getElementById('ten-tbl').innerHTML='<table><tr><th>Tenant</th><th>Role</th><th>Dept</th><th>Channel</th><th>Permissions</th><th>Status</th></tr>'+
+    d.tenants.map(t=>`<tr onclick="eTen('${esc(t.id)}')" style="cursor:pointer"><td><strong>${esc(t.name)}</strong><br><span style="color:var(--t3);font-size:11px">${esc(t.id)}</span></td><td>${esc(t.role)}</td><td>${esc(t.dept)}</td><td>${B(esc(t.ch),'teal')}</td><td>${tt(t.tools)}</td><td>${stB(t.status)}</td></tr>`).join('')+'</table>';
+  document.getElementById('ten-edit').innerHTML=''}
+async function eTen(id){
+  const t=await A('/api/tenants/'+id);const a=['web_search','shell','browser','file','file_write','code_execution'],bl=['install_skill','load_extension','eval'];
+  document.getElementById('ten-edit').innerHTML=`<div class="pe"><div style="display:flex;justify-content:space-between;align-items:center"><div><strong style="font-size:16px">${esc(t.name)}</strong><span style="color:var(--t2);margin-left:8px">${esc(t.role)} · ${esc(t.dept)}</span></div>${B(esc(t.profile),'pur')}</div>
+    <p style="color:var(--t2);font-size:12px;margin-top:10px">Click to toggle permissions. Red tools are always blocked (supply-chain protection).</p>
+    <div class="pe-grid">${a.map(x=>`<div class="pt ${t.tools.includes(x)?'on':'off'}" onclick="tog('${id}','${x}')">${t.tools.includes(x)?'✓':'✗'} ${x}</div>`).join('')}${bl.map(x=>`<div class="pt blk">🚫 ${x}</div>`).join('')}</div></div>`}
+async function tog(id,tool){const t=await A('/api/tenants/'+id);let tools=[...t.tools];if(tools.includes(tool))tools=tools.filter(x=>x!==tool);else tools.push(tool);await A('/api/tenants/'+id,'PUT',{tools});eTen(id)}
+
+async function lAppr(){
+  const d=await A('/api/approvals');const p=d.items.filter(a=>a.status==='pending'),done=d.items.filter(a=>a.status!=='pending');
+  let h='';if(!p.length)h='<div style="text-align:center;padding:60px;color:var(--t2);font-size:15px">✨ No pending approvals — all clear</div>';
+  p.forEach(a=>{h+=`<div class="ac"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div><strong style="font-size:15px">${esc(a.name)}</strong> <span style="color:var(--t2)">${esc(a.tid)}</span><div style="color:var(--t2);font-size:12px;margin-top:4px">Requesting: <strong style="color:var(--t)">${esc(a.res)}</strong> (${esc(a.rtype)})</div></div><div style="display:flex;gap:6px">${rB(a.risk)} ${stB(a.status)}</div></div><div class="ac-reason">${esc(a.reason)}</div><div style="color:var(--t3);font-size:12px">Requested ${ago(a.at)} ago · Auto-reject in ${ago(a.exp)}</div><div style="display:flex;gap:10px;margin-top:18px"><button class="btn bg" onclick="apA('${esc(a.id)}','approve')">✓ Approve (Temporary)</button><button class="btn br" onclick="apA('${esc(a.id)}','reject')">✗ Reject</button></div></div>`});
+  if(done.length){h+='<div style="margin-top:28px;font-weight:600;color:var(--t3);font-size:12px;text-transform:uppercase;letter-spacing:.8px">Resolved</div>';done.forEach(a=>{h+=`<div class="ac" style="opacity:.4"><div style="display:flex;justify-content:space-between"><div><strong>${esc(a.name)}</strong> — ${esc(a.res)}</div>${stB(a.status)}</div></div>`})}
+  document.getElementById('appr-list').innerHTML=h}
+async function apA(id,act){await A('/api/approvals/'+id+'/'+act,'POST');lAppr();lDash()}
+
+async function lAud(){
+  const d=await A('/api/audit');
+  document.getElementById('aud-log').innerHTML=d.events.map(e=>{
+    const c=e.ev==='permission_denied'?'var(--red)':e.ev==='approval_decision'?'var(--pur2)':'var(--grn)';
+    return`<div class="le"><span style="color:var(--t3);min-width:70px">${ago(e.ts)} ago</span><span style="color:${c};min-width:160px;font-weight:600">${e.ev}</span><span style="color:var(--teal);min-width:180px">${e.tid}</span><span style="color:var(--t2)">${e.tool||e.status||''}</span><span style="color:var(--t3);margin-left:auto">${e.ms}ms</span></div>`}).join('')||'<div style="padding:40px;text-align:center;color:var(--t2)">No events</div>'}
+
+async function lDemo(){const d=await A('/api/tenants');document.getElementById('d-who').innerHTML=d.tenants.map(t=>`<option value="${esc(t.id)}">${esc(t.name)} (${esc(t.role)})</option>`).join('')}
+async function send(){
+  const tid=document.getElementById('d-who').value,msg=document.getElementById('d-msg').value.trim();if(!msg)return;document.getElementById('d-msg').value='';
+  const t=await A('/api/tenants/'+tid),ch=document.getElementById('chat'),det=document.getElementById('details');
+  ch.innerHTML+=`<div class="msg usr"><div class="who">${esc(t.name)} (${esc(t.role)})</div><div class="bbl">${esc(msg)}</div></div>`;
+  const r=await A('/api/demo/send','POST',{tenant_id:tid,message:msg});
+  ch.innerHTML+=`<div class="msg agt"><div class="who">🦞 OpenClaw Agent</div><div class="bbl">${esc(r.response)}</div></div>`;
+  if(r.violations?.length)ch.innerHTML+=`<div class="msg vio"><div class="bbl">⚠️ Plan E AUDIT: blocked tool detected: ${esc(r.violations.join(', '))}</div></div>`;
+  det.innerHTML=`<div class="msg sys"><div class="bbl"><b>Tenant:</b> ${esc(tid)}\n<b>Profile:</b> ${esc(t.profile)}\n<b>Allowed:</b> ${esc(t.tools.join(', '))}</div></div><div class="msg sys"><div class="bbl"><b>Plan A (System Prompt):</b>\n${esc(r.sp)}</div></div><div class="msg sys"><div class="bbl"><b>Plan E (Response Audit):</b> ${esc(r.plan_e)}${r.violations?.length?'\nViolations: '+esc(r.violations.join(', ')):''}</div></div>`+det.innerHTML;
+  ch.scrollTop=ch.scrollHeight}
+
+// ===== ROADMAP PAGES =====
+async function lSkills(){
+  const d=await A('/api/skills');
+  document.getElementById('skills-grid').innerHTML=d.skills.map(s=>`<div class="sk">
+    <div class="sk-icon">${s.icon}</div><div class="sk-name">${s.name}</div><div class="sk-desc">${s.desc}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div>${s.tools_required.map(t=>`<span class="tt on">${t}</span>`).join('')}</div>
+      ${s.status==='installed'?B('Installed','grn'):B('Available','gry')}
+    </div>
+    <div style="margin-top:12px;font-size:11px;color:var(--t3)">By ${s.author} · ${s.tenants_authorized} tenants authorized</div>
+  </div>`).join('')}
+
+function lMem(){
+  const priv=[
+    {tenant:'Sarah Chen',entries:3,last:'Personal task list, meeting notes'},
+    {tenant:'Alex Wang',entries:28,last:'Code review patterns, deployment procedures'},
+    {tenant:'Jordan Lee',entries:15,last:'Infrastructure runbooks, incident responses'},
+    {tenant:'Carol Zhang',entries:8,last:'Financial report templates, SAP queries'},
+  ];
+  const shared=[
+    {name:'Company Policies',entries:12,access:'All tenants (read-only)',icon:'📋'},
+    {name:'Product Documentation',entries:45,access:'Engineering + Sales',icon:'📖'},
+    {name:'Security Procedures',entries:8,access:'IT Admin only',icon:'🔒'},
+    {name:'Onboarding Guide',entries:6,access:'All tenants (read-only)',icon:'🎓'},
+  ];
+  document.getElementById('mem-private').innerHTML=priv.map(p=>`<div class="mem-item"><strong>${p.tenant}</strong> · ${p.entries} entries<p>Latest: ${p.last}</p></div>`).join('');
+  document.getElementById('mem-shared').innerHTML=shared.map(s=>`<div class="mem-item"><strong>${s.icon} ${s.name}</strong> · ${s.entries} entries<p>Access: ${s.access}</p></div>`).join('')}
+
+async function lTasks(){
+  const d=await A('/api/tasks');
+  document.getElementById('tasks-tbl').innerHTML='<table><tr><th>Task</th><th>Schedule</th><th>Agent</th><th>Status</th><th>Last Run</th><th>Next Run</th></tr>'+
+    d.tasks.map(t=>`<tr><td><strong>${t.name}</strong></td><td>${t.schedule}</td><td style="color:var(--teal)">${t.tenant}</td><td>${t.status==='active'?B('<span class="pulse pulse-grn"></span> Active','grn'):B('Scheduled','yel')}</td><td style="color:var(--t3)">${ago(t.last_run)} ago</td><td style="color:var(--t2)">${new Date(t.next_run).toLocaleDateString()}</td></tr>`).join('')+'</table>'}
+
+async function lTopo(){
+  const d=await A('/api/topology');const c=document.getElementById('topo-canvas');const ctx=c.getContext('2d');
+  const W=c.width=c.offsetWidth*2;const H=c.height=840;ctx.scale(2,2);
+  const w=c.offsetWidth,h=420;ctx.clearRect(0,0,w,h);
+  // Draw edges
+  d.edges.forEach(e=>{
+    const from=d.nodes.find(n=>n.id===e.from),to=d.nodes.find(n=>n.id===e.to);if(!from||!to)return;
+    const grd=ctx.createLinearGradient(from.x,from.y,to.x,to.y);
+    grd.addColorStop(0,'rgba(139,92,246,0.4)');grd.addColorStop(1,'rgba(45,212,191,0.4)');
+    ctx.beginPath();ctx.moveTo(from.x,from.y+20);
+    const cy=(from.y+to.y)/2+20;ctx.quadraticCurveTo(from.x,cy,to.x,to.y-20);
+    ctx.strokeStyle=grd;ctx.lineWidth=2;ctx.stroke()});
+  // Draw nodes
+  d.nodes.forEach(n=>{
+    const colors={org:['#8b5cf6','rgba(139,92,246,0.2)'],dept:['#2dd4bf','rgba(45,212,191,0.2)'],person:['#60a5fa','rgba(96,165,250,0.2)']};
+    const[fill,glow]=colors[n.type]||colors.person;
+    ctx.beginPath();ctx.arc(n.x,n.y,n.type==='org'?28:n.type==='dept'?22:16,0,Math.PI*2);
+    ctx.fillStyle=glow;ctx.fill();ctx.beginPath();ctx.arc(n.x,n.y,n.type==='org'?20:n.type==='dept'?16:12,0,Math.PI*2);
+    ctx.fillStyle=fill;ctx.fill();
+    ctx.fillStyle='#fff';ctx.font=`${n.type==='person'?'11':'13'}px Inter`;ctx.textAlign='center';
+    ctx.fillText(n.label,n.x,n.y+(n.type==='org'?40:n.type==='dept'?32:26));
+    if(n.type==='org'){ctx.fillStyle='#fff';ctx.font='14px Inter';ctx.fillText('🦞',n.x-3,n.y+5)}
+    if(n.type==='dept'){ctx.fillStyle='#fff';ctx.font='11px Inter';ctx.fillText('🏢',n.x-3,n.y+4)}
+    if(n.type==='person'){ctx.fillStyle='#fff';ctx.font='9px Inter';ctx.fillText('👤',n.x-3,n.y+3)}
+  })}
+
+async function lUsage(){
+  const d=await A('/api/usage');const c=document.getElementById('usage-chart');const ctx=c.getContext('2d');
+  const W=c.width=c.offsetWidth*2;const H=c.height=400;ctx.scale(2,2);
+  const w=c.offsetWidth,h=200,pad=40,gw=w-pad*2,gh=h-pad*2;
+  ctx.clearRect(0,0,w,h);
+  const max=Math.max(...d.days.map(x=>x.tokens));
+  // Grid
+  ctx.strokeStyle='rgba(255,255,255,0.05)';ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){const y=pad+gh*(i/4);ctx.beginPath();ctx.moveTo(pad,y);ctx.lineTo(pad+gw,y);ctx.stroke();
+    ctx.fillStyle='rgba(255,255,255,0.3)';ctx.font='10px Inter';ctx.textAlign='right';ctx.fillText(((max*(4-i)/4)/1000).toFixed(0)+'k',pad-8,y+4)}
+  // Area
+  const grd=ctx.createLinearGradient(0,pad,0,pad+gh);grd.addColorStop(0,'rgba(139,92,246,0.3)');grd.addColorStop(1,'rgba(139,92,246,0)');
+  ctx.beginPath();ctx.moveTo(pad,pad+gh);
+  d.days.forEach((p,i)=>{const x=pad+gw*(i/(d.days.length-1)),y=pad+gh*(1-p.tokens/max);ctx.lineTo(x,y)});
+  ctx.lineTo(pad+gw,pad+gh);ctx.closePath();ctx.fillStyle=grd;ctx.fill();
+  // Line
+  const lgrd=ctx.createLinearGradient(pad,0,pad+gw,0);lgrd.addColorStop(0,'#8b5cf6');lgrd.addColorStop(1,'#2dd4bf');
+  ctx.beginPath();d.days.forEach((p,i)=>{const x=pad+gw*(i/(d.days.length-1)),y=pad+gh*(1-p.tokens/max);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y)});
+  ctx.strokeStyle=lgrd;ctx.lineWidth=2.5;ctx.stroke();
+  // Dots + labels
+  d.days.forEach((p,i)=>{const x=pad+gw*(i/(d.days.length-1)),y=pad+gh*(1-p.tokens/max);
+    ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fillStyle='#8b5cf6';ctx.fill();
+    if(i%2===0){ctx.fillStyle='rgba(255,255,255,0.4)';ctx.font='9px Inter';ctx.textAlign='center';ctx.fillText(p.date,x,pad+gh+16)}});
+  // Tenant breakdown
+  document.getElementById('usage-tenants').innerHTML=d.by_tenant.map(t=>{
+    const pct=max>0?Math.round(t.tokens/max*100):0;
+    return`<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px"><span>${t.name}</span><span style="color:var(--t2)">${(t.tokens/1000).toFixed(1)}k · $${t.cost}</span></div><div style="height:6px;background:rgba(255,255,255,0.05);border-radius:3px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--g2);border-radius:3px;transition:width .5s"></div></div></div>`}).join('')}
+
+lDash();
+</script></body></html>

@@ -84,6 +84,36 @@ Conditions:
   AllowSSH: !And
     - !Not [!Equals [!Ref AllowedSSHCIDR, ""]]
     - !Not [!Equals [!Ref KeyPairName, "none"]]
+  # Bedrock Mantle supported regions: https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html#bedrock-mantle-supported
+  # !Or supports max 10 conditions; split into two nested groups
+  IsUsEast1: !Equals [ !Ref "AWS::Region", "us-east-1" ]
+  IsUsEast2: !Equals [ !Ref "AWS::Region", "us-east-2" ]
+  IsUsWest2: !Equals [ !Ref "AWS::Region", "us-west-2" ]
+  IsApSoutheast3: !Equals [ !Ref "AWS::Region", "ap-southeast-3" ]
+  IsApSouth1: !Equals [ !Ref "AWS::Region", "ap-south-1" ]
+  IsApNortheast1: !Equals [ !Ref "AWS::Region", "ap-northeast-1" ]
+  IsEuCentral1: !Equals [ !Ref "AWS::Region", "eu-central-1" ]
+  IsEuWest1: !Equals [ !Ref "AWS::Region", "eu-west-1" ]
+  IsEuWest2: !Equals [ !Ref "AWS::Region", "eu-west-2" ]
+  IsEuSouth1: !Equals [ !Ref "AWS::Region", "eu-south-1" ]
+  IsEuNorth1: !Equals [ !Ref "AWS::Region", "eu-north-1" ]
+  IsSaEast1: !Equals [ !Ref "AWS::Region", "sa-east-1" ]
+  IsMantleSupportedRegion: !Or
+    - !Or
+      - Condition: IsUsEast1
+      - Condition: IsUsEast2
+      - Condition: IsUsWest2
+      - Condition: IsApSoutheast3
+      - Condition: IsApSouth1
+      - Condition: IsApNortheast1
+    - !Or
+      - Condition: IsEuCentral1
+      - Condition: IsEuWest1
+      - Condition: IsEuWest2
+      - Condition: IsEuSouth1
+      - Condition: IsEuNorth1
+      - Condition: IsSaEast1
+  CreateMantleEndpoint: !And [ Condition: CreateEndpoints, Condition: IsMantleSupportedRegion ]
   UseAppleSilicon: !Or
     - !Equals [!Ref MacInstanceType, "mac2.metal"]
     - !Equals [!Ref MacInstanceType, "mac2-m2.metal"]
@@ -228,7 +258,7 @@ Resources:
   # Bedrock Mantle VPC Endpoint (OpenAI-compatible API for Project Mantle models like Kimi K2.5)
   BedrockMantleVPCEndpoint:
     Type: AWS::EC2::VPCEndpoint
-    Condition: CreateEndpoints
+    Condition: CreateMantleEndpoint
     Properties:
       VpcId: !Ref OpenClawVPC
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.bedrock-mantle'
@@ -462,8 +492,11 @@ Resources:
           sudo -u $CURRENT_USER bash << 'USERSCRIPT'
           cd ~
           
-          # Install NVM
-          curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+          # Install NVM (download first, then execute)
+          NVM_VERSION="v0.40.1"
+          curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${!NVM_VERSION}/install.sh" -o /tmp/nvm-install.sh
+          bash /tmp/nvm-install.sh
+          rm -f /tmp/nvm-install.sh
           
           export NVM_DIR="$HOME/.nvm"
           [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
@@ -653,11 +686,7 @@ Resources:
             echo "WARNING: Gateway did not start within 60s, check /tmp/openclaw-gateway.err"
           fi
           
-          # Save token
-          echo "$GATEWAY_TOKEN" > $USER_HOME/.openclaw/gateway_token.txt
-          chown $CURRENT_USER:staff $USER_HOME/.openclaw/gateway_token.txt
-          
-          # Save to SSM Parameter Store
+          # Save token to SSM Parameter Store (encrypted, never written to disk)
           STACK_NAME="${AWS::StackName}"
           aws ssm put-parameter \
             --name "/openclaw/$STACK_NAME/gateway-token" \
@@ -665,24 +694,21 @@ Resources:
             --type "SecureString" \
             --region $AWS_REGION \
             --overwrite || echo "Failed to save token to SSM"
-          
-          # Save instance info
+          unset GATEWAY_TOKEN
+
+          # Save instance info (non-secret metadata only)
           echo "$INSTANCE_ID" > $USER_HOME/.openclaw/instance_id.txt
           echo "$AWS_REGION" > $USER_HOME/.openclaw/region.txt
-          
-          # Create access instructions
-          echo "OpenClaw Access Instructions" > $USER_HOME/ACCESS_INSTRUCTIONS.txt
-          echo "Run on LOCAL: aws ssm start-session --target $INSTANCE_ID --region $AWS_REGION --document-name AWS-StartPortForwardingSession --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'" >> $USER_HOME/ACCESS_INSTRUCTIONS.txt
-          echo "Then open: http://localhost:18789/?token=$GATEWAY_TOKEN" >> $USER_HOME/ACCESS_INSTRUCTIONS.txt
-          chown $CURRENT_USER:staff $USER_HOME/ACCESS_INSTRUCTIONS.txt
-          
-          # Create SSM access script
-          cat > $USER_HOME/ssm-portforward.sh << 'EOF'
+
+          # Create SSM access script (retrieves token from SSM at runtime — never stored on disk)
+          cat > $USER_HOME/ssm-portforward.sh << 'SSMEOF'
           #!/bin/bash
-          INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-          REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
-          TOKEN=$(cat /Users/ec2-user/.openclaw/gateway_token.txt)
-          
+          IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+          REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
+          STACK_NAME=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=aws:cloudformation:stack-name" --query "Tags[0].Value" --output text --region $REGION)
+          TOKEN=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/gateway-token" --with-decryption --query Parameter.Value --output text --region $REGION)
+
           echo "=========================================="
           echo "OpenClaw SSM Port Forwarding (Mac)"
           echo "=========================================="
@@ -699,30 +725,29 @@ Resources:
           echo "http://localhost:18789/?token=$TOKEN"
           echo ""
           echo "=========================================="
-          EOF
+          SSMEOF
           chmod +x $USER_HOME/ssm-portforward.sh
           chown $CURRENT_USER:staff $USER_HOME/ssm-portforward.sh
-          
+
           # Complete
           echo "[9/9] Complete!"
           echo "SUCCESS" > $USER_HOME/.openclaw/setup_status.txt
           echo "Setup completed: $(date)" >> $USER_HOME/.openclaw/setup_status.txt
-          echo "Token: $GATEWAY_TOKEN" >> $USER_HOME/.openclaw/setup_status.txt
           echo "Mac Instance Type: ${MacInstanceType}" >> $USER_HOME/.openclaw/setup_status.txt
-          
-          # Signal CloudFormation
-          COMPLETE_URL="http://localhost:18789/?token=$GATEWAY_TOKEN"
-          
+
+          # Signal CloudFormation (token NOT included — retrieve from SSM)
+          COMPLETE_MSG="OpenClaw ready. Retrieve token from SSM: aws ssm get-parameter --name /openclaw/$STACK_NAME/gateway-token --with-decryption --query Parameter.Value --output text --region $AWS_REGION"
+
           # Use curl to signal (cfn-signal not available on macOS by default)
-          SIGNAL_JSON="{\"Status\":\"SUCCESS\",\"Reason\":\"OpenClaw ready on Mac\",\"UniqueId\":\"openclaw-mac\",\"Data\":\"$COMPLETE_URL\"}"
+          SIGNAL_JSON="{\"Status\":\"SUCCESS\",\"Reason\":\"OpenClaw ready on Mac\",\"UniqueId\":\"openclaw-mac\",\"Data\":\"$COMPLETE_MSG\"}"
           curl -X PUT -H "Content-Type:" --data-binary "$SIGNAL_JSON" "${OpenClawWaitHandle}"
-          
+
           echo "Signal sent successfully"
-          
+
           echo "=========================================="
           echo "OpenClaw Mac installation complete!"
           echo "Instance Type: ${MacInstanceType}"
-          echo "Token: $GATEWAY_TOKEN"
+          echo "Token stored in SSM Parameter Store"
           echo "=========================================="
       Tags:
         - Key: Name
@@ -741,17 +766,10 @@ Outputs:
     Value: !Sub |
       aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 
-  Step3AccessURL:
-    Description: "STEP 3: Open this URL in browser"
-    Value: !Select 
-      - 1
-      - !Split 
-        - '":"'
-        - !Select 
-          - 0
-          - !Split 
-            - '"}'
-            - !GetAtt OpenClawWaitCondition.Data
+  Step3GetToken:
+    Description: "STEP 3: Get your access token"
+    Value: !Sub |
+      aws ssm get-parameter --name /openclaw/${AWS::StackName}/gateway-token --with-decryption --query Parameter.Value --output text --region ${AWS::Region}
 
   Step4StartChatting:
     Description: "STEP 4: Start using OpenClaw!"

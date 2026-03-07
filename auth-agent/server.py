@@ -23,7 +23,12 @@ logger = logging.getLogger(__name__)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from permission_request import PermissionRequest
-from handler import handle_permission_request, handle_pending_approvals_command
+from handler import (
+    handle_permission_request,
+    handle_pending_approvals_command,
+    validate_approval_input,
+    validate_permission_request_fields,
+)
 
 
 class AuthAgentHandler(BaseHTTPRequestHandler):
@@ -55,19 +60,31 @@ class AuthAgentHandler(BaseHTTPRequestHandler):
                 self._respond(200, {"response": result})
                 return
 
+            # Validate approval responses for injection
+            if "approval_response" in payload:
+                try:
+                    payload["approval_response"] = validate_approval_input(
+                        payload["approval_response"]
+                    )
+                except ValueError as e:
+                    logger.warning("Approval input rejected: %s", e)
+                    self._respond(400, {"error": str(e)})
+                    return
+
             # Handle PermissionRequest payload
             try:
+                validated = validate_permission_request_fields(payload)
                 request = PermissionRequest(
-                    request_id=payload["request_id"],
-                    tenant_id=payload["tenant_id"],
-                    resource_type=payload["resource_type"],
-                    resource=payload["resource"],
-                    reason=payload.get("reason", ""),
-                    duration_type=payload.get("duration_type", "temporary"),
-                    suggested_duration_hours=payload.get("suggested_duration_hours", 1),
-                    requested_at=datetime.fromisoformat(payload["requested_at"]),
-                    expires_at=datetime.fromisoformat(payload["expires_at"]),
-                    status=payload.get("status", "pending"),
+                    request_id=validated["request_id"],
+                    tenant_id=validated["tenant_id"],
+                    resource_type=validated["resource_type"],
+                    resource=validated["resource"],
+                    reason=validated.get("reason", ""),
+                    duration_type=validated.get("duration_type", "temporary"),
+                    suggested_duration_hours=validated.get("suggested_duration_hours", 1),
+                    requested_at=datetime.fromisoformat(validated["requested_at"]),
+                    expires_at=datetime.fromisoformat(validated["expires_at"]),
+                    status=validated.get("status", "pending"),
                 )
                 result = handle_permission_request(request)
                 self._respond(200, result)

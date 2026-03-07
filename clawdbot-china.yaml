@@ -1,0 +1,788 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'OpenClaw - AWS China Deployment (SiliconFlow / OpenAI-Compatible LLM Providers)'
+
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - E6101
+        - W1030
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "LLM Provider Configuration"
+        Parameters:
+          - LLMApiBaseUrl
+          - LLMModel
+          - LLMApiKey
+      - Label:
+          default: "Compute Configuration"
+        Parameters:
+          - InstanceType
+          - VolumeSize
+          - VolumeType
+          - KeyPairName
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - UseExistingVPC
+          - ExistingVPCId
+          - ExistingPublicSubnetId
+          - ExistingPrivateSubnetId
+          - VpcCidr
+          - CreateVPCEndpoints
+          - AllowedSSHCIDR
+    ParameterLabels:
+      LLMApiBaseUrl:
+        default: "LLM API Base URL"
+      LLMModel:
+        default: "LLM Model ID"
+      LLMApiKey:
+        default: "LLM API Key"
+      InstanceType:
+        default: "EC2 Instance Type"
+      VolumeSize:
+        default: "Root EBS Volume Size (GB)"
+      VolumeType:
+        default: "Root EBS Volume Type"
+      KeyPairName:
+        default: "EC2 Key Pair Name"
+      UseExistingVPC:
+        default: "Use Existing VPC?"
+      ExistingVPCId:
+        default: "Existing VPC ID"
+      ExistingPublicSubnetId:
+        default: "Existing Public Subnet ID"
+      ExistingPrivateSubnetId:
+        default: "Existing Private Subnet ID"
+      VpcCidr:
+        default: "New VPC CIDR Block"
+      CreateVPCEndpoints:
+        default: "Create VPC Endpoints for SSM?"
+      AllowedSSHCIDR:
+        default: "Allowed SSH CIDR"
+
+Parameters:
+  LLMApiBaseUrl:
+    Type: String
+    Default: "https://api.siliconflow.cn/v1"
+    Description: "Base URL for OpenAI-compatible LLM API. SiliconFlow is the default; change to any OpenAI-compatible endpoint available in AWS China Marketplace."
+
+  LLMModel:
+    Type: String
+    Default: "Pro/deepseek-ai/DeepSeek-V3"
+    Description: "SiliconFlow model ID. Pro/ models recommended for Marketplace subscribers (better performance and rate limits). Full model list: https://docs.siliconflow.cn/cn/userguide/models"
+    AllowedValues:
+      # DeepSeek Pro (recommended for Marketplace subscribers)
+      - "Pro/deepseek-ai/DeepSeek-V3"
+      - "Pro/deepseek-ai/DeepSeek-R1"
+      - "Pro/deepseek-ai/DeepSeek-V3.2"
+      - "Pro/deepseek-ai/DeepSeek-V3.1-Terminus"
+      # DeepSeek standard (free tier, lower rate limits)
+      - "deepseek-ai/DeepSeek-V3"
+      - "deepseek-ai/DeepSeek-R1"
+      - "deepseek-ai/DeepSeek-V3.2"
+      # Qwen (Alibaba)
+      - "Qwen/Qwen3-32B"
+      - "Qwen/Qwen3-14B"
+      - "Qwen/Qwen3-8B"
+      - "Qwen/Qwen2.5-72B-Instruct"
+      # GLM (Zhipu AI)
+      - "Pro/zai-org/GLM-4.7"
+      - "zai-org/GLM-4.6"
+      # Tencent
+      - "tencent/Hunyuan-A13B-Instruct"
+      # Cost-effective distilled models
+      - "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+      - "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+
+  LLMApiKey:
+    Type: String
+    NoEcho: true
+    Description: "API key for LLM provider (e.g., SiliconFlow API key starting with sk-). Stored securely in SSM Parameter Store."
+    MinLength: 1
+
+  InstanceType:
+    Type: String
+    Default: "c6g.large"
+    Description: "Graviton (ARM) recommended for 20-40% better price-performance. x86 also supported."
+    AllowedValues:
+      - "t4g.small"
+      - "t4g.medium"
+      - "t4g.large"
+      - "c6g.large"
+      - "c6g.xlarge"
+      - "c7g.large"
+      - "c7g.xlarge"
+      - "t3.small"
+      - "t3.medium"
+      - "t3.large"
+      - "c5.large"
+      - "c5.xlarge"
+
+  VolumeSize:
+    Type: Number
+    Default: 30
+    MinValue: 20
+    MaxValue: 500
+    Description: "Root EBS volume size in GB (20-500)"
+
+  VolumeType:
+    Type: String
+    Default: "gp3"
+    AllowedValues:
+      - "gp3"
+      - "gp2"
+      - "io1"
+      - "io2"
+    Description: "Root EBS volume type"
+
+  KeyPairName:
+    Type: String
+    Default: "none"
+    Description: "EC2 key pair for emergency SSH access (optional - set to 'none' to skip)"
+
+  UseExistingVPC:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: "Set to 'true' to use an existing VPC instead of creating a new one"
+
+  ExistingVPCId:
+    Type: String
+    Default: ""
+    Description: "ID of existing VPC (required if UseExistingVPC=true). Must have DNS hostnames and DNS resolution enabled."
+
+  ExistingPublicSubnetId:
+    Type: String
+    Default: ""
+    Description: "ID of existing public subnet for EC2 (required if UseExistingVPC=true). Must have auto-assign public IP enabled."
+
+  ExistingPrivateSubnetId:
+    Type: String
+    Default: ""
+    Description: "ID of existing private subnet for VPC endpoints (required if UseExistingVPC=true)"
+
+  VpcCidr:
+    Type: String
+    Default: "10.0.0.0/16"
+    Description: "CIDR block for new VPC (only used when UseExistingVPC=false)"
+
+  AllowedSSHCIDR:
+    Type: String
+    Default: ""
+    Description: "CIDR for SSH access (optional - leave empty for no inbound rules. SSM Session Manager is used for access.)"
+
+  CreateVPCEndpoints:
+    Type: String
+    Default: "true"
+    Description: "Create VPC endpoints for private network access to SSM (recommended for Session Manager)"
+    AllowedValues:
+      - "true"
+      - "false"
+
+Conditions:
+  CreateNewVPC: !Equals [!Ref UseExistingVPC, "false"]
+  CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, "none"]]
+  AllowSSH: !And
+    - !Not [!Equals [!Ref AllowedSSHCIDR, ""]]
+    - !Not [!Equals [!Ref KeyPairName, "none"]]
+
+Rules:
+  ExistingVPCRequiresIds:
+    RuleCondition: !Equals [!Ref UseExistingVPC, "true"]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ExistingVPCId, ""]]
+        AssertDescription: "ExistingVPCId is required when UseExistingVPC is true"
+      - Assert: !Not [!Equals [!Ref ExistingPublicSubnetId, ""]]
+        AssertDescription: "ExistingPublicSubnetId is required when UseExistingVPC is true"
+      - Assert: !Not [!Equals [!Ref ExistingPrivateSubnetId, ""]]
+        AssertDescription: "ExistingPrivateSubnetId is required when UseExistingVPC is true"
+
+Mappings:
+  ArchitectureMap:
+    t3.small: { Arch: "amd64" }
+    t3.medium: { Arch: "amd64" }
+    t3.large: { Arch: "amd64" }
+    c5.large: { Arch: "amd64" }
+    c5.xlarge: { Arch: "amd64" }
+    t4g.small: { Arch: "arm64" }
+    t4g.medium: { Arch: "arm64" }
+    t4g.large: { Arch: "arm64" }
+    c6g.large: { Arch: "arm64" }
+    c6g.xlarge: { Arch: "arm64" }
+    c7g.large: { Arch: "arm64" }
+    c7g.xlarge: { Arch: "arm64" }
+
+  # Ubuntu 24.04 AMI IDs for AWS China regions (updated 2026-02-18)
+  RegionAmiMap:
+    cn-north-1:
+      arm64: "ami-00f3db296e1803e0f"
+      amd64: "ami-094440eec8e85a0f9"
+    cn-northwest-1:
+      arm64: "ami-00e2bf64742a8781e"
+      amd64: "ami-07c153df9422b4d5c"
+
+Resources:
+  # ==================== Wait Condition ====================
+  OpenClawWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  OpenClawWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: OpenClawInstance
+    Properties:
+      Handle: !Ref OpenClawWaitHandle
+      Timeout: '1200'
+      Count: 1
+
+  # ==================== VPC and Network ====================
+  OpenClawVPC:
+    Type: AWS::EC2::VPC
+    Condition: CreateNewVPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  OpenClawInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: CreateNewVPC
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateNewVPC
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      InternetGatewayId: !Ref OpenClawInternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: CreateNewVPC
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.1.0/24"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-subnet"
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: CreateNewVPC
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.2.0/24"
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-subnet"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateNewVPC
+    Properties:
+      VpcId: !Ref OpenClawVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateNewVPC
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref OpenClawInternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateNewVPC
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # VPC Endpoint Security Group
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEndpoints
+    Properties:
+      GroupDescription: "Security group for VPC endpoints"
+      VpcId: !If [CreateNewVPC, !Ref OpenClawVPC, !Ref ExistingVPCId]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref OpenClawSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpce-sg"
+
+  # SSM VPC Endpoint (for Session Manager)
+  SSMVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !If [CreateNewVPC, !Ref OpenClawVPC, !Ref ExistingVPCId]
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !If [CreateNewVPC, !Ref PrivateSubnet, !Ref ExistingPrivateSubnetId]
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  SSMMessagesVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !If [CreateNewVPC, !Ref OpenClawVPC, !Ref ExistingVPCId]
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !If [CreateNewVPC, !Ref PrivateSubnet, !Ref ExistingPrivateSubnetId]
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  EC2MessagesVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !If [CreateNewVPC, !Ref OpenClawVPC, !Ref ExistingVPCId]
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !If [CreateNewVPC, !Ref PrivateSubnet, !Ref ExistingPrivateSubnetId]
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # ==================== IAM Role ====================
+  OpenClawInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com.cn
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Sub 'arn:aws-cn:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - !Sub 'arn:aws-cn:iam::aws:policy/CloudWatchAgentServerPolicy'
+      Policies:
+        - PolicyName: SSMParameterPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ssm:PutParameter'
+                  - 'ssm:GetParameter'
+                Resource: !Sub 'arn:aws-cn:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instance-role"
+
+  OpenClawInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref OpenClawInstanceRole
+
+  # ==================== Security Group ====================
+  OpenClawSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "OpenClaw instance security group"
+      VpcId: !If [CreateNewVPC, !Ref OpenClawVPC, !Ref ExistingVPCId]
+      SecurityGroupIngress:
+        - !If
+          - AllowSSH
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: !Ref AllowedSSHCIDR
+            Description: "SSH access (fallback)"
+          - !Ref AWS::NoValue
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-sg"
+
+  # ==================== EC2 Instance ====================
+  OpenClawInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap
+        - RegionAmiMap
+        - !Ref 'AWS::Region'
+        - !FindInMap [ArchitectureMap, !Ref InstanceType, Arch]
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
+      IamInstanceProfile: !Ref OpenClawInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref OpenClawSecurityGroup
+          SubnetId: !If [CreateNewVPC, !Ref PublicSubnet, !Ref ExistingPublicSubnetId]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: !Ref VolumeType
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > >(tee /var/log/openclaw-setup.log)
+          exec 2>&1
+
+          echo "OpenClaw China Setup: $(date) | Region: ${AWS::Region} | Model: ${LLMModel}"
+          export DEBIAN_FRONTEND=noninteractive
+
+          echo "[1/9] Updating system..."
+          apt-get update
+          apt-get upgrade -y
+          apt-get install -y unzip curl git
+
+          IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || true)
+          IMDS_H="X-aws-ec2-metadata-token: $IMDS_TOKEN"
+          AWS_REGION=$(curl -s -H "$IMDS_H" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || true)
+          INSTANCE_ID=$(curl -s -H "$IMDS_H" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)
+          AWS_REGION=${!AWS_REGION:-"${AWS::Region}"}
+          INSTANCE_ID=${!INSTANCE_ID:-"unknown"}
+
+          echo "[2/9] Installing AWS CLI..."
+          curl -s "https://awscli.amazonaws.com/awscli-exe-linux-$(arch).zip" -o "awscliv2.zip"
+          unzip -q awscliv2.zip
+          ./aws/install
+          rm -rf aws awscliv2.zip
+
+          echo "[3/9] Configuring SSM Agent..."
+          snap start amazon-ssm-agent || systemctl start amazon-ssm-agent
+
+          echo "[4/9] Installing Docker..."
+          curl -fsSL https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg 2>/dev/null
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+          apt-get update
+          apt-get install -y docker-ce docker-ce-cli containerd.io || {
+            echo "TUNA mirror failed, falling back to official install..."
+            curl -fsSL https://get.docker.com | sh
+          }
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ubuntu
+
+          mkdir -p /etc/docker
+          echo '{"registry-mirrors":["https://mirror-docker.bosicloud.com","https://docker.1ms.run"]}' > /etc/docker/daemon.json
+          systemctl restart docker
+
+          echo "[5/9] Installing Node.js..."
+          sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
+          cd ~
+
+          # Install NVM (download first, then execute — no curl piping)
+          export NVM_SOURCE=https://gitee.com/mirrors/nvm.git
+          NVM_VERSION="v0.40.1"
+          for i in 1 2 3; do
+            curl -fsSL "https://gitee.com/mirrors/nvm/raw/${!NVM_VERSION}/install.sh" -o /tmp/nvm-install.sh && break
+            echo "NVM download via gitee failed, retrying $i/3..."
+            sleep 5
+            # Fallback to GitHub on last try
+            if [ "$i" -eq "3" ]; then
+              curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${!NVM_VERSION}/install.sh" -o /tmp/nvm-install.sh || echo "NVM download failed"
+            fi
+          done
+          bash /tmp/nvm-install.sh
+          rm -f /tmp/nvm-install.sh
+
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+          # Use npmmirror for faster Node.js download in China
+          export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node
+
+          # Install Node.js 22
+          nvm install 22
+          nvm use 22
+          nvm alias default 22
+
+          # Use Chinese npm mirror
+          npm config set registry https://registry.npmmirror.com
+
+          # Install OpenClaw
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "aarch64" ]; then
+            echo "ARM64 detected, installing with --ignore-scripts..."
+            npm install -g openclaw@latest --timeout=300000 --ignore-scripts || {
+              echo "OpenClaw installation failed on arm64, retrying..."
+              npm cache clean --force
+              npm install -g openclaw@latest --timeout=300000 --ignore-scripts
+            }
+          else
+            npm install -g openclaw@latest --timeout=300000 || {
+              echo "OpenClaw installation failed, retrying..."
+              npm cache clean --force
+              npm install -g openclaw@latest --timeout=300000
+            }
+          fi
+
+          if ! grep -q 'NVM_DIR' ~/.bashrc; then
+              echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc
+              echo '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> ~/.bashrc
+          fi
+          UBUNTU_SCRIPT
+
+          OPENCLAW_MJS=$(find /home/ubuntu/.nvm -path "*/node_modules/openclaw/openclaw.mjs" 2>/dev/null | head -1)
+          NODE_BIN=$(find /home/ubuntu/.nvm -name node -type f 2>/dev/null | head -1)
+          [ -z "$OPENCLAW_MJS" ] || [ -z "$NODE_BIN" ] && echo "FATAL: openclaw not found" && exit 1
+          printf '#!/bin/bash\nexec %s %s "$@"\n' "$NODE_BIN" "$OPENCLAW_MJS" > /usr/local/bin/openclaw
+          chmod +x /usr/local/bin/openclaw
+          /usr/local/bin/openclaw --version 2>/dev/null || { echo "FATAL: openclaw cannot execute"; exit 1; }
+
+          echo "[6/9] Configuring AWS..."
+          sudo -u ubuntu mkdir -p /home/ubuntu/.aws
+          sudo -u ubuntu bash -c "printf '[default]\nregion = %s\noutput = json\n' \"$AWS_REGION\" > /home/ubuntu/.aws/config"
+          chmod 600 /home/ubuntu/.aws/config
+
+          echo "[7/9] Configuring environment..."
+          printf 'export AWS_REGION=%s\nexport AWS_DEFAULT_REGION=%s\nexport OPENCLAW_MODEL=%s\nexport OPENCLAW_LLM_PROVIDER=openai-compatible\n' "$AWS_REGION" "$AWS_REGION" "${LLMModel}" >> /home/ubuntu/.bashrc
+
+          sudo -u ubuntu mkdir -p /home/ubuntu/.config/environment.d
+          sudo -u ubuntu bash -c "printf 'AWS_REGION=%s\nAWS_DEFAULT_REGION=%s\n' \"$AWS_REGION\" \"$AWS_REGION\" > /home/ubuntu/.config/environment.d/aws.conf"
+          loginctl enable-linger ubuntu
+          systemctl start user@1000.service
+
+          echo "[8/9] Configuring OpenClaw..."
+          sudo -u ubuntu mkdir -p /home/ubuntu/.openclaw
+          GATEWAY_TOKEN=$(openssl rand -hex 24)
+
+          sudo -u ubuntu tee /home/ubuntu/.openclaw/openclaw.json > /dev/null << 'JSONEOF'
+          {
+            "gateway": {
+              "mode": "local",
+              "port": 18789,
+              "bind": "loopback",
+              "controlUi": {
+                "enabled": true,
+                "allowInsecureAuth": true
+              },
+              "auth": {
+                "mode": "token",
+                "token": "GATEWAY_TOKEN_PLACEHOLDER"
+              }
+            },
+            "models": {
+              "providers": {
+                "maas": {
+                  "baseUrl": "API_BASE_URL_PLACEHOLDER",
+                  "api": "openai-completions",
+                  "auth": "api-key",
+                  "apiKey": "API_KEY_PLACEHOLDER",
+                  "models": [
+                    {
+                      "id": "MODEL_ID_PLACEHOLDER",
+                      "name": "MaaS Model",
+                      "input": ["text"],
+                      "contextWindow": 65536,
+                      "maxTokens": 8192
+                    }
+                  ]
+                }
+              }
+            },
+            "agents": {
+              "defaults": {
+                "model": {
+                  "primary": "maas/MODEL_ID_PLACEHOLDER"
+                }
+              }
+            }
+          }
+          JSONEOF
+
+          # Replace placeholders with actual values
+          sed -i "s/GATEWAY_TOKEN_PLACEHOLDER/$GATEWAY_TOKEN/g" /home/ubuntu/.openclaw/openclaw.json
+          sed -i "s|API_BASE_URL_PLACEHOLDER|${LLMApiBaseUrl}|g" /home/ubuntu/.openclaw/openclaw.json
+          sed -i "s|API_KEY_PLACEHOLDER|${LLMApiKey}|g" /home/ubuntu/.openclaw/openclaw.json
+          sed -i "s|MODEL_ID_PLACEHOLDER|${LLMModel}|g" /home/ubuntu/.openclaw/openclaw.json
+          chmod 600 /home/ubuntu/.openclaw/openclaw.json
+
+          # Install and start gateway
+          for i in $(seq 1 15); do
+            if [ -S /run/user/1000/bus ]; then
+              echo "User systemd session ready"
+              break
+            fi
+            echo "Waiting for user session... $i/15"
+            sleep 2
+          done
+
+          sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash -c '
+          export HOME=/home/ubuntu
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+          openclaw gateway install 2>/dev/null || true
+          systemctl --user start openclaw-gateway.service 2>/dev/null || { openclaw gateway & }
+          '
+
+          # Wait for daemon to be ready
+          echo "Waiting for OpenClaw daemon to start..."
+          for i in $(seq 1 30); do
+            if ss -tlnp 2>/dev/null | grep -q ':18789'; then
+              echo "OpenClaw daemon is up on port 18789"
+              break
+            fi
+            echo "Attempt $i/30: port 18789 not ready yet, waiting..."
+            sleep 2
+          done
+
+          if ! ss -tlnp 2>/dev/null | grep -q ':18789'; then
+            echo "WARNING: OpenClaw gateway did not start within 60s, trying fallback..."
+            sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -c '
+            export HOME=/home/ubuntu
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+            systemctl --user restart openclaw-gateway.service || openclaw gateway &
+            '
+            sleep 5
+          fi
+
+          # Enable messaging channels
+          echo "[8.5/9] Enabling messaging channels..."
+          sudo -H -u ubuntu bash -c '
+          export HOME=/home/ubuntu
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+          openclaw plugins enable whatsapp || echo "WhatsApp plugin enable failed"
+          openclaw plugins enable telegram || echo "Telegram plugin enable failed"
+          openclaw plugins enable discord || echo "Discord plugin enable failed"
+          openclaw plugins enable slack || echo "Slack plugin enable failed"
+          '
+
+          # Save token to SSM Parameter Store (encrypted, never written to disk)
+          STACK_NAME="${AWS::StackName}"
+          aws ssm put-parameter \
+            --name "/openclaw/$STACK_NAME/gateway-token" \
+            --value "$GATEWAY_TOKEN" \
+            --type "SecureString" \
+            --region $AWS_REGION \
+            --overwrite || echo "Failed to save token to SSM"
+
+          # Save LLM API key to SSM Parameter Store (secure)
+          aws ssm put-parameter \
+            --name "/openclaw/$STACK_NAME/llm-api-key" \
+            --value "${LLMApiKey}" \
+            --type "SecureString" \
+            --region $AWS_REGION \
+            --overwrite || echo "Failed to save LLM API key to SSM"
+
+          # Clear token from environment
+          unset GATEWAY_TOKEN
+
+          # Save instance info (non-secret metadata only)
+          echo "$INSTANCE_ID" > /home/ubuntu/.openclaw/instance_id.txt
+          echo "$AWS_REGION" > /home/ubuntu/.openclaw/region.txt
+          chown ubuntu:ubuntu /home/ubuntu/.openclaw/*.txt
+
+          cat > /home/ubuntu/ssm-portforward.sh << 'SSMEOF'
+          #!/bin/bash
+          T=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          H="X-aws-ec2-metadata-token: $T"
+          ID=$(curl -s -H "$H" http://169.254.169.254/latest/meta-data/instance-id)
+          R=$(curl -s -H "$H" http://169.254.169.254/latest/meta-data/placement/region)
+          S=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$ID" "Name=key,Values=aws:cloudformation:stack-name" --query "Tags[0].Value" --output text --region $R)
+          TK=$(aws ssm get-parameter --name "/openclaw/$S/gateway-token" --with-decryption --query Parameter.Value --output text --region $R)
+          echo "Port forward: aws ssm start-session --target $ID --region $R --document-name AWS-StartPortForwardingSession --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'"
+          echo "Browser: http://localhost:18789/?token=$TK"
+          SSMEOF
+          chmod +x /home/ubuntu/ssm-portforward.sh
+          chown ubuntu:ubuntu /home/ubuntu/ssm-portforward.sh
+
+          # Signal CloudFormation
+          echo "[9/9] Signaling CloudFormation..."
+          echo "SUCCESS" > /home/ubuntu/.openclaw/setup_status.txt
+          echo "Setup completed: $(date)" >> /home/ubuntu/.openclaw/setup_status.txt
+
+          apt-get install -y python3-pip 2>&1 | tee -a /var/log/openclaw-setup.log
+          pip3 install --break-system-packages https://s3.cn-north-1.amazonaws.com.cn/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz 2>&1 | tee -a /var/log/openclaw-setup.log || {
+            echo "China cfn-bootstrap failed, trying global..."
+            pip3 install --break-system-packages https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz 2>&1 | tee -a /var/log/openclaw-setup.log || echo "cfn-bootstrap install failed, will use curl fallback"
+          }
+
+          CFN_SIGNAL=$(which cfn-signal 2>/dev/null || find /usr -name cfn-signal 2>/dev/null | head -1)
+          COMPLETE_MSG="OpenClaw ready. Retrieve token from SSM: aws ssm get-parameter --name /openclaw/$STACK_NAME/gateway-token --with-decryption --query Parameter.Value --output text --region $AWS_REGION"
+
+          if [ -n "$CFN_SIGNAL" ]; then
+            echo "Using cfn-signal: $CFN_SIGNAL"
+            $CFN_SIGNAL -e 0 -d "$COMPLETE_MSG" -r "OpenClaw ready" '${OpenClawWaitHandle}'
+          else
+            echo "cfn-signal not found, using curl"
+            SIGNAL_JSON="{\"Status\":\"SUCCESS\",\"Reason\":\"OpenClaw ready\",\"UniqueId\":\"openclaw\",\"Data\":\"$COMPLETE_MSG\"}"
+            curl -X PUT -H "Content-Type:" --data-binary "$SIGNAL_JSON" "${OpenClawWaitHandle}"
+          fi
+
+          echo "Signal sent successfully"
+
+          echo "OpenClaw China setup complete. Token in SSM."
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instance"
+
+Outputs:
+  Step1InstallSSMPlugin:
+    Description: "STEP 1: Install SSM Session Manager Plugin on your local computer"
+    Value: "https://docs.amazonaws.cn/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+
+  Step2PortForwarding:
+    Description: "STEP 2: Run this command on LOCAL computer (keep terminal open)"
+    Value: !Sub |
+      aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
+
+  Step3GetToken:
+    Description: "STEP 3: Get your access token"
+    Value: !Sub |
+      aws ssm get-parameter --name /openclaw/${AWS::StackName}/gateway-token --with-decryption --query Parameter.Value --output text --region ${AWS::Region}
+
+  Step4AccessURL:
+    Description: "STEP 4: Open in browser (replace <token> with value from Step 3)"
+    Value: "http://localhost:18789/?token=<token>"
+
+  Step5StartChatting:
+    Description: "STEP 5: Start using OpenClaw!"
+    Value: "Connect WhatsApp, Telegram, Discord, Slack. See README: https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock"
+
+  InstanceId:
+    Description: "EC2 Instance ID"
+    Value: !Ref OpenClawInstance
+
+  LLMProviderInfo:
+    Description: "LLM provider and model in use"
+    Value: !Sub "Provider: ${LLMApiBaseUrl} | Model: ${LLMModel}"
+
+  MonthlyCost:
+    Description: "Estimated monthly cost (CNY)"
+    Value: !Sub
+      - |
+        EC2 (${InstanceType}): ~150-300 CNY (Graviton instances 20% cheaper)
+        EBS (${VolumeSize}GB ${VolumeType}): ~18 CNY (at 30GB gp3 baseline)
+        VPC Endpoints: ${EndpointCost}
+        LLM API: Pay-per-use (varies by provider and model)
+        Total Infrastructure: ~${TotalCost}/month + LLM costs
+      - EndpointCost: !If [CreateEndpoints, "~150 CNY ($0.01/hour x 3 endpoints)", "0 CNY"]
+        TotalCost: !If [CreateEndpoints, "320-470 CNY", "170-320 CNY"]
+
+  InstanceArchitecture:
+    Description: "Instance architecture"
+    Value: !FindInMap [ArchitectureMap, !Ref InstanceType, Arch]
