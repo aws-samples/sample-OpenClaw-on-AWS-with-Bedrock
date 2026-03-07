@@ -6,6 +6,7 @@ Requirements: 9.3, 9.4, 9.7, 9.9
 
 import logging
 import os
+import re
 import threading
 from datetime import datetime, timezone
 from typing import Optional
@@ -18,6 +19,85 @@ except ImportError:
     from permission_request import PermissionRequest  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Input validation for approval messages
+# ---------------------------------------------------------------------------
+
+# Patterns that indicate prompt injection in approval responses
+_APPROVAL_INJECTION_PATTERNS = [
+    re.compile(r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions", re.IGNORECASE),
+    re.compile(r"you\s+are\s+now\s+", re.IGNORECASE),
+    re.compile(r"new\s+system\s+prompt", re.IGNORECASE),
+    re.compile(r"approve\s+all\s+(pending|future)", re.IGNORECASE),
+    re.compile(r"grant\s+(all|unlimited|full)\s+(access|permissions?)", re.IGNORECASE),
+    re.compile(r"<\s*system\s*>", re.IGNORECASE),
+    re.compile(r"\[INST\]", re.IGNORECASE),
+]
+
+MAX_APPROVAL_MESSAGE_LENGTH = 2000
+MAX_REASON_LENGTH = 500
+
+
+def validate_approval_input(message: str) -> str:
+    """Validate an approval response from Human_Approver.
+
+    Checks for:
+    - Message length (max 2000 chars)
+    - Prompt injection patterns
+    - Returns sanitized message
+
+    Raises ValueError if injection detected.
+    """
+    if len(message) > MAX_APPROVAL_MESSAGE_LENGTH:
+        logger.warning("Approval message truncated: %d > %d", len(message), MAX_APPROVAL_MESSAGE_LENGTH)
+        message = message[:MAX_APPROVAL_MESSAGE_LENGTH]
+
+    for pattern in _APPROVAL_INJECTION_PATTERNS:
+        match = pattern.search(message)
+        if match:
+            logger.warning(
+                "[auth-agent] INJECTION_BLOCKED pattern=%r matched=%r",
+                pattern.pattern, match.group(0)[:60],
+            )
+            raise ValueError(f"Approval message rejected: suspicious pattern detected")
+
+    return message
+
+
+def validate_permission_request_fields(payload: dict) -> dict:
+    """Validate fields in an incoming PermissionRequest payload.
+
+    Checks:
+    - tenant_id: alphanumeric + underscore/hyphen/dot, max 128 chars
+    - resource: no null bytes, no path traversal, max 512 chars
+    - reason: max 500 chars, no injection patterns
+    - resource_type: must be one of allowed values
+    """
+    import re as _re
+
+    tenant_id = payload.get("tenant_id", "")
+    if not _re.match(r"^[a-zA-Z0-9_.\-]{1,128}$", tenant_id):
+        raise ValueError(f"Invalid tenant_id: {tenant_id!r}")
+
+    resource = payload.get("resource", "")
+    if len(resource) > 512:
+        raise ValueError("Resource too long")
+    if "\x00" in resource:
+        raise ValueError("Null byte in resource")
+    if ".." in resource.split("/"):
+        raise ValueError("Path traversal in resource")
+
+    reason = payload.get("reason", "")
+    if len(reason) > MAX_REASON_LENGTH:
+        payload["reason"] = reason[:MAX_REASON_LENGTH]
+
+    allowed_types = {"tool", "data_path", "api_endpoint"}
+    if payload.get("resource_type") not in allowed_types:
+        raise ValueError(f"Invalid resource_type: {payload.get('resource_type')}")
+
+    return payload
+
 
 # ---------------------------------------------------------------------------
 # SSM system prompt (Requirement 9.9)

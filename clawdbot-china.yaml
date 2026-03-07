@@ -6,6 +6,7 @@ Metadata:
     config:
       ignore_checks:
         - E6101
+        - W1030
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
@@ -150,16 +151,19 @@ Parameters:
     Description: "Set to 'true' to use an existing VPC instead of creating a new one"
 
   ExistingVPCId:
-    Type: AWS::EC2::VPC::Id
-    Description: "Select an existing VPC (ignored when creating new VPC). Must have DNS hostnames and DNS resolution enabled."
+    Type: String
+    Default: ""
+    Description: "ID of existing VPC (required if UseExistingVPC=true). Must have DNS hostnames and DNS resolution enabled."
 
   ExistingPublicSubnetId:
-    Type: AWS::EC2::Subnet::Id
-    Description: "Select an existing public subnet for EC2 (ignored when creating new VPC). Must have auto-assign public IP enabled."
+    Type: String
+    Default: ""
+    Description: "ID of existing public subnet for EC2 (required if UseExistingVPC=true). Must have auto-assign public IP enabled."
 
   ExistingPrivateSubnetId:
-    Type: AWS::EC2::Subnet::Id
-    Description: "Select an existing private subnet for VPC endpoints (ignored when creating new VPC)"
+    Type: String
+    Default: ""
+    Description: "ID of existing private subnet for VPC endpoints (required if UseExistingVPC=true)"
 
   VpcCidr:
     Type: String

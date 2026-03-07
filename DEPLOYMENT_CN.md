@@ -10,19 +10,24 @@
 
 [English](README.md) | [简体中文（全球区）](README_CN.md) | **中国区部署**
 
-## 为什么需要中国区专用模板？
+## 为什么选择 AWS 中国区部署 OpenClaw？
 
-AWS 中国区（由光环新网和西云数据运营）与全球区有以下差异：
+AWS 中国区为在中国境内部署 AI 助手提供了独特优势——全球级安全标准与本地合规并行、零端口暴露的安全访问、一键基础设施编排，以及全球一致的操作体验。以下从核心维度展示 AWS 中国区方案的特点：
 
-| 差异 | 全球区 | 中国区 |
-|------|--------|--------|
-| **LLM 服务** | Amazon Bedrock（内置） | ❌ 不可用，需使用第三方 API |
-| **账号体系** | 全球 AWS 账号 | 独立的中国区账号 |
-| **控制台地址** | `console.aws.amazon.com` | `console.amazonaws.cn` |
-| **ARN 格式** | `arn:aws:` | `arn:aws-cn:` |
-| **网络环境** | 直连全球 | 需使用国内镜像加速 |
+| 维度 | AWS 中国区方案 | 国内其他云厂商 | 本地自建方案 |
+|------|---------------|---------------|-------------|
+| **安全合规** | 等保三级 + ISO 27001/27017/27018 + SOC 1/2/3，继承 AWS 全球安全体系 | 安全认证覆盖度参差不齐 | 完全自负，无专业安全服务 |
+| **零端口暴露访问** | SSM Session Manager，无需开放 SSH/公网端口 | 通常需开放 SSH 或配置 VPN | 需自行配置内网穿透 |
+| **负责任 AI** | AWS 负责任 AI 框架 + SiliconFlow 算法备案，CloudTrail 全量审计 | AI 治理框架成熟度不一 | 无平台级保障，合规风险自担 |
+| **数据主权** | 光环新网/西云数据本地运营，数据不出境 | 数据留在国内 | 数据完全本地 |
+| **一键部署** | CloudFormation 模板，约 10 分钟 | 需额外适配 OpenClaw 部署脚本 | 手动安装配置 |
+| **全球一致体验** | 与 AWS 全球区操作一致，零学习成本 | 独立操作逻辑，迁移成本高 | N/A |
+| **性价比** | Graviton ARM 实例，低至 ~80 CNY/月 | 价格各异 | 取决于自有硬件 |
+| **可靠性** | 企业级 SLA，自动化运维（CloudWatch + SSM） | 企业级 SLA | 依赖本地硬件和网络 |
 
-本模板（`clawdbot-china.yaml`）专为中国区设计，默认使用 [SiliconFlow](https://siliconflow.cn/) 作为 LLM 提供商，内置国内镜像加速（清华 TUNA Docker 镜像、npmmirror），确保部署过程流畅。
+> **总结**：AWS 中国区的核心优势在于——**全球级安全标准本地化落地**、**SSM 零端口暴露的安全访问方式**、**CloudFormation 一键可重复部署**，以及与 AWS 全球区一致的操作体验。如果你或你的团队已有 AWS 使用经验，这是最高效、最安全的选择。
+
+本模板（`clawdbot-china.yaml`）专为 AWS 中国区设计，默认使用 [SiliconFlow](https://siliconflow.cn/) 作为 LLM 提供商，内置国内镜像加速（Docker 国内镜像源、npmmirror），确保部署过程流畅。
 
 ## 支持的 LLM 模型
 
@@ -642,7 +647,7 @@ aws --profile china --region cn-north-1 cloudformation wait stack-delete-complet
 | **可选模型** | Nova、Claude、DeepSeek、Llama、Kimi | DeepSeek、Qwen 等 |
 | **模板文件** | `clawdbot-bedrock.yaml` | `clawdbot-china.yaml` |
 | **部署区域** | us-east-1、us-west-2、eu-west-1、ap-northeast-1 | cn-north-1、cn-northwest-1 |
-| **网络加速** | 不需要 | 清华 TUNA Docker 镜像、npmmirror |
+| **网络加速** | 不需要 | Docker 国内镜像源、npmmirror |
 | **月费（基础设施）** | ~$84 (USD) | ~170-400 CNY |
 
 ## 资源链接
