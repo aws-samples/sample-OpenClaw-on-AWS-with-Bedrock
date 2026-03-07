@@ -288,6 +288,23 @@ Uses SiliconFlow (DeepSeek, Qwen, GLM) instead of Bedrock. Requires a SiliconFlo
 
 ---
 
+### Data Protection
+
+```yaml
+EnableDataProtection: false  # Default: data deleted with stack
+  # When true:
+  # - Data volume retained on stack delete
+  # - Preserves chat history, configs, credentials
+  # - Allows instance replacement without data loss
+  
+  # When false:
+  # - Data volume deleted with stack (clean removal)
+```
+
+**Storage layout:**
+- Root volume (30GB): OS, applications, and OpenClaw data (default)
+- Data volume (30GB): `/data` → symlinked to `~/.openclaw` (when EnableDataProtection=true)
+
 ## Security
 
 | Layer | What it does |
