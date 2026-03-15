@@ -152,6 +152,8 @@ Conditions:
   CreateAlarmNotifications: !And
     - !Equals [!Ref EnableCloudWatchAlarms, "true"]
     - !Not [!Equals [!Ref AlarmNotificationEmail, ""]]
+  ProtectData: !Equals [!Ref EnableDataProtection, "true"]
+  DeleteData: !Not [!Equals [!Ref EnableDataProtection, "true"]]
 
 Mappings:
   # Architecture detection based on instance type
@@ -395,6 +397,35 @@ Resources:
         - Key: Name
           Value: !Sub "${AWS::StackName}-sg"
 
+  # ==================== Data Volume ====================
+  OpenClawDataVolumeRetained:
+    Type: AWS::EC2::Volume
+    Condition: ProtectData
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Size: 30
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-data"
+
+  OpenClawDataVolumeNotRetained:
+    Type: AWS::EC2::Volume
+    Condition: DeleteData
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Size: 30
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-data"
+
   # ==================== EC2 Instance ====================
   OpenClawInstance:
     Type: AWS::EC2::Instance
@@ -405,6 +436,9 @@ Resources:
       InstanceType: !Ref InstanceType
       KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
       IamInstanceProfile: !Ref OpenClawInstanceProfile
+      Volumes:
+        - Device: /dev/sdf
+          VolumeId: !If [ProtectData, !Ref OpenClawDataVolumeRetained, !Ref OpenClawDataVolumeNotRetained]
       NetworkInterfaces:
         - AssociatePublicIpAddress: true
           DeviceIndex: 0
@@ -430,6 +464,35 @@ Resources:
           echo "=========================================="
           
           export DEBIAN_FRONTEND=noninteractive
+          
+          # Mount data volume
+          echo "[0/9] Mounting data volume..."
+          # Find the data volume - look for unformatted or openclaw-data labeled device
+          DATA_DEVICE=""
+          for dev in /dev/nvme1n1 /dev/xvdf /dev/sdf; do
+            if [ -b "$dev" ]; then
+              DATA_DEVICE="$dev"
+              break
+            fi
+          done
+          # Fallback: find by lsblk (second disk, not root)
+          if [ -z "$DATA_DEVICE" ]; then
+            DATA_DEVICE=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | grep -v "$(findmnt -n -o SOURCE / | sed 's/p[0-9]*$//')" | head -1)
+          fi
+          
+          if [ -n "$DATA_DEVICE" ] && [ -b "$DATA_DEVICE" ]; then
+            if ! blkid "$DATA_DEVICE" | grep -q ext4; then
+              echo "Formatting $DATA_DEVICE..."
+              mkfs.ext4 -L openclaw-data "$DATA_DEVICE"
+            fi
+            mkdir -p /data
+            mount "$DATA_DEVICE" /data || true
+            grep -q "$DATA_DEVICE" /etc/fstab || \
+              echo "$DATA_DEVICE /data ext4 defaults,nofail 0 2" >> /etc/fstab
+            mkdir -p /data/openclaw
+            chown ubuntu:ubuntu /data/openclaw
+            [ -L /home/ubuntu/.openclaw ] || ln -sf /data/openclaw /home/ubuntu/.openclaw
+          fi
           
           # System update
           echo "[1/9] Updating system..."
@@ -978,3 +1041,13 @@ Outputs:
   InstanceArchitecture:
     Description: "Instance architecture"
     Value: !FindInMap [ArchitectureMap, !Ref InstanceType, Arch]
+
+  DataVolumeIdRetained:
+    Condition: ProtectData
+    Description: "Data volume ID (retained on stack delete)"
+    Value: !Ref OpenClawDataVolumeRetained
+
+  DataVolumeIdNotRetained:
+    Condition: DeleteData
+    Description: "Data volume ID (deleted with stack)"
+    Value: !Ref OpenClawDataVolumeNotRetained

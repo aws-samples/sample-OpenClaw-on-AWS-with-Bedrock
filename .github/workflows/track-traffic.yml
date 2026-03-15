@@ -1,0 +1,50 @@
+name: Track GitHub Traffic
+
+on:
+  schedule:
+    - cron: '0 1 * * *'  # 每天 UTC 1:00 (北京时间 9:00)
+  workflow_dispatch:      # 支持手动触发
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch clone traffic
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          REPO="${{ github.repository }}"
+
+          # 拉取今天的 clone 数据
+          CLONES=$(curl -s \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$REPO/traffic/clones")
+
+          # 拉取今天的 views 数据
+          VIEWS=$(curl -s \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$REPO/traffic/views")
+
+          # 追加到历史文件 (每行一个 JSON 对象，带日期)
+          mkdir -p traffic
+          echo "{\"fetched_at\":\"$DATE\",\"clones\":$CLONES}" >> traffic/clones-history.ndjson
+          echo "{\"fetched_at\":\"$DATE\",\"views\":$VIEWS}" >> traffic/views-history.ndjson
+
+          echo "Fetched traffic data for $DATE"
+          echo "Clones today: $(echo $CLONES | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get(\"count\",0), \"total,\", d.get(\"uniques\",0), \"unique\")')"
+
+      - name: Commit traffic data
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add traffic/
+          git diff --staged --quiet || git commit -m "chore: traffic data $(date -u +%Y-%m-%d)"
+          git push

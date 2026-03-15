@@ -1,0 +1,91 @@
+{"fetched_at":"2026-03-12","views":{
+  "count": 15021,
+  "uniques": 4351,
+  "views": [
+    {
+      "timestamp": "2026-02-26T00:00:00Z",
+      "count": 1103,
+      "uniques": 504
+    },
+    {
+      "timestamp": "2026-02-27T00:00:00Z",
+      "count": 1439,
+      "uniques": 503
+    },
+    {
+      "timestamp": "2026-02-28T00:00:00Z",
+      "count": 723,
+      "uniques": 334
+    },
+    {
+      "timestamp": "2026-03-01T00:00:00Z",
+      "count": 626,
+      "uniques": 240
+    },
+    {
+      "timestamp": "2026-03-02T00:00:00Z",
+      "count": 1792,
+      "uniques": 544
+    },
+    {
+      "timestamp": "2026-03-03T00:00:00Z",
+      "count": 1344,
+      "uniques": 531
+    },
+    {
+      "timestamp": "2026-03-04T00:00:00Z",
+      "count": 1282,
+      "uniques": 464
+    },
+    {
+      "timestamp": "2026-03-05T00:00:00Z",
+      "count": 1272,
+      "uniques": 525
+    },
+    {
+      "timestamp": "2026-03-06T00:00:00Z",
+      "count": 1278,
+      "uniques": 498
+    },
+    {
+      "timestamp": "2026-03-07T00:00:00Z",
+      "count": 691,
+      "uniques": 249
+    },
+    {
+      "timestamp": "2026-03-08T00:00:00Z",
+      "count": 549,
+      "uniques": 216
+    },
+    {
+      "timestamp": "2026-03-09T00:00:00Z",
+      "count": 1064,
+      "uniques": 445
+    },
+    {
+      "timestamp": "2026-03-10T00:00:00Z",
+      "count": 1094,
+      "uniques": 401
+    },
+    {
+      "timestamp": "2026-03-11T00:00:00Z",
+      "count": 764,
+      "uniques": 317
+    }
+  ]
+}}
+{"fetched_at":"2026-03-13","views":{
+  "message": "Resource not accessible by integration",
+  "documentation_url": "https://docs.github.com/rest/metrics/traffic#get-page-views",
+  "status": "403"
+}}
+{"fetched_at":"2026-03-14","views":{
+  "message": "Resource not accessible by integration",
+  "documentation_url": "https://docs.github.com/rest/metrics/traffic#get-page-views",
+  "status": "403"
+}}
+{"fetched_at":"2026-03-15","views":{
+  "message": "Resource not accessible by integration",
+  "documentation_url": "https://docs.github.com/rest/metrics/traffic#get-page-views",
+  "status": "403"
+}}

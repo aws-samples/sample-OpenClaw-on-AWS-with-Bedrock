@@ -1,0 +1,143 @@
+<mxfile host="app.diagrams.net" modified="2026-03-09" type="device">
+  <diagram name="Architecture" id="arch1">
+    <mxGraphModel dx="2074" dy="1156" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- AWS Cloud Region -->
+        <mxCell id="aws" value="AWS Cloud" style="points=[];shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_aws_cloud;grStroke=1;verticalAlign=top;align=left;spacingLeft=30;dashed=0;fontStyle=1;fontSize=16;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="40" y="160" width="1520" height="800" as="geometry"/>
+        </mxCell>
+
+        <!-- ═══ Users ═══ -->
+        <mxCell id="u1" value="WhatsApp" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.mobile_client;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;fontStyle=1;fontSize=13;fillColor=#FF6B6B;fontColor=#333;" vertex="1" parent="1">
+          <mxGeometry x="140" y="40" width="60" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="u2" value="Telegram" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.mobile_client;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;fontStyle=1;fontSize=13;fillColor=#FF6B6B;fontColor=#333;" vertex="1" parent="1">
+          <mxGeometry x="340" y="40" width="60" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="u3" value="Discord" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.mobile_client;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;fontStyle=1;fontSize=13;fillColor=#FF6B6B;fontColor=#333;" vertex="1" parent="1">
+          <mxGeometry x="540" y="40" width="60" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="u4" value="Slack" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.mobile_client;labelPosition=center;verticalLabelPosition=bottom;align=center;verticalAlign=top;fontStyle=1;fontSize=13;fillColor=#FF6B6B;fontColor=#333;" vertex="1" parent="1">
+          <mxGeometry x="740" y="40" width="60" height="60" as="geometry"/>
+        </mxCell>
+
+        <!-- ═══ EC2 Gateway Group ═══ -->
+        <mxCell id="gw_group" value="EC2 Gateway (Always-On)" style="points=[];shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_ec2_instance_contents;grStroke=1;verticalAlign=top;align=left;spacingLeft=30;dashed=0;fontStyle=1;fontSize=14;fillColor=#E8F5E9;strokeColor=#4ECDC4;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="60" y="200" width="700" height="280" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="gw1" value="OpenClaw Gateway&#xa;Node.js | port 18789&#xa;Channels | Web UI | Cron" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#4ECDC4;fontColor=#fff;strokeColor=#37474F;fontSize=12;fontStyle=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="80" y="240" width="300" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="gw2" value="Tenant Router&#xa;Python | port 8090&#xa;Auth | tenant_id | Queue" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#4ECDC4;fontColor=#fff;strokeColor=#37474F;fontSize=12;fontStyle=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="420" y="240" width="300" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="gw3" value="Admin Console&#xa;Org Tree | Permissions | Audit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#26A69A;fontColor=#fff;strokeColor=#37474F;fontSize=12;fontStyle=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="80" y="360" width="300" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="gw4" value="Auth Agent&#xa;Risk | Approval | 30min TTL" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#26A69A;fontColor=#fff;strokeColor=#37474F;fontSize=12;fontStyle=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="420" y="360" width="300" height="70" as="geometry"/>
+        </mxCell>
+
+        <!-- ═══ AgentCore Runtime Group ═══ -->
+        <mxCell id="ac_group" value="AgentCore Runtime (Serverless, On-Demand)" style="points=[];shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_on_premise;grStroke=1;verticalAlign=top;align=left;spacingLeft=30;dashed=1;fontStyle=1;fontSize=14;fillColor=#E3F2FD;strokeColor=#45B7D1;strokeWidth=2;dashPattern=8 4;" vertex="1" parent="1">
+          <mxGeometry x="60" y="530" width="700" height="400" as="geometry"/>
+        </mxCell>
+
+        <!-- microVM 1 -->
+        <mxCell id="vm1_group" value="Firecracker microVM&#xa;tenant: wa__sarah" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#45B7D1;strokeWidth=2;dashed=1;verticalAlign=top;fontSize=12;fontStyle=1;fontColor=#45B7D1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="80" y="570" width="300" height="330" as="geometry"/>
+        </mxCell>
+        <mxCell id="vm1_entry" value="entrypoint.sh&#xa;S3 pull → start → watchdog → flush" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0288D1;fontColor=#fff;strokeColor=#01579B;fontSize=11;fontStyle=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="100" y="620" width="260" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="vm1_server" value="server.py (wrapper)&#xa;Plan A inject | Plan E audit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0277BD;fontColor=#fff;strokeColor=#01579B;fontSize=11;fontStyle=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="100" y="695" width="260" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="vm1_oc" value="🦞 OpenClaw (native)&#xa;Unmodified | Zero invasion&#xa;SOUL.md | MEMORY.md | Skills" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#01579B;fontColor=#fff;strokeColor=#002171;fontSize=12;fontStyle=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="100" y="770" width="260" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- microVM 2 -->
+        <mxCell id="vm2_group" value="Firecracker microVM&#xa;tenant: tg__alex" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#45B7D1;strokeWidth=2;dashed=1;verticalAlign=top;fontSize=12;fontStyle=1;fontColor=#45B7D1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="420" y="570" width="300" height="330" as="geometry"/>
+        </mxCell>
+        <mxCell id="vm2_entry" value="entrypoint.sh&#xa;S3 pull → start → watchdog → flush" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0288D1;fontColor=#fff;strokeColor=#01579B;fontSize=11;fontStyle=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="440" y="620" width="260" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="vm2_server" value="server.py (wrapper)&#xa;Plan A inject | Plan E audit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0277BD;fontColor=#fff;strokeColor=#01579B;fontSize=11;fontStyle=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="440" y="695" width="260" height="55" as="geometry"/>
+        </mxCell>
+        <mxCell id="vm2_oc" value="🦞 OpenClaw (native)&#xa;Unmodified | Zero invasion&#xa;SOUL.md | MEMORY.md | Skills" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#01579B;fontColor=#fff;strokeColor=#002171;fontSize=12;fontStyle=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="440" y="770" width="260" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- ═══ AWS Services (Right Side) ═══ -->
+        <mxCell id="s3" value="S3&#xa;openclaw-tenants/&#xa;{tenant_id}/workspace/&#xa;_shared/skills/ | templates/" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.s3;labelPosition=right;verticalLabelPosition=middle;align=left;verticalAlign=middle;fontStyle=1;fontSize=12;fillColor=#F9A825;fontColor=#333;spacingLeft=10;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="860" y="220" width="60" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ssm" value="SSM Parameter Store&#xa;Permission profiles&#xa;SOUL templates | Tokens" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.systems_manager_parameter_store;labelPosition=right;verticalLabelPosition=middle;align=left;verticalAlign=middle;fontStyle=1;fontSize=12;fillColor=#AB47BC;fontColor=#333;spacingLeft=10;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="220" width="60" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ecr" value="ECR&#xa;Agent Container image&#xa;OpenClaw + wrapper + skills" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.ecr;labelPosition=right;verticalLabelPosition=middle;align=left;verticalAlign=middle;fontStyle=1;fontSize=12;fillColor=#EF5350;fontColor=#333;spacingLeft=10;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="860" y="380" width="60" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="bedrock" value="Amazon Bedrock&#xa;Nova | Claude | DeepSeek&#xa;IAM auth (no API keys)&#xa;Per-tenant metering" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.sagemaker;labelPosition=right;verticalLabelPosition=middle;align=left;verticalAlign=middle;fontStyle=1;fontSize=12;fillColor=#FF8F00;fontColor=#333;spacingLeft=10;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="380" width="60" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="cw" value="CloudWatch Logs&#xa;Structured JSON per tenant&#xa;Compliance audit trail" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.cloudwatch;labelPosition=right;verticalLabelPosition=middle;align=left;verticalAlign=middle;fontStyle=1;fontSize=12;fillColor=#66BB6A;fontColor=#333;spacingLeft=10;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="860" y="540" width="60" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ddb" value="DynamoDB (optional)&#xa;Chat history (multi-turn)&#xa;Cron config | Approval TTL" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.dynamodb;labelPosition=right;verticalLabelPosition=middle;align=left;verticalAlign=middle;fontStyle=1;fontSize=12;fillColor=#FF7043;fontColor=#333;spacingLeft=10;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="540" width="60" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="iam" value="IAM Roles&#xa;Least privilege per microVM&#xa;S3 path isolation" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.identity_and_access_management;labelPosition=right;verticalLabelPosition=middle;align=left;verticalAlign=middle;fontStyle=1;fontSize=12;fillColor=#78909C;fontColor=#333;spacingLeft=10;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="860" y="700" width="60" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ct" value="CloudTrail&#xa;Every Bedrock API call&#xa;SOC2 / HIPAA ready" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.cloudtrail;labelPosition=right;verticalLabelPosition=middle;align=left;verticalAlign=middle;fontStyle=1;fontSize=12;fillColor=#90A4AE;fontColor=#333;spacingLeft=10;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="700" width="60" height="60" as="geometry"/>
+        </mxCell>
+
+        <!-- ═══ Curved Arrows ═══ -->
+        <!-- Users → Gateway -->
+        <mxCell id="a1" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#FF6B6B;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.3;entryY=0;" edge="1" source="u1" target="gw_group" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="a2" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#FF6B6B;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.4;entryY=0;" edge="1" source="u2" target="gw_group" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="a3" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#FF6B6B;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" source="u3" target="gw_group" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="a4" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#FF6B6B;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.7;entryY=0;" edge="1" source="u4" target="gw_group" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- Gateway → Router -->
+        <mxCell id="a5" value="route" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#4ECDC4;strokeWidth=2;fontSize=11;fontStyle=2;" edge="1" source="gw1" target="gw2" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- Router → microVMs -->
+        <mxCell id="a6" value="invoke(sessionId=tenant_id)" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#45B7D1;strokeWidth=3;fontSize=11;fontStyle=3;" edge="1" source="gw2" target="vm1_entry" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="a7" value="" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#45B7D1;strokeWidth=3;" edge="1" source="gw2" target="vm2_entry" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- microVMs ↔ S3 -->
+        <mxCell id="a8" value="S3 sync&#xa;(pull / push workspace)" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#F9A825;strokeWidth=2;fontSize=11;fontStyle=2;dashed=1;dashPattern=8 4;" edge="1" source="vm1_entry" target="s3" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="a9" value="" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#F9A825;strokeWidth=2;dashed=1;dashPattern=8 4;" edge="1" source="vm2_entry" target="s3" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- Gateway → SSM -->
+        <mxCell id="a10" value="read profiles" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#AB47BC;strokeWidth=2;fontSize=11;fontStyle=2;" edge="1" source="gw2" target="ssm" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- microVMs → Bedrock -->
+        <mxCell id="a11" value="InvokeModel" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#FF8F00;strokeWidth=2.5;fontSize=11;fontStyle=3;" edge="1" source="vm1_oc" target="bedrock" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="a12" value="" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#FF8F00;strokeWidth=2.5;" edge="1" source="vm2_oc" target="bedrock" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- microVMs → CloudWatch -->
+        <mxCell id="a13" value="audit logs" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#66BB6A;strokeWidth=2;fontSize=11;fontStyle=2;" edge="1" source="vm1_server" target="cw" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- ECR → microVMs -->
+        <mxCell id="a14" value="pull image" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;strokeColor=#EF5350;strokeWidth=2;fontSize=11;fontStyle=2;" edge="1" source="ecr" target="vm1_group" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- ═══ Key Insight ═══ -->
+        <mxCell id="key" value="KEY: OpenClaw runs 100% unmodified inside each microVM. All orchestration happens outside." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#01579B;strokeWidth=2;fontSize=14;fontStyle=1;fontColor=#01579B;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="200" y="940" width="800" height="40" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
