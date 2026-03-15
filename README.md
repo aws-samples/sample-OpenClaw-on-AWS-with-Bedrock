@@ -8,6 +8,19 @@ English | [简体中文](README_CN.md)
 [![AWS](https://img.shields.io/badge/AWS-Bedrock-orange.svg)](https://aws.amazon.com/bedrock/)
 [![CloudFormation](https://img.shields.io/badge/IaC-CloudFormation-blue.svg)](https://aws.amazon.com/cloudformation/)
 
+---
+
+## 🎯 Deployment Options
+
+| Mode | Description | Guide | Use Case |
+|------|-------------|-------|----------|
+| **🦞 Single-User** | Personal AI assistant (recommended) | **[→ Quick Start Guide](SINGLE_USER_GUIDE.md)** | Individual use, ~$45-65/month |
+| 🏢 Multi-Tenant | Enterprise platform with AgentCore | [Advanced Guide](README_AGENTCORE.md) | Organizations, multiple users |
+
+> **Most users want Single-User mode** — it's simpler, cheaper, and fully featured. Start there unless you need enterprise multi-tenancy.
+
+---
+
 ## Why This Exists
 
 [OpenClaw](https://github.com/openclaw/openclaw) is the fastest-growing open-source AI assistant — it runs on your hardware, connects to your messaging apps, and actually does things: manages email, browses the web, runs commands, schedules tasks.
@@ -24,12 +37,16 @@ This project solves that. One CloudFormation stack gives you:
 
 Deploy in 8 minutes. Access from your phone.
 
-## Quick Start
+---
+
+## 🚀 Quick Start (Single-User)
+
+**Full guide with troubleshooting: [SINGLE_USER_GUIDE.md](SINGLE_USER_GUIDE.md)**
 
 ### One-Click Deploy
 
 1. Click "Launch Stack" for your region
-2. Select an EC2 key pair
+2. Select an EC2 key pair (optional)
 3. Wait ~8 minutes
 4. Check the Outputs tab
 
@@ -40,7 +57,7 @@ Deploy in 8 minutes. Access from your phone.
 | **EU (Ireland)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=eu-west-1#/stacks/create/review?stackName=openclaw-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
 | **Asia Pacific (Tokyo)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=ap-northeast-1#/stacks/create/review?stackName=openclaw-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
 
-> **Prerequisites**: Enable Bedrock models in the [Bedrock Console](https://console.aws.amazon.com/bedrock/) and create an EC2 key pair in your target region.
+> **Prerequisites**: Enable Bedrock models in the [Bedrock Console](https://console.aws.amazon.com/bedrock/) and create an EC2 key pair in your target region (optional, for SSH access).
 
 ### After Deployment
 
@@ -48,321 +65,201 @@ Deploy in 8 minutes. Access from your phone.
 
 > 🦞 **Just open the Web UI and say hi.** All messaging plugins (WhatsApp, Telegram, Discord, Slack, Feishu) are pre-installed. Tell your OpenClaw which platform you want to connect — it will guide you through the entire setup step by step. No manual configuration needed.
 
+**Quick Access:**
+
 ```bash
 # 1. Install SSM Session Manager Plugin (one-time)
 #    https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html
 
 # 2. Start port forwarding (keep terminal open)
-INSTANCE_ID=$(aws cloudformation describe-stacks \
-  --stack-name openclaw-bedrock \
-  --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue' \
-  --output text --region us-west-2)
-
 aws ssm start-session \
-  --target $INSTANCE_ID \
-  --region us-west-2 \
+  --target i-YOUR_INSTANCE_ID \
+  --region YOUR_REGION \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 
-# 3. Get your token (in a second terminal)
-TOKEN=$(aws ssm get-parameter \
-  --name /openclaw/openclaw-bedrock/gateway-token \
-  --with-decryption \
-  --query Parameter.Value \
-  --output text --region us-west-2)
-
-# 4. Open in browser
-echo "http://localhost:18789/?token=$TOKEN"
+# 3. Open in browser (get token from CloudFormation Outputs)
+open "http://localhost:18789/?token=YOUR_TOKEN"
 ```
 
-### CLI Deploy (Alternative)
+**📖 Complete guide:** [SINGLE_USER_GUIDE.md](SINGLE_USER_GUIDE.md)
+- Step-by-step setup
+- Connect Telegram/WhatsApp/Discord/Slack
+- Troubleshooting common issues
+- Backup and maintenance
+- Cost optimization
+
+---
+
+## 🛠️ Maintenance Scripts
+
+Useful scripts for managing your deployment:
 
 ```bash
-aws cloudformation create-stack \
-  --stack-name openclaw-bedrock \
-  --template-body file://clawdbot-bedrock.yaml \
-  --parameters ParameterKey=KeyPairName,ParameterValue=your-keypair \
-  --capabilities CAPABILITY_IAM \
-  --region us-west-2
+# Clone repository
+git clone https://github.com/MakerHe/OpenClaw-AWS-Bedrock.git
+cd OpenClaw-AWS-Bedrock
 
-aws cloudformation wait stack-create-complete \
-  --stack-name openclaw-bedrock --region us-west-2
+# Run health check
+./scripts/health-check.sh
+
+# Backup configuration and workspace
+./scripts/backup.sh
+
+# More scripts available in scripts/ directory
+ls scripts/
 ```
 
-### 🎯 Deploy with Kiro AI
+**Available scripts:**
+- `health-check.sh` - System and OpenClaw health monitoring
+- `backup.sh` - Backup config, workspace, create AMI
+- (More scripts coming soon)
 
-Prefer a guided experience? [Kiro](https://kiro.dev/) walks you through deployment conversationally — just open this repo as a workspace and say "help me deploy OpenClaw".
+---
+
+## 📊 Architecture
+
+### Single-User Mode
+
+```
+You (Telegram/WhatsApp/Discord/Slack)
+  ↓
+OpenClaw Gateway (EC2)
+  ↓
+Amazon Bedrock (Claude/Nova models)
+  ↓
+Response back to you
+```
+
+**Key components:**
+- EC2 instance (t4g.large, Graviton ARM64)
+- OpenClaw Gateway (manages messaging connections)
+- VPC Endpoints (private AWS network access)
+- Amazon Bedrock (10+ models)
+
+### Multi-Tenant Mode (Advanced)
+
+For enterprise deployments with multiple isolated users, see [README_AGENTCORE.md](README_AGENTCORE.md).
+
+---
+
+## 💰 Cost Estimate (Single-User)
+
+| Item | Monthly Cost (USD) |
+|------|--------------------|
+| EC2 (t4g.large, Graviton ARM64) | $20-40 |
+| EBS (30GB) | $2.40 |
+| VPC Endpoints (5 × $0.01/hour) | $29 |
+| Bedrock (pay-per-use) | Variable |
+| **Total** | **~$45-65/month** |
+
+💡 **Tip:** Graviton ARM64 instances are 20-40% cheaper than x86 equivalents with same performance.
+
+**Cost optimization:**
+- Stop EC2 when not in use
+- Use t4g.medium for lighter workloads
+- Monitor Bedrock usage in CloudWatch
+
+---
+
+## 🔒 Security Features
+
+- ✅ **No API Keys** - Uses AWS IAM for Bedrock authentication
+- ✅ **Private Network** - VPC Endpoints keep traffic on AWS private network
+- ✅ **Secure Access** - SSM Session Manager, no SSH ports open by default
+- ✅ **Auditable** - CloudTrail logs every Bedrock API call
+- ✅ **Encrypted** - Data at rest and in transit encrypted
+- ✅ **Minimal Permissions** - IAM role with least-privilege access
+
+**Security best practices:**
+- Run security audit: `openclaw security audit --deep`
+- Enable UFW firewall (see [SINGLE_USER_GUIDE.md](SINGLE_USER_GUIDE.md))
+- Schedule periodic audits
+
+---
+
+## 📱 Connect Messaging Platforms
+
+OpenClaw supports multiple messaging platforms simultaneously:
+
+### Telegram (Easiest)
+1. Open Web UI
+2. Say: "Connect to Telegram"
+3. Follow guided setup
+4. Done!
+
+### WhatsApp
+1. Say: "Connect to WhatsApp"
+2. Scan QR code
+3. Start chatting!
+
+### Discord / Slack / Feishu
+Similar guided setup — just ask OpenClaw!
+
+**Full instructions:** [SINGLE_USER_GUIDE.md - Connect Your Apps](SINGLE_USER_GUIDE.md#connect-your-apps)
+
+---
+
+## 🎯 Deploy with Kiro AI
+
+Prefer a guided, conversational deployment experience? [Kiro](https://kiro.dev/) can help you deploy and configure OpenClaw step-by-step.
 
 **[→ Kiro Deployment Guide](QUICK_START_KIRO.md)**
 
 ---
 
-## Connect Messaging Platforms
+## 📚 Documentation
 
-Once deployed, connect your preferred platform in the Web UI under "Channels":
-
-| Platform | Setup | Guide |
-|----------|-------|-------|
-| **WhatsApp** | Scan QR code from your phone | [docs](https://docs.openclaw.ai/channels/whatsapp) |
-| **Telegram** | Create bot via [@BotFather](https://t.me/botfather), paste token | [docs](https://docs.openclaw.ai/channels/telegram) |
-| **Discord** | Create app in Developer Portal, paste bot token | [docs](https://docs.openclaw.ai/channels/discord) |
-| **Slack** | Create app at api.slack.com, install to workspace | [docs](https://docs.openclaw.ai/channels/slack) |
-| **Microsoft Teams** | Requires Azure Bot setup | [docs](https://docs.openclaw.ai/channels/msteams) |
-| **Lark / Feishu** | Community plugin: [openclaw-feishu](https://www.npmjs.com/package/openclaw-feishu) | — |
-
-**Full platform docs**: [docs.openclaw.ai](https://docs.openclaw.ai/)
+| Document | Description |
+|----------|-------------|
+| **[SINGLE_USER_GUIDE.md](SINGLE_USER_GUIDE.md)** | Complete single-user deployment guide |
+| [README_AGENTCORE.md](README_AGENTCORE.md) | Enterprise multi-tenant architecture |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Detailed deployment options |
+| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Common issues and solutions |
+| [QUICK_START_KIRO.md](QUICK_START_KIRO.md) | Kiro AI deployment guide |
+| [CLAUDE.md](CLAUDE.md) | Claude model configuration |
 
 ---
 
-## What Can OpenClaw Do?
+## 🤝 Contributing
 
-Once connected, just message it:
+Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 
-```
-You: What's the weather in Tokyo?
-You: Summarize this PDF [attach file]
-You: Remind me every day at 9am to check emails
-You: Open google.com and search for "AWS Bedrock pricing"
-```
-
-| Command | What it does |
-|---------|-------------|
-| `/status` | Show model, tokens used, cost |
-| `/new` | Start fresh conversation |
-| `/think high` | Enable deep reasoning mode |
-| `/help` | List all commands |
-
-Voice messages work on WhatsApp and Telegram — OpenClaw transcribes and responds.
+**Areas we'd love help with:**
+- Testing on different AWS regions
+- Documentation improvements
+- Bug reports and fixes
+- New messaging platform integrations
+- Cost optimization strategies
 
 ---
 
-## Architecture
+## 📝 License
 
-```
-You (WhatsApp/Telegram/Discord)
-  │
-  ▼
-┌─────────────────────────────────────────────┐
-│  AWS Cloud                                  │
-│                                             │
-│  EC2 (OpenClaw)  ──IAM──▶  Bedrock         │
-│       │                   (Nova/Claude)     │
-│       │                                     │
-│  VPC Endpoints        CloudTrail            │
-│  (private network)    (audit logs)          │
-└─────────────────────────────────────────────┘
-  │
-  ▼
-You (receive response)
-```
-
-- **EC2**: Runs OpenClaw gateway (~1GB RAM)
-- **Bedrock**: Model inference via IAM (no API keys)
-- **SSM**: Secure access, no public ports
-- **VPC Endpoints**: Private network to Bedrock (optional, +$22/mo)
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## Models
+## 🙏 Acknowledgments
 
-Switch models with one CloudFormation parameter — no code changes:
-
-| Model | Input/Output per 1M tokens | Best for |
-|-------|---------------------------|----------|
-| **Nova 2 Lite** (default) | $0.30 / $2.50 | Everyday tasks, 90% cheaper than Claude |
-| Nova Pro | $0.80 / $3.20 | Balanced performance, multimodal |
-| Claude Sonnet 4.5 | $3.00 / $15.00 | Complex reasoning, coding |
-| Claude Haiku 4.5 | $1.00 / $5.00 | Fast and efficient |
-| DeepSeek R1 | $0.55 / $2.19 | Open-source reasoning |
-| Llama 3.3 70B | — | Open-source alternative |
-| Kimi K2.5 | $0.60 / $3.00 | Multimodal agentic, 262K context |
-
-> Uses [Global CRIS profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html) — deploy in any region, requests auto-route to optimal locations.
+- [OpenClaw](https://github.com/openclaw/openclaw) - The amazing open-source AI assistant
+- [Amazon Bedrock](https://aws.amazon.com/bedrock/) - For providing unified model access
+- All contributors and users!
 
 ---
 
-## Cost
+## ⭐ Star History
 
-### Typical Monthly Cost (Light Usage)
-
-| Component | Cost |
-|-----------|------|
-| EC2 (t4g.medium, Graviton) | $24 |
-| EBS (30GB gp3) | $2.40 |
-| VPC Endpoints (optional) | $22 |
-| Bedrock (Nova 2 Lite, ~100 conv/day) | $5-8 |
-| **Total** | **$31-56** |
-
-### Save Money
-
-- Use Nova 2 Lite instead of Claude → 90% cheaper
-- Use Graviton (ARM) instead of x86 → 20-40% cheaper
-- Skip VPC Endpoints → save $22/mo (less secure)
-- AWS Savings Plans → 30-40% off EC2
-
-### vs. Alternatives
-
-| Option | Cost | What you get |
-|--------|------|-------------|
-| ChatGPT Plus | $20/person/month | Single user, no integrations |
-| This project (5 users) | ~$10/person/month | Multi-user, WhatsApp/Telegram/Discord, full control |
-| Local Mac Mini | $0 server + $20-30 API | Hardware cost, manage yourself |
+If this project helped you, please consider giving it a star! ⭐
 
 ---
 
-## Configuration
+## 📧 Support
 
-### Instance Types
-
-| Type | Monthly | RAM | Architecture | Use case |
-|------|---------|-----|-------------|----------|
-| t4g.small | $12 | 2GB | Graviton ARM | Personal |
-| **t4g.medium** | **$24** | **4GB** | **Graviton ARM** | **Small teams (default)** |
-| t4g.large | $48 | 8GB | Graviton ARM | Medium teams |
-| c7g.xlarge | $108 | 8GB | Graviton ARM | High performance |
-| t3.medium | $30 | 4GB | x86 | x86 compatibility |
-
-### Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `OpenClawModel` | Nova 2 Lite | Bedrock model ID |
-| `InstanceType` | c7g.large | EC2 instance type |
-| `CreateVPCEndpoints` | true | Private networking (+$22/mo) |
-| `EnableSandbox` | true | Docker isolation for code execution |
-| `CreateS3Bucket` | true | S3 bucket for file sharing skill |
-| `InstallS3FilesSkill` | true | Auto-install S3 file sharing |
-| `KeyPairName` | none | EC2 key pair (optional, for emergency SSH) |
+- **Documentation:** [docs.openclaw.ai](https://docs.openclaw.ai)
+- **Community:** [OpenClaw Discord](https://discord.com/invite/clawd)
+- **Issues:** [GitHub Issues](https://github.com/MakerHe/OpenClaw-AWS-Bedrock/issues)
 
 ---
 
-## Deployment Options
-
-### Standard (EC2) — This README
-
-Best for most users. Fixed cost, full control, 24/7 availability.
-
-### Multi-Tenant Platform (AgentCore Runtime) — [README_AGENTCORE.md](README_AGENTCORE.md)
-
-> ⚠️ In development — targeting v1.0 by June 2026. [Roadmap →](ROADMAP.md)
-
-Turn OpenClaw from a single-user tool into an enterprise platform: every employee gets an AI assistant, every team gets an AI assistant, every department gets an AI assistant — with clear boundaries, shared skills, and centralized governance.
-
-| What you get | How |
-|---|---|
-| Tenant isolation | Firecracker microVM per user (AgentCore Runtime) |
-| Shared model access | One Bedrock account, per-tenant metering (~$1-2/person/month) |
-| Shared skills with bundled SaaS keys | Install once, authorize per tenant, credentials never exposed |
-| Per-tenant permission profiles | SSM-based rules, hot-reload, Plan A + E enforcement |
-| Controlled info sharing | Cross-tenant data policies, audited, opt-in |
-| Human approval workflow | Auth Agent → admin notification → approve/reject via messaging |
-| Elastic compute | Auto-scaling microVMs, burst capacity, pay-per-use |
-
-**[→ Full Multi-Tenant Guide](README_AGENTCORE.md)** · **[→ Roadmap](ROADMAP.md)**
-
-### macOS (Apple Silicon) — For iOS/macOS Development
-
-| Type | Chip | RAM | Monthly |
-|------|------|-----|---------|
-| mac2.metal | M1 | 16GB | $468 |
-| mac2-m2.metal | M2 | 24GB | $632 |
-| mac2-m2pro.metal | M2 Pro | 32GB | $792 |
-
-> 24-hour minimum allocation. Only use for Apple development workflows — Linux is 12x cheaper for general use.
-
-| Region | Launch |
-|--------|--------|
-| **US West (Oregon)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-west-2#/stacks/create/review?stackName=openclaw-mac&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock-mac.yaml) |
-| **US East (Virginia)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/review?stackName=openclaw-mac&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock-mac.yaml) |
-
-### 🇨🇳 AWS China (Beijing/Ningxia)
-
-Uses SiliconFlow (DeepSeek, Qwen, GLM) instead of Bedrock. Requires a SiliconFlow API key.
-
-| Region | Launch |
-|--------|--------|
-| **cn-north-1 (Beijing)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://cn-north-1.console.amazonaws.cn/cloudformation/home?region=cn-north-1#/stacks/create/review?stackName=openclaw-china&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-china.yaml) |
-| **cn-northwest-1 (Ningxia)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://cn-northwest-1.console.amazonaws.cn/cloudformation/home?region=cn-northwest-1#/stacks/create/review?stackName=openclaw-china&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-china.yaml) |
-
-**[→ China Deployment Guide (中国区部署指南)](DEPLOYMENT_CN.md)**
-
----
-
-## Security
-
-| Layer | What it does |
-|-------|-------------|
-| **IAM Roles** | No API keys — automatic credential rotation |
-| **SSM Session Manager** | No public ports, session logging |
-| **VPC Endpoints** | Bedrock traffic stays on private network |
-| **SSM Parameter Store** | Gateway token stored as SecureString, never on disk |
-| **Supply-chain protection** | Docker via GPG-signed repos, NVM via download-then-execute (no `curl \| sh`) |
-| **Docker Sandbox** | Isolates code execution in group chats |
-| **CloudTrail** | Every Bedrock API call audited |
-
-**[→ Full Security Guide](SECURITY.md)**
-
----
-
-## Community Skills
-
-Optional extensions for OpenClaw:
-
-- [S3 Files Skill](skills/s3-files-skill/) — Upload and share files via S3 with pre-signed URLs (auto-installed by default)
-- [Kiro CLI Skill](skills/openclaw-kirocli-skill/) — AI-powered coding via Kiro CLI
-- [AWS Backup Skill](https://github.com/genedragon/openclaw-aws-backup-skill) — S3 backup/restore with optional KMS encryption
-
----
-
-## SSH-like Access via SSM
-
-```bash
-# Start interactive session
-aws ssm start-session --target i-xxxxxxxxx --region us-east-1
-
-# Switch to ubuntu user
-sudo su - ubuntu
-
-# Run OpenClaw commands
-openclaw --version
-openclaw gateway status
-```
-
----
-
-## Troubleshooting
-
-Common issues and fixes: [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
-
-Step-by-step deployment guide: [DEPLOYMENT.md](DEPLOYMENT.md)
-
----
-
-## Contributing
-
-We're building the enterprise OpenClaw platform in the open — from single-user deployment to multi-tenant SaaS. Whether you're an enterprise architect, a skill developer, a security researcher, or just someone who wants a better AI assistant, there's a place for you.
-
-Areas where we need help most:
-- End-to-end multi-tenant testing
-- Skills with bundled SaaS credentials (Jira, Salesforce, SAP)
-- Agent-to-agent orchestration
-- Cost benchmarking (AgentCore vs EC2)
-- Security audits and penetration testing
-
-**[→ Roadmap](ROADMAP.md)** · **[→ Contributing Guide](CONTRIBUTING.md)** · **[→ GitHub Issues](https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/issues)**
-
-## Resources
-
-- [OpenClaw Docs](https://docs.openclaw.ai/) · [OpenClaw GitHub](https://github.com/openclaw/openclaw)
-- [Amazon Bedrock Docs](https://docs.aws.amazon.com/bedrock/) · [SSM Session Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager.html)
-- [OpenClaw on Lightsail](https://aws.amazon.com/blogs/aws/introducing-openclaw-on-amazon-lightsail-to-run-your-autonomous-private-ai-agents/) (official AWS blog)
-
-## Support
-
-- **This Project**: [GitHub Issues](https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/issues)
-- **OpenClaw**: [GitHub Issues](https://github.com/openclaw/openclaw/issues) · [Discord](https://discord.gg/openclaw)
-- **AWS Bedrock**: [AWS re:Post](https://repost.aws/tags/bedrock)
-
----
-
-**Built with Kiro** 🦞
+**Ready to deploy?** → **[Start with Single-User Guide](SINGLE_USER_GUIDE.md)** 🦞
