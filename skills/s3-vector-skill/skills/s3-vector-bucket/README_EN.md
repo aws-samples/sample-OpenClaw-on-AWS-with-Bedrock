@@ -29,8 +29,16 @@
 
 ### Prerequisites
 
-- Python 3.8+
-- boto3 (AWS Python SDK)
+| Dependency | Requirement | Notes |
+|-----------|-------------|-------|
+| **OpenClaw** | >= 2026.3.11 | Required when used as an OpenClaw Skill |
+| **Node.js** | >= 18.0.0 | OpenClaw runtime dependency |
+| **Python** | >= 3.8 | Script runtime |
+| **boto3** | Latest | AWS Python SDK |
+| **AWS Account** | Bedrock + S3 | S3 Vectors and Bedrock access must be enabled |
+| **AWS Credentials** | IAM Role / AWS CLI | Use IAM Role on EC2/EKS, `aws configure` locally |
+
+> ⚠️ **Bedrock Model Access**: The Skill Router depends on `amazon.titan-embed-text-v2:0`. You must manually enable it in AWS Console → Bedrock → Model access.
 
 ```bash
 pip3 install boto3 --upgrade
