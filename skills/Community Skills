@@ -36,3 +36,25 @@ openclaw-aws-backup test
 - Prefer KMS encryption for production backups.
 - Configure and review retention policies regularly.
 - Test restore paths before relying on backups in production.
+
+## S3 Vector Bucket Management + Skill Router
+
+- Skill directory: [skills/s3-vector-skill](s3-vector-skill/)
+- Standalone repo: [RadiumGu/s3-vector-skill](https://github.com/RadiumGu/s3-vector-skill)
+- Purpose: Full lifecycle management for Amazon S3 Vectors (16 CRUD scripts) + Skill Router subsystem that reduces per-turn Token consumption by ~91% via semantic Top-K routing.
+- Key services: Amazon S3 Vectors, Amazon Bedrock Titan Embeddings v2.
+- Ownership: community-maintained (not maintained by `aws-samples`).
+
+### Quick start
+
+```bash
+cd skills/s3-vector-skill/skills/s3-vector-bucket
+./install.sh --bucket my-skill-router --yes
+```
+
+### Key capabilities
+
+- **16 vector CRUD scripts**: bucket/index/vector lifecycle management
+- **Skill Router**: offline Skill indexing → online Top-K semantic routing → Hook-based LLM context injection
+- **Incremental builds**: only re-embeds changed Skills, disk cache for cross-process reuse
+- **Multi-Agent support**: auto-scans workspace directories, parallel index building
