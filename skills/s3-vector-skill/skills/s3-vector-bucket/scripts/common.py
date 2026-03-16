@@ -9,7 +9,6 @@ import json
 import os
 import re
 import sys
-from typing import Dict, List, Optional
 
 
 # ── 默认 Skill 扫描目录 ──────────────────────────────────────────────
@@ -228,8 +227,7 @@ def _parse_skill_md_regex(fm: str, path: str) -> dict | None:
     return {"name": name, "description": description, "path": path}
 
 
-def find_skills(skill_dirs=None):
-    # type: (Optional[List[str]]) -> List[Dict]
+def find_skills(skill_dirs: list[str] | None = None) -> list[dict]:
     """递归扫描目录，收集所有有效 SKILL.md"""
     dirs = skill_dirs or DEFAULT_SKILL_DIRS
     skills = []

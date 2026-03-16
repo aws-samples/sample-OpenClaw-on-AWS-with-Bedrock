@@ -9,10 +9,10 @@ import os
 import hashlib
 import random
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
-_clients = {}   # type: Dict[Tuple, object]  # key: (region, profile) → client
-_cache = {}     # type: Dict[str, List[float]]  # key: MD5(text) → embedding vector
+_clients: dict[tuple, object] = {}   # key: (region, profile) → client
+_cache: dict[str, list[float]] = {}  # key: MD5(text) → embedding vector
 
 EMBED_MODEL_ID = "amazon.titan-embed-text-v2:0"
 EMBED_DIMENSION = 1024
@@ -21,11 +21,10 @@ EMBED_REGION = os.getenv("AWS_BEDROCK_REGION", os.getenv("AWS_DEFAULT_REGION", "
 # ── 磁盘缓存 ─────────────────────────────────────────────────────────
 CACHE_DIR = os.path.expanduser("~/.cache/s3-vector-skill")
 CACHE_FILE = os.path.join(CACHE_DIR, "embed_cache.json")
-_disk_cache = None  # type: Optional[Dict[str, List[float]]]  # lazy load
+_disk_cache: dict[str, list[float]] | None = None  # lazy load
 
 
-def _load_disk_cache():
-    # type: () -> Dict[str, List[float]]
+def _load_disk_cache() -> dict[str, list[float]]:
     global _disk_cache
     if _disk_cache is not None:
         return _disk_cache
@@ -72,7 +71,7 @@ def embed_text(
     profile: Optional[str] = None,
     use_cache: bool = True,
     retry: int = 3,
-) -> List[float]:
+) -> list[float]:
     """
     对给定文本生成 1024 维 Titan Embeddings v2 向量。
     优先查内存缓存 → 磁盘缓存 → 调用 API。
@@ -121,11 +120,11 @@ def embed_text(
 
 
 def embed_texts(
-    texts,  # type: List[str]
+    texts: list[str],
     region: Optional[str] = None,
     profile: Optional[str] = None,
     batch_delay: float = 0.1,
-) -> List[List[float]]:
+) -> list[list[float]]:
     """
     批量生成向量，自动加延迟避免限流。
     """

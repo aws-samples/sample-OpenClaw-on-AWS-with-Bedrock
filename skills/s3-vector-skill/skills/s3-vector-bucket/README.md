@@ -33,7 +33,7 @@
 |------|------|------|
 | **OpenClaw** | >= 2026.3.11 | 作为 OpenClaw Skill 使用时必须 |
 | **Node.js** | >= 18.0.0 | OpenClaw 运行时依赖 |
-| **Python** | >= 3.8 | 脚本运行时 |
+| **Python** | >= 3.10 | 脚本运行时 |
 | **boto3** | 最新版 | AWS Python SDK |
 | **AWS 账号** | Bedrock + S3 | 需开启 S3 Vectors 和 Bedrock 访问权限 |
 | **AWS 凭证** | IAM Role / AWS CLI | EC2/EKS 上使用 IAM Role，本地使用 `aws configure` |
