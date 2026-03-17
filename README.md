@@ -244,21 +244,39 @@ Best for most users. Fixed cost, full control, 24/7 availability.
 
 ### Multi-Tenant Platform (AgentCore Runtime) — [README_AGENTCORE.md](README_AGENTCORE.md)
 
-> ⚠️ In development — targeting v1.0 by June 2026. [Roadmap →](ROADMAP.md)
+> ✅ **E2E verified** — Full pipeline running: IM → Gateway → Bedrock H2 Proxy → Tenant Router → AgentCore Firecracker microVM → OpenClaw CLI → Bedrock → response. [Demo Guide →](demo/README.md)
 
-Turn OpenClaw from a single-user tool into an enterprise platform: every employee gets an AI assistant, every team gets an AI assistant, every department gets an AI assistant — with clear boundaries, shared skills, and centralized governance.
+Turn OpenClaw from a single-user tool into an enterprise platform: every employee gets an isolated AI assistant in a Firecracker microVM, with shared skills, centralized governance, and per-tenant permissions. Zero changes to OpenClaw code.
 
-| What you get | How |
-|---|---|
-| Tenant isolation | Firecracker microVM per user (AgentCore Runtime) |
-| Shared model access | One Bedrock account, per-tenant metering (~$1-2/person/month) |
-| Shared skills with bundled SaaS keys | Install once, authorize per tenant, credentials never exposed |
-| Per-tenant permission profiles | SSM-based rules, hot-reload, Plan A + E enforcement |
-| Controlled info sharing | Cross-tenant data policies, audited, opt-in |
-| Human approval workflow | Auth Agent → admin notification → approve/reject via messaging |
-| Elastic compute | Auto-scaling microVMs, burst capacity, pay-per-use |
+```
+Telegram/WhatsApp message
+  → OpenClaw Gateway (IM channels, Web UI)
+  → Bedrock H2 Proxy (intercepts AWS SDK HTTP/2 calls)
+  → Tenant Router (derives tenant_id per employee)
+  → AgentCore Runtime (Firecracker microVM, per-tenant isolation)
+  → OpenClaw CLI → Bedrock Nova 2 Lite
+  → Response returns to employee's IM
+```
 
-**[→ Full Multi-Tenant Guide](README_AGENTCORE.md)** · **[→ Roadmap](ROADMAP.md)**
+| What you get | How | Status |
+|---|---|---|
+| Tenant isolation | Firecracker microVM per user (AgentCore Runtime) | ✅ Verified |
+| Shared model access | One Bedrock account, per-tenant metering (~$1-2/person/month) | ✅ Verified |
+| Per-tenant permission profiles | SSM-based rules, Plan A (prompt injection) + Plan E (audit) | ✅ Verified |
+| IM channel management | Same setup as single-user (WhatsApp/Telegram/Discord) | ✅ Verified |
+| Zero OpenClaw code changes | All management via external layers (proxy, router, entrypoint) | ✅ Verified |
+| Shared skills with bundled SaaS keys | Install once, authorize per tenant | 🔜 Next |
+| Human approval workflow | Auth Agent → admin notification → approve/reject | 🔜 Next |
+| Elastic compute | Auto-scaling microVMs, burst capacity, pay-per-use | ✅ Verified |
+
+| Metric | Value |
+|--------|-------|
+| Cold start (first request) | ~30s |
+| Warm request | ~10s |
+| Cost for 50 users | ~$65-110/month (~$1.30-2.20/person) |
+| vs ChatGPT Plus (50 users) | $1,000/month |
+
+**[→ Full Multi-Tenant Guide](README_AGENTCORE.md)** · **[→ Demo Guide](demo/README.md)** · **[→ Roadmap](ROADMAP.md)**
 
 ### macOS (Apple Silicon) — For iOS/macOS Development
 

@@ -1,162 +1,177 @@
 # Roadmap
 
-Target: **v1.0 by June 2026** — a production-ready multi-tenant OpenClaw platform.
+Target: **v1.0 by April 30, 2026** — production-ready multi-tenant OpenClaw platform.
 
 ---
 
-## ✅ Done (March 2026)
+## ✅ Done (as of March 17, 2026)
 
-### Standard Deployment (EC2) — Production Ready
+### Standard Deployment — Production Ready
+- One-click CloudFormation (Linux/Mac/China), 10 Bedrock models, Graviton ARM
+- SSM Session Manager, VPC Endpoints, CloudTrail, Docker sandbox
+- S3 Files Skill, Kiro conversational deploy guide
 
-- One-click CloudFormation deploy (Linux/Mac/China regions)
-- 10 Bedrock models, Graviton ARM, VPC Endpoints
-- SSM Session Manager (no public ports)
-- Gateway token in SSM SecureString (never on disk)
-- Supply-chain hardened (no `curl | sh`)
-- S3 Files Skill auto-installed
-- Docker sandbox for code isolation
-- Kiro conversational deployment guide
-- Bedrock Mantle regional support (conditional VPC endpoint)
+### Multi-Tenant E2E Pipeline — Verified ✅
+- Agent Container: `openclaw agent` CLI subprocess, Plan A + Plan E
+- Bedrock H2 Proxy: Node.js HTTP/2, intercepts AWS SDK calls via `AWS_ENDPOINT_URL`
+- Tenant Router: tenant_id derivation, AgentCore invoke (300s timeout)
+- AgentCore Runtime: Firecracker microVM per tenant, ECR image
+- IM bridging: zero OpenClaw code changes, IM config same as single-user
+- systemd services, CloudFormation one-stack, Admin Console UI
 
-### Multi-Tenant Core Components
-
-- Agent Container: Plan A (system prompt injection) + Plan E (response audit)
-- Auth Agent: risk assessment, 30-min auto-reject, ApprovalToken issuance (max 24h)
-- Safety module: 13 memory poisoning patterns, input validation, path traversal checks
-- Identity module: token lifecycle (issue/validate/revoke)
-- Observability: structured CloudWatch JSON per tenant
-- CloudFormation: EC2 + ECR + SSM + CloudWatch (one stack)
-- Gateway Tenant Router: tenant_id derivation, AgentCore Runtime invocation
-- Auth Agent input validation: 7 prompt injection patterns on approval messages
-- Admin Console: visual management UI (dashboard, tenant permissions, approvals, audit log, live demo)
+| Metric | Current |
+|--------|---------|
+| Cold start | ~30s |
+| Warm request | ~10s |
+| Cost (50 users) | ~$1.30-2.20/person/month |
 
 ---
 
-## 🔨 March — April 2026: Wire It Up
+## Week 1: Mar 17-23 — Optimize & Stabilize
 
-The critical path to a working end-to-end multi-tenant flow.
+### Cold Start Optimization (30s → <15s)
+- [ ] `NODE_COMPILE_CACHE` + `OPENCLAW_NO_RESPAWN=1` in Dockerfile
+- [ ] Lazy S3 sync: serve first request from default workspace, pull in background
+- [ ] Slim image: strip dev deps, pre-compile node_modules
+- [ ] Benchmark each phase, identify bottleneck
 
-### End-to-End Integration
+### Production Reliability
+- [ ] Tenant Router as systemd service (auto-start on boot)
+- [ ] Health check endpoint for all 3 services
+- [ ] Log rotation, crash recovery
+- [ ] Automated E2E smoke test script
 
-- [ ] Integration test suite: WhatsApp message → Tenant Router → AgentCore → Container → response
-- [ ] Tenant Router systemd service (auto-start on EC2 boot)
-- [ ] OpenClaw webhook configuration to forward messages to Tenant Router (port 8090)
-- [ ] Verify Firecracker microVM isolation per tenant (filesystem, memory, network)
-- [ ] Load test: 50 concurrent tenants, measure latency and cost
+### IM End-to-End Validation
+- [ ] Configure Telegram bot, send real message through full pipeline
+- [ ] Two different users → verify different tenant_ids and microVM isolation
+- [ ] WhatsApp QR pairing through multi-tenant gateway
+
+---
+
+## Week 2: Mar 24-30 — Permission & Cost
+
+### Permission Enforcement
+- [ ] Test Plan A bypass attempts, measure and fix gaps
+- [ ] Plan E real-time blocking option (not just audit)
+- [ ] Tool allowlist in openclaw.json per tenant
+- [ ] Permission hot-reload from SSM (no microVM restart)
+- [ ] Cedar policy engine evaluation
+
+### Per-Tenant Cost Metering
+- [ ] Track Bedrock tokens per tenant_id (from server.py response)
+- [ ] CloudWatch metric: `BedrockTokens` by tenant_id
+- [ ] Monthly cost report (S3 CSV)
+- [ ] Budget alerts when tenant exceeds threshold
 
 ### Auth Agent Channel Delivery
-
-- [ ] Send approval notifications to admin's WhatsApp via OpenClaw Gateway API
-- [ ] Send approval notifications to admin's Telegram via Bot API
-- [ ] Parse admin replies: "approve", "reject", "approve temporary 2h", "approve persistent"
-- [ ] Handle edge cases: admin offline, message delivery failure, duplicate replies
-
-### Cost Validation
-
-- [ ] Benchmark AgentCore cold start latency (first message per tenant)
-- [ ] Measure cost at 10, 100, 1000 conversations/day
-- [ ] Document break-even point: when AgentCore becomes cheaper than dedicated EC2
-- [ ] Per-tenant cost metering and chargeback reporting
+- [ ] Send approval notifications via WhatsApp/Telegram
+- [ ] Parse admin replies: approve/reject/temporary
+- [ ] Handle offline admin, delivery failure
 
 ---
 
-## 🎯 April — May 2026: Enterprise Features
+## Week 3: Mar 31 - Apr 6 — Shared Skills & Rules
 
 ### Shared Skills with Bundled Credentials
-
-- [ ] Skill packaging format: manifest declaring required permissions, bundled SaaS keys
-- [ ] Skill installation API: install once, authorize per tenant profile
-- [ ] Credential isolation: SaaS keys stored in SSM SecureString, injected at runtime, never exposed to tenants
-- [ ] Example skills: Jira (ticket management), Slack (cross-channel messaging), S3 (file sharing)
+- [ ] Skill packaging format: manifest + bundled SaaS keys
+- [ ] Install once, authorize per tenant profile
+- [ ] Credential isolation: SSM SecureString, injected at runtime
+- [ ] Example: Jira skill, S3 file sharing skill
 
 ### Per-Tenant Enterprise Rules
-
-- [ ] Rule templates: "finance-readonly", "engineering-full", "intern-basic"
-- [ ] SSM-based rule hot-reload (no redeployment)
-- [ ] Rule inheritance: department rules → team rules → individual overrides
-- [ ] Compliance presets: HIPAA, SOC2, PCI-DSS (restrict tools + enable audit)
+- [ ] Rule templates: finance-readonly, engineering-full, intern-basic
+- [ ] Rule inheritance: department → team → individual
+- [ ] Compliance presets: HIPAA, SOC2
+- [ ] Admin Console: visual rule editor
 
 ### Controlled Information Sharing
+- [ ] Cross-tenant data sharing policies
+- [ ] Shared knowledge base (read-only across tenants)
+- [ ] Audit trail for cross-boundary access
 
-- [ ] Cross-tenant data sharing policies in SSM
-- [ ] Team → Department aggregation: team agent outputs readable by department agent
-- [ ] Shared knowledge base: company policies, product docs (read-only across all tenants)
-- [ ] Audit trail for every cross-boundary data access
+---
+
+## Week 4: Apr 7-13 — Agent Orchestration & Hierarchy
 
 ### Agent Orchestration
-
-- [ ] Agent-to-agent invocation: agent A triggers agent B via AgentCore session
-- [ ] Workflow chains: Finance agent → Compliance agent → Executive agent
-- [ ] Scheduled orchestration: Monday 8am, all team agents generate weekly summaries → department agent aggregates
-- [ ] Event-driven triggers: PR merged → Engineering agent notifies QA agent
-
----
-
-## 🚀 May — June 2026: Platform & Ecosystem
-
-### Skills Marketplace
-
-- [ ] Skill catalog API: list, search, install, uninstall
-- [ ] Permission declaration: each skill declares what tools/data/APIs it needs
-- [ ] Security review workflow: submitted → reviewed → approved/rejected
-- [ ] Community skill submissions via GitHub PR
-- [ ] Skill versioning and rollback
+- [ ] Agent-to-agent invocation via AgentCore session
+- [ ] Workflow chains: Finance → Compliance → Executive
+- [ ] Scheduled orchestration: weekly summaries
+- [ ] Event-driven triggers
 
 ### Agent Hierarchy
-
-- [ ] Organization → Department → Team → Individual agent tree
-- [ ] Hierarchical permission inheritance with override
-- [ ] Cross-level communication channels (controlled, audited)
-- [ ] Dashboard: org-wide agent activity, cost, permission usage
-
-### Hard Enforcement (AgentCore Gateway MCP Mode)
-
-- [ ] Evaluate AgentCore Gateway MCP mode for tool-call interception
-- [ ] Implement MCP-based permission checks (replace Plan A soft enforcement)
-- [ ] Keep Plan E audit as defense-in-depth
-- [ ] Benchmark latency impact of MCP interception
-
-### Observability Dashboard
-
-- [ ] CloudWatch dashboard CloudFormation template (per-tenant metrics)
-- [ ] Cost anomaly detection (alert on unusual Bedrock spend per tenant)
-- [ ] Permission denial trends (identify misconfigured tenants)
-- [ ] Agent health monitoring (response latency, error rates)
-
-### Production Hardening
-
-- [ ] Multi-region deployment support
-- [ ] Disaster recovery: tenant config backup/restore via SSM export
-- [ ] Rate limiting per tenant (prevent single tenant from consuming all capacity)
-- [ ] Tenant onboarding automation: new employee → auto-create agent with role-based profile
+- [ ] Org → Department → Team → Individual agent tree
+- [ ] Hierarchical permission inheritance
+- [ ] Cross-level communication (controlled, audited)
 
 ---
 
-## Beyond June 2026
+## Week 5: Apr 14-20 — Platform & Marketplace
 
-The platform foundation enables:
+### Skills Marketplace
+- [ ] Skill catalog API: list, search, install
+- [ ] Permission declaration per skill
+- [ ] Security review workflow
+- [ ] Community submissions via GitHub PR
 
-- **OpenClaw SaaS**: hosted multi-tenant OpenClaw as a service
-- **Enterprise MSP**: managed OpenClaw platform for organizations (deploy, operate, optimize)
-- **Lightsail integration**: simpler infrastructure for smaller deployments
-- **Permissions Vending Machine**: temporary IAM elevation with approval workflow ([Issue #29](https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/issues/29))
-- **AgentCore Memory**: persistent cross-session memory with poisoning detection on load
-- **Federation**: connect OpenClaw platforms across organizations for B2B agent collaboration
+### Hard Enforcement (MCP Mode)
+- [ ] Evaluate AgentCore Gateway MCP for tool-call interception
+- [ ] MCP-based permission checks (replace Plan A soft enforcement)
+- [ ] Benchmark latency impact
+
+### Observability Dashboard
+- [ ] CloudWatch dashboard CFN template (per-tenant metrics)
+- [ ] Cost anomaly detection
+- [ ] Permission denial trends
+- [ ] Agent health monitoring
+
+---
+
+## Week 6: Apr 21-27 — Hardening & Documentation
+
+### Production Hardening
+- [ ] Multi-region deployment support
+- [ ] Disaster recovery: tenant config backup/restore
+- [ ] Rate limiting per tenant
+- [ ] Tenant onboarding automation: new employee → auto-create agent
+
+### Documentation & Launch Prep
+- [ ] Deployment guide: step-by-step for enterprise IT
+- [ ] Security whitepaper: isolation model, threat analysis
+- [ ] Cost calculator: interactive tool for enterprise sizing
+- [ ] Video demo: 5-min walkthrough
+- [ ] Blog post draft
+
+---
+
+## Apr 28-30 — Final Testing & v1.0 Release
+
+- [ ] Full regression: single-user + multi-tenant
+- [ ] Load test: 50 concurrent tenants
+- [ ] Security audit: penetration test on Plan A/E
+- [ ] Tag v1.0, publish release notes
+
+---
+
+## Post v1.0 (May+)
+
+- **OpenClaw SaaS**: hosted multi-tenant as a service
+- **Enterprise MSP**: managed platform for organizations
+- **Permissions Vending Machine**: temporary IAM elevation
+- **AgentCore Memory**: persistent cross-session memory
+- **Federation**: B2B agent collaboration across organizations
 
 ---
 
 ## How to Help
 
-We're building this in the open and moving fast. Pick what interests you:
+| What | Deadline | How to start |
+|------|----------|-------------|
+| Cold start optimization | Mar 23 | Profile container startup, submit PR |
+| Permission bypass testing | Mar 30 | Try to bypass Plan A, file issues |
+| Cost benchmarking | Mar 30 | Deploy, measure, share data |
+| Skill packaging format | Apr 6 | Design manifest, open PR |
+| Agent orchestration | Apr 13 | Prototype agent-to-agent invocation |
+| Security audit | Apr 27 | Audit code, file issues |
 
-| What | Why it matters | How to start |
-|------|---------------|-------------|
-| Integration testing | Validates the core flow works | Run the deployment, report issues |
-| Auth Agent delivery | Makes approval workflow real | Implement WhatsApp/Telegram sending in `handler.py` |
-| Skill packaging | Enables the shared skills vision | Design the manifest format, open a PR |
-| Agent orchestration | Enables agent hierarchy | Prototype agent-to-agent invocation |
-| Cost benchmarking | Proves the economics | Deploy, measure, share data |
-| Security review | Builds trust | Audit the code, file issues |
-| Documentation | Lowers the barrier | Write guides, improve READMEs |
-
-**[→ Contributing Guide](CONTRIBUTING.md)** · **[→ GitHub Issues](https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/issues)** · **[→ Discussions](https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/discussions)**
+**[→ Contributing Guide](CONTRIBUTING.md)** · **[→ GitHub Issues](https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/issues)**

@@ -124,6 +124,11 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         p=urlparse(self.path).path
         if p in("/","/index.html"):d=HTML.encode();self.send_response(200);self.send_header("Content-Type","text/html;charset=utf-8");self.send_header("Content-Length",str(len(d)));self.end_headers();self.wfile.write(d)
+        elif p=="/arch.png":
+            img=os.path.join(os.path.dirname(os.path.abspath(__file__)),"..","images","architecture-multitenant.drawio.png")
+            if os.path.exists(img):
+                d=open(img,"rb").read();self.send_response(200);self.send_header("Content-Type","image/png");self.send_header("Content-Length",str(len(d)));self.end_headers();self.wfile.write(d)
+            else:self.send_response(404);self.end_headers()
         elif p.startswith("/api/"):s,b=handle(p,"GET");d=json.dumps(b,default=str).encode();self.send_response(s);self.send_header("Content-Type","application/json");self.send_header("Content-Length",str(len(d)));self.end_headers();self.wfile.write(d)
         else:self.send_response(404);self.end_headers()
     def do_PUT(self):

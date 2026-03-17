@@ -98,7 +98,8 @@ tr:last-child td{border-bottom:none}tr:hover td{background:rgba(139,92,246,0.04)
 <div class="side">
 <div class="logo"><em>🦞</em><span class="logo-text">OpenClaw</span></div>
 <div class="nav">
-<div class="ni on" onclick="go('dash',this)"><i>📊</i>Dashboard</div>
+<div class="ni on" onclick="go('arch',this)"><i>🏗️</i>Architecture</div>
+<div class="ni" onclick="go('dash',this)"><i>📊</i>Dashboard</div>
 <div class="ni" onclick="go('ten',this)"><i>👥</i>Tenants</div>
 <div class="ni" onclick="go('appr',this)"><i>🔐</i>Approvals<span class="badge-sm" id="appr-count">2</span></div>
 <div class="ni" onclick="go('aud',this)"><i>📋</i>Audit Log</div>
@@ -113,8 +114,160 @@ tr:last-child td{border-bottom:none}tr:hover td{background:rgba(139,92,246,0.04)
 <div class="side-foot">OpenClaw Multi-Tenant Platform<br>Admin Console v0.1<br><span style="color:var(--pur2)">Target: v1.0 June 2026</span></div>
 </div>
 <div class="main"><div class="main-inner">
+<!-- ===== ARCHITECTURE ===== -->
+<div id="p-arch" class="page on">
+<div class="hdr"><h1>Architecture</h1><p>Enterprise Multi-Tenant OpenClaw on AWS — Zero Modification to OpenClaw</p></div>
+
+<div style="display:grid;grid-template-columns:1fr;gap:24px">
+
+<!-- Hero -->
+<div class="tw" style="padding:28px;border-left:3px solid var(--pur)">
+<div style="font-size:18px;font-weight:800;margin-bottom:10px">What This Platform Does</div>
+<div style="font-size:14px;color:var(--t2);line-height:1.8">
+Every employee gets their own AI assistant (OpenClaw) running in an <strong style="color:var(--t)">isolated Firecracker microVM</strong> on AWS.
+The platform manages <strong style="color:var(--t)">who can do what</strong> (role-based permissions), <strong style="color:var(--t)">what they remember</strong> (persistent workspace on S3),
+and <strong style="color:var(--t)">what tools they share</strong> (skills with bundled SaaS credentials).
+All powered by <strong style="color:var(--teal)">Amazon Bedrock</strong> — no API keys, IAM authentication, 10+ models.
+<br><br>
+<strong style="color:var(--grn)">The key design principle:</strong> OpenClaw runs 100% unmodified inside each microVM.
+All orchestration — authentication, routing, permission enforcement, workspace sync, audit — happens <em>outside</em> OpenClaw.
+This means zero fork maintenance, and OpenClaw upgrades are a one-line Docker image rebuild.
+</div>
+</div>
+
+<!-- Architecture Diagram -->
+<div class="tw" style="padding:28px">
+<div style="font-size:16px;font-weight:700;margin-bottom:16px">Architecture Diagram</div>
+<img src="/arch.png" style="width:100%;border-radius:var(--rs);border:1px solid var(--bdr)" onerror="this.parentElement.innerHTML+='<div style=color:var(--t2);padding:20px;text-align:center>Image not found. Run: python3 demo/architecture_diagram.py</div>'" alt="Architecture Diagram">
+</div>
+
+<!-- Three Pillars -->
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
+  <div style="background:rgba(78,205,196,0.06);border:1px solid rgba(78,205,196,0.2);border-radius:var(--r);padding:22px">
+    <div style="font-size:28px;margin-bottom:10px">🦞</div>
+    <div style="font-weight:700;font-size:15px;color:var(--teal);margin-bottom:8px">EC2 Gateway (Always-On)</div>
+    <div style="font-size:12px;color:var(--t2);line-height:1.7">
+      <strong style="color:var(--t)">OpenClaw Gateway</strong> — Node.js process on port 18789. Maintains long-lived connections to all messaging platforms (WhatsApp, Telegram, Discord, Slack, Feishu). Serves the Web UI. Runs cron scheduler for all tenants.<br><br>
+      <strong style="color:var(--t)">Tenant Router</strong> — Python process on port 8090. Receives messages from Gateway, derives <code style="color:var(--pur2)">tenant_id</code> (e.g. <code>wa__8613800138000</code>), reads permission profile from SSM, queues requests per-tenant to prevent race conditions, invokes AgentCore Runtime.<br><br>
+      <strong style="color:var(--t)">Admin Console</strong> — Visual management UI for org tree, permissions, approvals, audit logs.<br>
+      <strong style="color:var(--t)">Auth Agent</strong> — Handles permission escalation requests with risk assessment and 30-min auto-reject.
+    </div>
+  </div>
+  <div style="background:rgba(69,183,209,0.06);border:1px solid rgba(69,183,209,0.2);border-radius:var(--r);padding:22px">
+    <div style="font-size:28px;margin-bottom:10px">⚡</div>
+    <div style="font-weight:700;font-size:15px;color:var(--blu);margin-bottom:8px">AgentCore Runtime (Serverless)</div>
+    <div style="font-size:12px;color:var(--t2);line-height:1.7">
+      Each tenant request spins up an <strong style="color:var(--t)">isolated Firecracker microVM</strong> — not a container, a lightweight VM with its own kernel, filesystem, and network stack. One tenant's prompt injection or memory overflow cannot affect another.<br><br>
+      Inside each microVM runs the <strong style="color:var(--t)">Agent Container</strong>:<br>
+      <code style="color:var(--pur2)">entrypoint.sh</code> — Pulls workspace from S3, starts OpenClaw, runs watchdog for periodic sync, handles SIGTERM graceful flush.<br>
+      <code style="color:var(--pur2)">server.py</code> — HTTP wrapper that injects Plan A constraints and runs Plan E audit.<br>
+      <code style="color:var(--pur2)">OpenClaw</code> — Runs natively, unmodified. Reads SOUL.md, MEMORY.md, loads skills, calls Bedrock.<br><br>
+      After response, workspace syncs back to S3. On idle timeout, microVM is released — <strong style="color:var(--grn)">zero idle cost</strong>.
+    </div>
+  </div>
+  <div style="background:rgba(249,168,37,0.06);border:1px solid rgba(249,168,37,0.2);border-radius:var(--r);padding:22px">
+    <div style="font-size:28px;margin-bottom:10px">☁️</div>
+    <div style="font-weight:700;font-size:15px;color:var(--yel);margin-bottom:8px">AWS Services (Right Tool for Each Job)</div>
+    <div style="font-size:12px;color:var(--t2);line-height:1.7">
+      <strong style="color:var(--t)">S3</strong> — Tenant workspaces: SOUL.md, MEMORY.md, daily logs, skills. Incremental sync via <code>aws s3 sync</code>. Shared templates and skills in <code>_shared/</code> prefix.<br><br>
+      <strong style="color:var(--t)">SSM Parameter Store</strong> — Permission profiles, SOUL templates, Gateway token, Runtime ID. Free, encrypted, hot-reload without redeployment.<br><br>
+      <strong style="color:var(--t)">Amazon Bedrock</strong> — 10+ models (Nova, Claude, DeepSeek, Llama, Kimi). IAM auth, no API keys. Cross-region inference routing (CRIS).<br><br>
+      <strong style="color:var(--t)">ECR</strong> — Agent Container Docker image with pre-installed shared skills.<br>
+      <strong style="color:var(--t)">CloudWatch</strong> — Structured JSON audit logs per tenant.<br>
+      <strong style="color:var(--t)">CloudTrail</strong> — Every Bedrock API call audited.<br>
+      <strong style="color:var(--t)">DynamoDB</strong> (optional) — Multi-turn chat history, approval tokens with TTL.<br>
+      <strong style="color:var(--t)">IAM</strong> — Least-privilege role per microVM, S3 path isolation.
+    </div>
+  </div>
+</div>
+
+<!-- Message Flow Timeline -->
+<div class="tw" style="padding:28px">
+<div style="font-size:16px;font-weight:700;margin-bottom:6px">Complete Message Flow — What Happens When an Employee Sends a Message</div>
+<div style="font-size:12px;color:var(--t2);margin-bottom:20px">Every step annotated. This is the core loop of the platform.</div>
+<div id="arch-steps"></div>
+</div>
+
+<!-- microVM Lifecycle -->
+<div class="tw" style="padding:28px">
+<div style="font-size:16px;font-weight:700;margin-bottom:6px">microVM Lifecycle — What Happens Inside the Firecracker VM</div>
+<div style="font-size:12px;color:var(--t2);margin-bottom:20px">The entrypoint.sh script manages the full lifecycle. OpenClaw thinks it's running on a normal laptop.</div>
+<div id="arch-lifecycle"></div>
+</div>
+
+<!-- S3 Workspace Structure -->
+<div class="tw" style="padding:28px">
+<div style="font-size:16px;font-weight:700;margin-bottom:16px">S3 Workspace Structure — Per-Tenant File Layout</div>
+<div style="font-family:ui-monospace,monospace;font-size:12px;line-height:2;color:var(--t2);background:rgba(0,0,0,0.2);padding:20px;border-radius:var(--rs)">
+<span style="color:var(--yel)">s3://openclaw-tenants/</span><br>
+├── <span style="color:var(--teal)">wa__sarah/</span> <span style="color:var(--t3)">← Sarah's workspace (Intern, WhatsApp)</span><br>
+│   ├── workspace/<br>
+│   │   ├── <span style="color:var(--pur2)">SOUL.md</span> <span style="color:var(--t3)">← Personality, rules, behavior boundaries (inherited from intern template + personal customization)</span><br>
+│   │   ├── <span style="color:var(--pur2)">USER.md</span> <span style="color:var(--t3)">← User identity and preferences</span><br>
+│   │   ├── <span style="color:var(--pur2)">MEMORY.md</span> <span style="color:var(--t3)">← Long-term curated memory (agent writes here)</span><br>
+│   │   ├── memory/<br>
+│   │   │   ├── <span style="color:var(--grn)">2026-03-09.md</span> <span style="color:var(--t3)">← Today's auto-generated daily log</span><br>
+│   │   │   ├── <span style="color:var(--grn)">2026-03-08.md</span> <span style="color:var(--t3)">← Yesterday's log (both loaded on startup)</span><br>
+│   │   │   └── ...<br>
+│   │   └── skills/ <span style="color:var(--t3)">← Tenant-private skills (if any)</span><br>
+│   └── index/<br>
+│       └── <span style="color:var(--blu)">memory.sqlite</span> <span style="color:var(--t3)">← Vector search index (rebuilt from Markdown if stale)</span><br>
+├── <span style="color:var(--teal)">tg__alex/</span> <span style="color:var(--t3)">← Alex's workspace (Engineer, Telegram)</span><br>
+│   └── ... <span style="color:var(--t3)">(same structure)</span><br>
+└── <span style="color:var(--yel)">_shared/</span> <span style="color:var(--t3)">← Organization-wide shared resources</span><br>
+    ├── skills/ <span style="color:var(--t3)">← IT-managed shared skills (Jira, S3-files, Slack-bridge...)</span><br>
+    ├── templates/ <span style="color:var(--t3)">← SOUL.md role templates (intern.md, engineer.md, finance.md...)</span><br>
+    └── knowledge/ <span style="color:var(--t3)">← Shared knowledge base (company policies, product docs — read-only)</span>
+</div>
+</div>
+
+<!-- Zero Invasion Detail -->
+<div class="tw" style="padding:28px">
+<div style="font-size:16px;font-weight:700;margin-bottom:6px">Zero Invasion — How We Wrap OpenClaw Without Changing It</div>
+<div style="font-size:12px;color:var(--t2);margin-bottom:20px">Every integration point uses OpenClaw's existing interfaces. No fork, no patch, no monkey-patch.</div>
+<div id="arch-layers"></div>
+</div>
+
+<!-- Two Flows Side by Side -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+<div class="tw" style="padding:24px">
+<div style="font-size:15px;font-weight:700;margin-bottom:6px">🔐 Permission Denied → Approval Flow</div>
+<div style="font-size:11px;color:var(--t2);margin-bottom:14px">What happens when Sarah (Intern) tries to use a blocked tool</div>
+<div id="arch-approval" style="font-size:12px;line-height:2.2"></div>
+</div>
+<div class="tw" style="padding:24px">
+<div style="font-size:15px;font-weight:700;margin-bottom:6px">⏰ Scheduled Task (Cron) Flow</div>
+<div style="font-size:11px;color:var(--t2);margin-bottom:14px">How the Gateway lobster runs tasks on behalf of tenants</div>
+<div id="arch-cron" style="font-size:12px;line-height:2.2"></div>
+</div>
+</div>
+
+<!-- Shared Skills -->
+<div class="tw" style="padding:28px">
+<div style="font-size:16px;font-weight:700;margin-bottom:6px">🧩 Shared Skills with Bundled Credentials</div>
+<div style="font-size:12px;color:var(--t2);margin-bottom:16px">IT installs a skill once with the organization's SaaS API key baked in. Employees use the capability — never see the credential.</div>
+<div id="arch-skills"></div>
+</div>
+
+<!-- Cost -->
+<div class="tw" style="padding:28px">
+<div style="font-size:16px;font-weight:700;margin-bottom:16px">💰 Cost Comparison</div>
+<table><tr><th>Scale</th><th>This Platform</th><th>ChatGPT Enterprise</th><th>500 Separate Instances</th><th>Why</th></tr>
+<tr><td><strong>50 users</strong></td><td style="color:var(--grn)">$65-110/mo<br><span style="font-size:11px">~$1.3-2.2/person</span></td><td style="color:var(--red)">$1,000/mo<br><span style="font-size:11px">$20/person</span></td><td style="color:var(--red)">$2,000+/mo<br><span style="font-size:11px">$40+/person</span></td><td style="font-size:11px;color:var(--t2)">Shared EC2 Gateway + serverless microVMs + pooled Bedrock</td></tr>
+<tr><td><strong>500 users</strong></td><td style="color:var(--grn)">$200-400/mo<br><span style="font-size:11px">~$0.4-0.8/person</span></td><td style="color:var(--red)">$10,000/mo<br><span style="font-size:11px">$20/person</span></td><td style="color:var(--red)">$20,000+/mo<br><span style="font-size:11px">$40+/person</span></td><td style="font-size:11px;color:var(--t2)">Infrastructure cost is mostly fixed; marginal cost per user is near-zero</td></tr>
+</table>
+</div>
+
+<!-- Enterprise Scenarios -->
+<div class="tw" style="padding:28px">
+<div style="font-size:16px;font-weight:700;margin-bottom:16px">🏢 Enterprise Scenarios</div>
+<div id="arch-scenarios" style="display:grid;grid-template-columns:1fr 1fr;gap:16px"></div>
+</div>
+
+</div></div>
+
 <!-- ===== DASHBOARD ===== -->
-<div id="p-dash" class="page on">
+<div id="p-dash" class="page">
 <div class="hdr"><h1>Dashboard</h1><p>Multi-Tenant Platform Overview · <span class="pulse pulse-grn"></span> All systems operational</p></div>
 <div class="stats" id="stats"></div>
 <div style="display:grid;grid-template-columns:1fr;gap:20px">
@@ -230,7 +383,80 @@ const tt=(tools)=>{const a=['web_search','shell','browser','file','file_write','
 
 function go(id,el){document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));document.querySelectorAll('.ni').forEach(n=>n.classList.remove('on'));
   document.getElementById('p-'+id).classList.add('on');el.classList.add('on');
-  ({dash:lDash,ten:lTen,appr:lAppr,aud:lAud,demo:lDemo,skills:lSkills,mem:lMem,tasks:lTasks,topo:lTopo,usage:lUsage})[id]?.()}
+  ({arch:lArch,dash:lDash,ten:lTen,appr:lAppr,aud:lAud,demo:lDemo,skills:lSkills,mem:lMem,tasks:lTasks,topo:lTopo,usage:lUsage})[id]?.()}
+
+function lArch(){
+  const steps=[
+    {n:'①',t:'Message Arrives',d:'Employee sends "Help me check Tokyo weather" on WhatsApp. The message travels through WhatsApp Cloud API to the EC2 Gateway, which maintains a persistent connection to all messaging platforms.',c:'var(--red)',who:'WhatsApp → EC2 Gateway'},
+    {n:'②',t:'Authenticate & Route',d:'Tenant Router receives the message, derives tenant_id = <code>wa__8613800138000</code> from channel + user_id. Reads Sarah\'s permission profile from SSM: <code>{tools: ["web_search"], role: "intern"}</code>. Queues the request (one microVM per tenant at a time).',c:'var(--teal)',who:'Tenant Router + SSM'},
+    {n:'③',t:'Spin Up microVM',d:'Tenant Router calls AgentCore Runtime API: <code>invoke(runtimeId, sessionId="wa__sarah")</code>. AgentCore launches a Firecracker microVM — isolated kernel, filesystem, network. Cold start < 5 seconds.',c:'var(--blu)',who:'AgentCore Runtime'},
+    {n:'④',t:'Pull Workspace from S3',d:'<code>entrypoint.sh</code> runs inside the microVM. Pulls Sarah\'s workspace from <code>s3://openclaw-tenants/wa__sarah/workspace/</code> — SOUL.md (personality), MEMORY.md (long-term memory), daily logs, SQLite vector index. Also pulls shared skills from <code>_shared/skills/</code>.',c:'var(--yel)',who:'entrypoint.sh → S3'},
+    {n:'⑤',t:'Start OpenClaw + Plan A',d:'<code>server.py</code> builds the Plan A system prompt: "Allowed: web_search. Blocked: shell, file, code_execution...". Starts OpenClaw subprocess with <code>OPENCLAW_WORKSPACE=/tmp/workspace</code>. OpenClaw loads SOUL.md, MEMORY.md, today + yesterday\'s daily logs, rebuilds vector index if needed.',c:'var(--pur2)',who:'server.py + OpenClaw'},
+    {n:'⑥',t:'Bedrock Inference',d:'OpenClaw calls Bedrock via <code>/v1/chat/completions</code> with the Plan A system prompt + user message. Bedrock routes to the optimal region via CRIS (Cross-Region Inference). Nova 2 Lite responds: "Tokyo is 18°C, partly cloudy today."',c:'#FF8F00',who:'OpenClaw → Bedrock'},
+    {n:'⑦',t:'Plan E Audit',d:'<code>server.py</code> scans the response for blocked tool patterns (regex matching shell, code_execution, install_skill, etc.). If a violation is found, it\'s logged to CloudWatch with tenant_id, tool name, and timestamp. This response: PASS — no violations.',c:'var(--pink)',who:'server.py → CloudWatch'},
+    {n:'⑧',t:'Sync & Return',d:'Response returns through the chain: microVM → AgentCore → Tenant Router → Gateway. Meanwhile, the watchdog (background process) syncs any workspace changes back to S3 every 60 seconds — new daily log entries, updated MEMORY.md.',c:'var(--yel)',who:'microVM → S3 → Gateway'},
+    {n:'⑨',t:'Deliver & Release',d:'Gateway sends "Tokyo is 18°C, partly cloudy" back to Sarah on WhatsApp via the existing channel connection. After idle timeout (no new messages), AgentCore sends SIGTERM → OpenClaw writes final memory → entrypoint.sh flushes workspace to S3 → microVM released. Zero idle cost.',c:'var(--grn)',who:'Gateway → WhatsApp · microVM released'},
+  ];
+  document.getElementById('arch-steps').innerHTML=steps.map(s=>`<div style="display:flex;gap:16px;align-items:flex-start;padding:16px;background:rgba(255,255,255,0.02);border-radius:var(--rs);border:1px solid var(--bdr);border-left:3px solid ${s.c};margin-bottom:8px"><div style="min-width:36px"><span style="font-size:22px;font-weight:900;color:${s.c}">${s.n}</span></div><div><div style="font-weight:700;font-size:14px;margin-bottom:4px">${s.t} <span style="font-weight:400;font-size:11px;color:var(--t3);margin-left:8px">${s.who}</span></div><div style="font-size:12px;color:var(--t2);line-height:1.7">${s.d}</div></div></div>`).join('');
+
+  const lifecycle=[
+    {phase:'BOOT',icon:'🚀',color:'var(--blu)',items:['AgentCore starts Firecracker microVM (< 5s)','entrypoint.sh begins execution','Set TENANT_ID from SESSION_ID environment variable']},
+    {phase:'PULL',icon:'📥',color:'var(--yel)',items:['<code>aws s3 sync s3://openclaw-tenants/{tenant_id}/workspace/ → /tmp/workspace/</code>','Pull shared skills: <code>s3://openclaw-tenants/_shared/skills/ → /tmp/workspace/skills/_shared/</code>','If new tenant: generate SOUL.md from role template in SSM','Pull SQLite vector index (skip rebuild if fresh)']},
+    {phase:'RUN',icon:'🦞',color:'var(--grn)',items:['server.py starts on port 8080','Build Plan A system prompt from SSM permission profile','Start OpenClaw subprocess: <code>openclaw --config /tmp/openclaw_runtime.json</code>','OpenClaw loads SOUL.md → personality, MEMORY.md → long-term memory, memory/today.md + yesterday.md → recent context','Watchdog thread: every 60s sync workspace diff back to S3','Process incoming requests via /v1/chat/completions API']},
+    {phase:'SHUTDOWN',icon:'🔄',color:'var(--red)',items:['SIGTERM received (idle timeout or AgentCore scaling)','Kill watchdog thread','Kill OpenClaw process (waits for final memory write)','Final <code>aws s3 sync</code> — flush all workspace changes','Exit 0 → microVM released, resources freed']},
+  ];
+  document.getElementById('arch-lifecycle').innerHTML=lifecycle.map(l=>`<div style="display:flex;gap:16px;align-items:flex-start;padding:16px;background:rgba(255,255,255,0.02);border-radius:var(--rs);border:1px solid var(--bdr);border-left:3px solid ${l.color};margin-bottom:8px"><div style="min-width:60px;text-align:center"><div style="font-size:24px">${l.icon}</div><div style="font-size:11px;font-weight:700;color:${l.color};margin-top:4px">${l.phase}</div></div><div style="font-size:12px;color:var(--t2);line-height:2">${l.items.map(i=>'• '+i).join('<br>')}</div></div>`).join('');
+
+  const layers=[
+    {l:'entrypoint.sh',w:'Filesystem preparation',h:'Pulls/pushes workspace via <code>aws s3 sync</code>. OpenClaw only sees a normal local directory at <code>/tmp/workspace</code> — identical to running on a developer\'s laptop. No custom mount, no FUSE, no network filesystem.',i:'📂',iface:'S3 CLI'},
+    {l:'server.py',w:'Permission enforcement (Plan A + E)',h:'Communicates with OpenClaw via its standard <code>/v1/chat/completions</code> REST API — the same API any OpenAI-compatible client uses. Injects system prompt for Plan A, scans response text for Plan E.',i:'🛡️',iface:'/v1/chat/completions'},
+    {l:'config.json5',w:'Configuration injection',h:'OpenClaw\'s standard JSON5 config format. Uses <code>${AWS_REGION}</code> and <code>${BEDROCK_MODEL_ID}</code> environment variable substitution — a feature OpenClaw already supports natively.',i:'⚙️',iface:'JSON5 + env vars'},
+    {l:'SOUL.md',w:'Personality & rules',h:'OpenClaw reads this file on startup and injects it into every system prompt. We generate it by merging the organization\'s role template with personal customizations — but OpenClaw just sees a normal Markdown file.',i:'👤',iface:'Markdown file'},
+    {l:'MEMORY.md + memory/',w:'Persistent memory',h:'OpenClaw writes to these files during conversations. We sync them to/from S3 — but OpenClaw just reads and writes local files. The SQLite vector index is also synced to avoid expensive rebuilds.',i:'🧠',iface:'Local filesystem'},
+    {l:'ECR Docker image',w:'Version management',h:'<code>npm install -g openclaw@latest</code> in Dockerfile. Push to ECR. All tenants auto-update on next microVM launch. No per-tenant upgrade, no migration script, no downtime.',i:'🐳',iface:'Docker build'},
+  ];
+  document.getElementById('arch-layers').innerHTML='<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'+layers.map(l=>`<div style="display:flex;gap:14px;align-items:flex-start;padding:14px;background:rgba(255,255,255,0.02);border-radius:var(--rs);border:1px solid var(--bdr)"><div style="font-size:24px;min-width:32px">${l.i}</div><div><div style="font-weight:700;font-size:13px">${l.l} <span style="color:var(--t3);font-weight:400;font-size:11px">— ${l.w}</span></div><div style="font-size:11px;color:var(--pur2);margin:4px 0">Interface: <code>${l.iface}</code></div><div style="font-size:11.5px;color:var(--t2);line-height:1.6">${l.h}</div></div></div>`).join('')+'</div>';
+
+  const approval=[
+    {s:'①',t:'Sarah sends: <span style="color:var(--t)">"Run ls -la to check server logs"</span>',c:''},
+    {s:'②',t:'Plan A blocks: Sarah\'s profile only allows <code>web_search</code>. <span style="color:var(--red)">shell is not in the allowed list.</span>',c:'var(--red)'},
+    {s:'③',t:'OpenClaw correctly refuses: <span style="color:var(--t2)">"I don\'t have permission to execute shell commands. Contact your administrator."</span>',c:''},
+    {s:'④',t:'Sarah requests access: <span style="color:var(--t)">"I need shell access for production issue P-1234"</span>',c:''},
+    {s:'⑤',t:'Auth Agent assesses risk: tool=<span style="color:var(--red)">shell (HIGH)</span>, tenant=<span style="color:var(--yel)">intern (LOW trust)</span> → overall: <span style="color:var(--red)">HIGH RISK</span>',c:'var(--red)'},
+    {s:'⑥',t:'Admin (Jordan) receives notification on Discord: "Sarah requests SHELL. Reason: P-1234. Risk: HIGH. Approve?"',c:'var(--pur2)'},
+    {s:'⑦',t:'Jordan approves: <span style="color:var(--grn)">"approve temporary 2h"</span> → SSM profile updated, shell added to Sarah\'s tools with 2h TTL',c:'var(--grn)'},
+    {s:'⑧',t:'Sarah sends "Run ls -la" again → new microVM picks up updated SSM profile → <span style="color:var(--grn)">SUCCESS</span>',c:'var(--grn)'},
+    {s:'⑨',t:'After 2 hours: TTL expires, shell automatically removed from Sarah\'s profile. No manual cleanup needed.',c:'var(--t3)'},
+  ];
+  document.getElementById('arch-approval').innerHTML=approval.map(a=>`<div style="border-left:2px solid ${a.c||'var(--bdr)'};padding-left:12px;margin-bottom:2px"><span style="font-weight:700;color:var(--pur2)">${a.s}</span> ${a.t}</div>`).join('');
+
+  const cron=[
+    {s:'①',t:'Monday 8:00 AM — Gateway lobster\'s cron scheduler fires for tenant <span style="color:var(--teal)">tg__alex</span>',c:'var(--teal)'},
+    {s:'②',t:'Gateway calls AgentCore: <code>invoke(sessionId="tg__alex", message="Generate weekly engineering summary")</code>',c:'var(--blu)'},
+    {s:'③',t:'microVM starts → entrypoint.sh pulls Alex\'s workspace from S3 (includes past week\'s daily logs)',c:'var(--yel)'},
+    {s:'④',t:'OpenClaw loads <code>memory/2026-03-03.md</code> through <code>2026-03-09.md</code> — full week of context',c:'var(--pur2)'},
+    {s:'⑤',t:'Bedrock generates: <span style="color:var(--t)">"Weekly Summary: Completed auth refactor, fixed 3 prod bugs, started API v2..."</span>',c:'#FF8F00'},
+    {s:'⑥',t:'Workspace synced back to S3 (new daily log entry with the summary)',c:'var(--yel)'},
+    {s:'⑦',t:'Summary sent to Alex via Telegram through Gateway\'s channel connection',c:'var(--teal)'},
+    {s:'⑧',t:'microVM released — total compute time: ~30 seconds. <span style="color:var(--grn)">Zero idle cost.</span>',c:'var(--grn)'},
+  ];
+  document.getElementById('arch-cron').innerHTML=cron.map(a=>`<div style="border-left:2px solid ${a.c||'var(--bdr)'};padding-left:12px;margin-bottom:2px"><span style="font-weight:700;color:var(--pur2)">${a.s}</span> ${a.t}</div>`).join('');
+
+  const skills=[
+    {name:'Jira Integration',icon:'🎫',key:'JIRA_API_KEY',who:'IT Admin',users:'Engineering (40 people)',flow:'Carol says "Create a Jira ticket for Q1 budget review" → OpenClaw calls Jira skill → skill uses bundled API key from SSM SecureString → ticket FIN-1234 created. Carol never sees the Jira API key.'},
+    {name:'S3 Files',icon:'📤',key:'(IAM Role)',who:'Auto-installed',users:'All tenants',flow:'Employee says "Share this report" → S3 skill generates pre-signed URL → file uploaded to tenant-scoped S3 path → URL shared in chat. No credentials exposed.'},
+    {name:'SAP Connector',icon:'💼',key:'SAP_API_KEY',who:'Finance IT',users:'Finance dept (15 people)',flow:'Finance analyst asks "What\'s our Q1 revenue?" → SAP skill queries ERP with bundled credentials → returns formatted data. Analyst uses the capability, never touches SAP directly.'},
+  ];
+  document.getElementById('arch-skills').innerHTML='<div style="display:grid;grid-template-columns:1fr;gap:12px">'+skills.map(s=>`<div style="display:flex;gap:16px;align-items:flex-start;padding:16px;background:rgba(255,255,255,0.02);border-radius:var(--rs);border:1px solid var(--bdr)"><div style="font-size:28px;min-width:36px">${s.icon}</div><div><div style="font-weight:700;font-size:14px">${s.name} <span style="font-size:11px;color:var(--t3);font-weight:400">Installed by: ${s.who} · Authorized: ${s.users} · Credential: <code>${s.key}</code></span></div><div style="font-size:12px;color:var(--t2);line-height:1.7;margin-top:6px">${s.flow}</div></div></div>`).join('')+'</div>';
+
+  const scenarios=[
+    {title:'🏦 Financial Company (200 people)',subtitle:'Compliance-first',points:['SOUL template: <code>finance-readonly</code> — web_search + file (read-only) only','All conversations audited → CloudWatch → S3 Glacier (90-day retention)','No code execution, no shell, no external API calls','Cost: 200 × ~$1.5 = <strong style="color:var(--grn)">~$300/mo</strong> (vs ChatGPT Plus $4,000/mo)']},
+    {title:'💻 Tech Company (50 engineers)',subtitle:'Productivity-first',points:['SOUL template: <code>engineering-full</code> — all tools except install_skill/eval','Shared Jira skill with bundled API key — engineers create tickets directly','Weekly cron: Monday 8am auto-generate sprint summary per engineer','Cost: 50 × ~$2.5 = <strong style="color:var(--grn)">~$125/mo</strong>']},
+    {title:'🌍 Multinational (500 people)',subtitle:'Multi-department collaboration',points:['Org tree: Organization → Department → Team → Individual','Permission inheritance: dept rules → team rules → personal overrides','Cross-tenant sharing: team agent weekly reports → dept agent can read (audited)','Cost: 500 × ~$0.6 = <strong style="color:var(--grn)">~$300/mo</strong> (vs ChatGPT Plus $10,000/mo)']},
+    {title:'🔧 MSP / SaaS Provider',subtitle:'Managed service for multiple clients',points:['Each client: separate S3 prefix + SSM config, fully isolated','Unified ECR image, unified upgrades across all clients','Per-client Bedrock usage metering for chargeback billing','One ops team manages all clients — no per-client infrastructure']},
+  ];
+  document.getElementById('arch-scenarios').innerHTML=scenarios.map(s=>`<div style="background:rgba(255,255,255,0.02);border:1px solid var(--bdr);border-radius:var(--rs);padding:18px"><div style="font-weight:700;font-size:14px;margin-bottom:4px">${s.title}</div><div style="font-size:11px;color:var(--t3);margin-bottom:12px">${s.subtitle}</div><div style="font-size:12px;color:var(--t2);line-height:2">${s.points.map(p=>'• '+p).join('<br>')}</div></div>`).join('');
+}
 
 async function lDash(){
   const d=await A('/api/dashboard');
@@ -370,5 +596,5 @@ async function lUsage(){
     const pct=max>0?Math.round(t.tokens/max*100):0;
     return`<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px"><span>${t.name}</span><span style="color:var(--t2)">${(t.tokens/1000).toFixed(1)}k · $${t.cost}</span></div><div style="height:6px;background:rgba(255,255,255,0.05);border-radius:3px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--g2);border-radius:3px;transition:width .5s"></div></div></div>`}).join('')}
 
-lDash();
+lArch();
 </script></body></html>

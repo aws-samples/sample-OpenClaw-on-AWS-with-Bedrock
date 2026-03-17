@@ -1,9 +1,11 @@
 """
-Agent Container HTTP server.
+Agent Container HTTP server for Amazon Bedrock AgentCore.
 
-Wraps openclaw as a subprocess. For each /invocations request:
-  A. Injects the tenant's allowed tools into the system prompt (soft enforcement).
-  E. Audits the response for tool usage patterns (post-execution logging).
+Wraps `openclaw agent --session-id <tenant_id> --message <text> --json`
+as a subprocess for each /invocations request.
+
+Plan A: inject allowed tools into system prompt via SOUL.md prepend.
+Plan E: audit response for blocked tool usage.
 """
 import json
 import logging
@@ -15,8 +17,6 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import requests
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from permissions import read_permission_profile
 from observability import log_agent_invocation, log_permission_denied
@@ -25,20 +25,33 @@ from safety import validate_message
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-OPENCLAW_PORT = 18789
-OPENCLAW_URL = f"http://localhost:{OPENCLAW_PORT}"
-STARTUP_TIMEOUT = 30
+# Path to openclaw binary (nvm install on EC2, system install in container)
+_OPENCLAW_CANDIDATES = [
+    "/home/ubuntu/.nvm/versions/node/v22.22.1/bin/openclaw",
+    "/usr/local/bin/openclaw",
+    "/usr/bin/openclaw",
+]
 
-# Regex to detect tool invocation patterns in openclaw responses.
-# openclaw typically outputs tool calls as: [tool_name] or <tool:tool_name> or similar.
 _TOOL_PATTERN = re.compile(
     r'\b(shell|browser|file_write|code_execution|install_skill|load_extension|eval)\b',
     re.IGNORECASE,
 )
 
 
+def _find_openclaw() -> str:
+    for p in _OPENCLAW_CANDIDATES:
+        if os.path.isfile(p):
+            return p
+    # fallback: hope it's on PATH
+    return "openclaw"
+
+
+OPENCLAW_BIN = _find_openclaw()
+logger.info("openclaw binary: %s", OPENCLAW_BIN)
+
+
 def _build_system_prompt(tenant_id: str) -> str:
-    """Plan A: build a system prompt that constrains openclaw to allowed tools."""
+    """Plan A: build constraint text to prepend to SOUL.md."""
     try:
         profile = read_permission_profile(tenant_id)
         allowed = profile.get("tools", ["web_search"])
@@ -50,20 +63,18 @@ def _build_system_prompt(tenant_id: str) -> str:
         blocked = ["shell", "browser", "file", "file_write", "code_execution",
                    "install_skill", "load_extension", "eval"]
 
-    lines = [
-        f"Allowed tools for this session: {', '.join(allowed)}.",
-    ]
+    lines = [f"Allowed tools for this session: {', '.join(allowed)}."]
     if blocked:
         lines.append(
             f"You MUST NOT use these tools: {', '.join(blocked)}. "
-            "If the user requests an action that requires a blocked tool, "
-            "explain that you don't have permission and they should contact their administrator."
+            "If the user requests an action requiring a blocked tool, "
+            "explain that you don't have permission."
         )
     return " ".join(lines)
 
 
 def _audit_response(tenant_id: str, response_text: str, allowed_tools: list) -> None:
-    """Plan E: scan response for tool usage and log any violations."""
+    """Plan E: scan response for blocked tool usage."""
     matches = _TOOL_PATTERN.findall(response_text)
     if not matches:
         return
@@ -75,66 +86,98 @@ def _audit_response(tenant_id: str, response_text: str, allowed_tools: list) -> 
                 cedar_decision="RESPONSE_AUDIT",
                 request_id=None,
             )
-            logger.warning(
-                "AUDIT: blocked tool '%s' detected in response tenant_id=%s",
-                tool, tenant_id,
-            )
+            logger.warning("AUDIT: blocked tool '%s' in response tenant_id=%s", tool, tenant_id)
 
 
-def start_openclaw() -> subprocess.Popen:
-    config_src = "/app/openclaw.json"
-    config_dst = "/tmp/openclaw_runtime.json"
-    with open(config_src) as f:
-        config_str = f.read()
-    config_str = config_str.replace("${AWS_REGION}", os.environ.get("AWS_REGION", "us-east-1"))
-    config_str = config_str.replace(
-        "${BEDROCK_MODEL_ID}",
-        os.environ.get("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0"),
-    )
-    with open(config_dst, "w") as f:
-        f.write(config_str)
-
+def invoke_openclaw(tenant_id: str, message: str, timeout: int = 300) -> dict:
+    """
+    Run: openclaw agent --session-id <tenant_id> --message <message> --json
+    Returns parsed JSON result dict.
+    Runs as 'ubuntu' user if we're root (EC2 host) so openclaw config is accessible.
+    """
     env = os.environ.copy()
-    env["OPENCLAW_SKIP_ONBOARDING"] = "1"
-    proc = subprocess.Popen(
-        ["openclaw", "--config", config_dst],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    threading.Thread(
-        target=lambda: [logger.info("[openclaw] %s", l.decode().rstrip()) for l in proc.stdout],
-        daemon=True,
-    ).start()
-    return proc
+    # Ensure node is on PATH for nvm installs
+    nvm_bin = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin"
+    if os.path.isdir(nvm_bin):
+        env["PATH"] = nvm_bin + ":" + env.get("PATH", "")
+        env["HOME"] = "/home/ubuntu"
 
+    openclaw_cmd = [
+        OPENCLAW_BIN,
+        "agent",
+        "--session-id", tenant_id,
+        "--message", message,
+        "--json",
+        "--timeout", str(timeout),
+    ]
 
-def wait_for_openclaw(timeout: int = STARTUP_TIMEOUT) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            r = requests.post(
-                f"{OPENCLAW_URL}/v1/chat/completions",
-                json={"model": "probe", "messages": [], "user": "healthcheck"},
-                timeout=2,
-            )
-            if r.status_code < 500:
-                logger.info("openclaw ready (status=%d)", r.status_code)
-                return
-        except requests.exceptions.ConnectionError:
-            pass
-        time.sleep(1)
-    logger.error("openclaw did not become ready within %d seconds", timeout)
-    sys.exit(1)
+    # If running as root (EC2 host), sudo to ubuntu so openclaw config is accessible
+    # Use 'sudo -u ubuntu env KEY=VAL ...' and do NOT pass env= to subprocess
+    # (subprocess env= would override the sudo env vars)
+    run_env = None  # None = inherit current process env (used in container as ubuntu)
+    if os.geteuid() == 0 and os.path.isdir("/home/ubuntu"):
+        path_val = env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+        aws_region = env.get("AWS_REGION", "us-east-1")
+        cmd = [
+            "sudo", "-u", "ubuntu",
+            "env",
+            f"PATH={path_val}",
+            "HOME=/home/ubuntu",
+            f"AWS_REGION={aws_region}",
+            f"AWS_DEFAULT_REGION={aws_region}",
+        ] + openclaw_cmd
+        run_env = None  # let sudo handle the environment
+    else:
+        cmd = openclaw_cmd
+        run_env = env  # pass env in container (running as ubuntu already)
+
+    logger.info("Invoking openclaw tenant_id=%s cmd=%s", tenant_id, " ".join(cmd[:5]))
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 10,
+            env=run_env,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"openclaw timed out after {timeout}s")
+
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+
+    if stderr:
+        # openclaw logs info/warnings to stderr — log at WARNING for visibility
+        for line in stderr.splitlines():
+            logger.warning("[openclaw stderr] %s", line)
+
+    if not stdout:
+        raise RuntimeError(f"openclaw returned empty output (exit={result.returncode})")
+
+    # Find the first JSON object in stdout (may have log lines before it)
+    json_start = stdout.find('{')
+    if json_start == -1:
+        raise RuntimeError(f"No JSON in openclaw output: {stdout[:200]}")
+
+    # Use JSONDecoder to parse only the first complete JSON object
+    decoder = json.JSONDecoder()
+    try:
+        data, _ = decoder.raw_decode(stdout, json_start)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Failed to parse openclaw JSON: {e} — output: {stdout[:200]}")
+
+    return data
 
 
 class AgentCoreHandler(BaseHTTPRequestHandler):
+
     def log_message(self, format, *args):  # noqa: A002
         logger.info(format, *args)
 
     def do_GET(self):
         if self.path == "/ping":
-            self._respond(200, {"status": "ok"})
+            self._respond(200, {"status": "Healthy", "time_of_last_update": int(time.time())})
         else:
             self._respond(404, {"error": "not found"})
 
@@ -145,37 +188,55 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
 
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         try:
-            payload = json.loads(body)
+            payload = json.loads(body) if body else {}
         except json.JSONDecodeError:
             self._respond(400, {"error": "invalid json"})
             return
 
-        tenant_id = payload.get("sessionId") or payload.get("tenant_id") or "unknown"
-        message = validate_message(payload.get("message", ""))
-        session_key = f"agentcore:{tenant_id}"
+        # Extract tenant_id from headers or payload
+        _file_tenant = ""
+        try:
+            with open("/tmp/tenant_id") as f:
+                _file_tenant = f.read().strip()
+        except Exception:
+            pass
 
-        # Plan A: inject permission constraints into system prompt
-        system_prompt = _build_system_prompt(tenant_id)
+        tenant_id = (
+            self.headers.get("X-Amzn-Bedrock-AgentCore-Runtime-Session-Id")
+            or self.headers.get("x-amzn-bedrock-agentcore-runtime-session-id")
+            or payload.get("runtimeSessionId")
+            or payload.get("sessionId")
+            or payload.get("tenant_id")
+            or _file_tenant
+            or "unknown"
+        )
 
+        message = validate_message(
+            payload.get("prompt") or payload.get("message") or str(payload)
+        )
+
+        logger.info("Invocation tenant_id=%s message_len=%d", tenant_id, len(message))
+        self._handle_invocation(tenant_id, message, payload)
+
+    def _handle_invocation(self, tenant_id: str, message: str, payload: dict):
         start_ms = int(time.time() * 1000)
         try:
-            resp = requests.post(
-                f"{OPENCLAW_URL}/v1/chat/completions",
-                json={
-                    "model": payload.get("model", "default"),
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": message},
-                    ],
-                    "user": session_key,
-                },
-                timeout=300,
-            )
-            result = resp.json()
+            timeout = int(payload.get("timeout", 300))
+            data = invoke_openclaw(tenant_id, message, timeout=timeout)
             duration_ms = int(time.time() * 1000) - start_ms
 
-            # Plan E: audit the response for tool usage
-            response_text = json.dumps(result)
+            # Extract text from openclaw JSON response
+            # Format: {"payloads": [{"text": "..."}], "meta": {...}}
+            payloads = data.get("payloads", [])
+            response_text = " ".join(
+                p.get("text", "") for p in payloads if p.get("text")
+            ).strip()
+
+            if not response_text:
+                # Fallback: try top-level text field
+                response_text = data.get("text", str(data))
+
+            # Plan E audit
             try:
                 profile = read_permission_profile(tenant_id)
                 allowed = profile.get("tools", ["web_search"])
@@ -183,13 +244,34 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
                 allowed = ["web_search"]
             _audit_response(tenant_id, response_text, allowed)
 
-            log_agent_invocation(tenant_id=tenant_id, tools_used=[], duration_ms=duration_ms, status="success")
-            self._respond(200, result)
+            # Extract model usage for observability
+            meta = data.get("meta", {})
+            agent_meta = meta.get("agentMeta", {})
+            model = agent_meta.get("model", "unknown")
+            usage = agent_meta.get("usage", {})
+
+            log_agent_invocation(
+                tenant_id=tenant_id,
+                tools_used=[],
+                duration_ms=duration_ms,
+                status="success",
+            )
+            logger.info(
+                "Response tenant_id=%s duration_ms=%d model=%s tokens=%s text_len=%d",
+                tenant_id, duration_ms, model, usage.get("total", "?"), len(response_text),
+            )
+
+            self._respond(200, {
+                "response": response_text,
+                "status": "success",
+                "model": model,
+                "usage": usage,
+            })
 
         except Exception as e:
             duration_ms = int(time.time() * 1000) - start_ms
             log_agent_invocation(tenant_id=tenant_id, tools_used=[], duration_ms=duration_ms, status="error")
-            logger.error("openclaw invocation failed tenant_id=%s error=%s", tenant_id, e)
+            logger.error("Invocation failed tenant_id=%s error=%s", tenant_id, e)
             self._respond(500, {"error": str(e)})
 
     def _respond(self, status: int, body: dict):
@@ -202,17 +284,14 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    proc = start_openclaw()
-    wait_for_openclaw(STARTUP_TIMEOUT)
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), AgentCoreHandler)
-    logger.info("Python wrapper listening on port %d", port)
+    logger.info("HTTP server listening on port %d", port)
+    logger.info("openclaw binary: %s", OPENCLAW_BIN)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
-    finally:
-        proc.terminate()
 
 
 if __name__ == "__main__":

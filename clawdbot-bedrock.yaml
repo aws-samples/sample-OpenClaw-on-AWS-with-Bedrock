@@ -78,6 +78,14 @@ Parameters:
     Default: "true"
     Description: "Install Docker for sandboxed execution (recommended for group chats)"
 
+  EnableDataProtection:
+    Type: String
+    Default: "false"
+    Description: "Retain data volume when stack is deleted (protects against accidental data loss)"
+    AllowedValues:
+      - "true"
+      - "false"
+
   EnableCloudWatchAlarms:
     Type: String
     Default: "false"

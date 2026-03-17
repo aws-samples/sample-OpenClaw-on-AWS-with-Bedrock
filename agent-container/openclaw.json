@@ -1,23 +1,35 @@
 {
-  "gateway": {
-    "http": {
-      "port": 18789,
-      "endpoints": {
-        "chatCompletions": {
-          "enabled": true
-        }
+  "models": {
+    "providers": {
+      "amazon-bedrock": {
+        "baseUrl": "https://bedrock-runtime.${AWS_REGION}.amazonaws.com",
+        "auth": "aws-sdk",
+        "api": "bedrock-converse-stream",
+        "models": [
+          {
+            "id": "${BEDROCK_MODEL_ID}",
+            "name": "Bedrock Model",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          }
+        ]
       }
     }
   },
-  "auth": {
-    "type": "aws-sdk",
-    "region": "${AWS_REGION}"
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "amazon-bedrock/${BEDROCK_MODEL_ID}"
+      },
+      "compaction": {
+        "mode": "safeguard"
+      }
+    }
   },
-  "sessions": {
-    "dir": "/tmp/openclaw/sessions"
-  },
-  "model": {
-    "provider": "bedrock",
-    "modelId": "${BEDROCK_MODEL_ID}"
+  "plugins": {
+    "entries": {}
   }
 }

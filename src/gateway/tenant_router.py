@@ -56,23 +56,29 @@ _CHANNEL_ALIASES = {
 def derive_tenant_id(channel: str, user_id: str) -> str:
     """Derive a stable, safe tenant_id from channel and user identity.
 
-    Format: {channel_short}__{sanitized_user_id}
-    Examples:
-      - ("whatsapp", "8613800138000") → "wa__8613800138000"
-      - ("telegram", "123456789")     → "tg__123456789"
-      - ("discord", "user#1234")      → "dc__user_1234"
+    Format: {channel_short}__{sanitized_user_id}__{hash_suffix}
+    
+    AgentCore requires runtimeSessionId >= 33 chars, so we append a hash
+    suffix to guarantee minimum length while keeping the ID human-readable.
 
-    User IDs are sanitized: only alphanumeric, underscore, hyphen, dot kept.
-    If the result exceeds 128 chars, the user_id portion is SHA-256 truncated.
+    Examples:
+      - ("whatsapp", "8613800138000") → "wa__8613800138000__a1b2c3d4e5f6"
+      - ("telegram", "123456789")     → "tg__123456789__f7e8d9c0b1a2"
     """
     channel_short = _CHANNEL_ALIASES.get(channel.lower(), channel.lower()[:4])
     sanitized = re.sub(r"[^a-zA-Z0-9_.\-]", "_", user_id.strip())
 
-    tenant_id = f"{channel_short}__{sanitized}"
+    # Hash suffix ensures minimum 33 chars for AgentCore runtimeSessionId
+    # 19 hex chars ensures even short channel+user combos reach 33+ chars
+    hash_suffix = hashlib.sha256(f"{channel}:{user_id}".encode()).hexdigest()[:19]
+    tenant_id = f"{channel_short}__{sanitized}__{hash_suffix}"
+
+    # Pad to 33 chars minimum if still too short
+    while len(tenant_id) < 33:
+        tenant_id += "0"
 
     if len(tenant_id) > 128:
-        user_hash = hashlib.sha256(user_id.encode()).hexdigest()[:16]
-        tenant_id = f"{channel_short}__{user_hash}"
+        tenant_id = f"{channel_short}__{hash_suffix}"
 
     if not _TENANT_ID_PATTERN.match(tenant_id):
         raise ValueError(f"Invalid tenant_id derived: {tenant_id}")
@@ -85,7 +91,13 @@ def derive_tenant_id(channel: str, user_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _agentcore_client():
-    return boto3.client("bedrock-agentcore-runtime", region_name=AWS_REGION)
+    from botocore.config import Config
+    cfg = Config(
+        read_timeout=300,
+        connect_timeout=10,
+        retries={"max_attempts": 0},
+    )
+    return boto3.client("bedrock-agentcore", region_name=AWS_REGION, config=cfg)
 
 
 def invoke_agent_runtime(
@@ -166,6 +178,8 @@ def _invoke_local_container(
 
 def _invoke_agentcore(tenant_id: str, message: str, model: Optional[str]) -> dict:
     """Call AgentCore Runtime API (production mode)."""
+    import json as _json
+
     payload = {
         "sessionId": tenant_id,
         "message": message,
@@ -173,16 +187,37 @@ def _invoke_agentcore(tenant_id: str, message: str, model: Optional[str]) -> dic
     if model:
         payload["model"] = model
 
+    # Get the Runtime ARN — construct from known pattern to avoid needing control plane permissions
+    runtime_arn = os.environ.get("AGENTCORE_RUNTIME_ARN", "")
+    if not runtime_arn:
+        # Construct ARN from runtime ID + region + account
+        try:
+            sts = boto3.client("sts", region_name=AWS_REGION)
+            account_id = sts.get_caller_identity()["Account"]
+            runtime_arn = f"arn:aws:bedrock-agentcore:{AWS_REGION}:{account_id}:runtime/{RUNTIME_ID}"
+            logger.info("Constructed runtime ARN: %s", runtime_arn)
+        except Exception as e:
+            logger.error("Could not construct runtime ARN: %s", e)
+            raise RuntimeError(f"Cannot determine runtime ARN: {e}") from e
+
     start = time.time()
     try:
         client = _agentcore_client()
         response = client.invoke_agent_runtime(
-            agentRuntimeId=RUNTIME_ID,
-            sessionId=tenant_id,
-            payload=json.dumps(payload),
+            agentRuntimeArn=runtime_arn,
+            runtimeSessionId=tenant_id,
+            contentType="application/json",
+            accept="application/json",
+            payload=_json.dumps(payload).encode(),
         )
 
-        result = json.loads(response.get("body", "{}"))
+        # Response body key is 'response' (StreamingBody), not 'body' or 'payload'
+        result_bytes = response.get("response", response.get("payload", response.get("body", b"")))
+        if hasattr(result_bytes, "read"):
+            result_bytes = result_bytes.read()
+        if isinstance(result_bytes, str):
+            result_bytes = result_bytes.encode()
+        result = json.loads(result_bytes) if result_bytes else {}
         duration_ms = int((time.time() - start) * 1000)
 
         logger.info(
@@ -194,11 +229,12 @@ def _invoke_agentcore(tenant_id: str, message: str, model: Optional[str]) -> dic
     except ClientError as e:
         duration_ms = int((time.time() - start) * 1000)
         error_code = e.response.get("Error", {}).get("Code", "Unknown")
+        error_msg = e.response.get("Error", {}).get("Message", "")
         logger.error(
-            "AgentCore invocation failed tenant_id=%s error=%s duration_ms=%d",
-            tenant_id, error_code, duration_ms,
+            "AgentCore invocation failed tenant_id=%s error=%s msg=%s duration_ms=%d",
+            tenant_id, error_code, error_msg, duration_ms,
         )
-        raise RuntimeError(f"AgentCore invocation failed: {error_code}") from e
+        raise RuntimeError(f"AgentCore invocation failed: {error_code}: {error_msg}") from e
 
 
 # ---------------------------------------------------------------------------

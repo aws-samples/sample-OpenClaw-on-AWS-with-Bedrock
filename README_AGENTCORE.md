@@ -167,46 +167,81 @@ Users (WhatsApp / Telegram / Discord / Slack)
   │
   ▼
 ┌──────────────────────────────────────────────────────┐
-│  EC2 Gateway                                         │
+│  EC2 Gateway (常驻)                                   │
 │                                                      │
 │  OpenClaw Gateway (Node.js, port 18789)              │
-│  └── Receives messages, serves Web UI                │
+│  ├── IM channel 管理 (WhatsApp/Telegram/Discord)     │
+│  ├── Web UI + Control UI                             │
+│  └── 调 Bedrock Converse API (被 H2 Proxy 拦截)      │
+│                                                      │
+│  Bedrock H2 Proxy (Node.js, port 8091)               │
+│  ├── 拦截 AWS SDK HTTP/2 Bedrock 请求                │
+│  ├── 提取用户消息 + channel/sender 信息              │
+│  └── 转发到 Tenant Router                            │
 │                                                      │
 │  Tenant Router (Python, port 8090)                   │
-│  ├── derive_tenant_id(channel, user_id)              │
+│  ├── derive_tenant_id(channel, user_id) → 33+ 字符   │
 │  └── invoke AgentCore Runtime (sessionId=tenant_id)  │
 └──────────────────────┬───────────────────────────────┘
-                       │
+                       │ AWS_ENDPOINT_URL_BEDROCK_RUNTIME
+                       │ → H2 Proxy → Tenant Router
+                       │ → AgentCore invoke_agent_runtime
                        ▼
 ┌──────────────────────────────────────────────────────┐
-│  AgentCore Runtime  (serverless)                     │
-│  Each tenant → isolated Firecracker microVM          │
+│  AgentCore Runtime  (serverless Firecracker microVM) │
+│  Each tenant → isolated microVM (per sessionId)      │
 │                                                      │
 │  ┌────────────────────────────────────────────────┐  │
 │  │  Agent Container                               │  │
-│  │  1. Validate input (safety.py)                 │  │
-│  │  2. Inject tenant permissions (Plan A)         │  │
-│  │  3. Execute via OpenClaw subprocess            │  │
-│  │  4. Audit response for violations (Plan E)     │  │
-│  │  5. Log to CloudWatch per tenant               │  │
+│  │  entrypoint.sh:                                │  │
+│  │    1. Write openclaw.json (Bedrock config)     │  │
+│  │    2. Start server.py (health check ready)     │  │
+│  │    3. S3 pull workspace (SOUL.md, MEMORY.md)   │  │
+│  │    4. Watchdog: sync workspace back to S3      │  │
+│  │                                                │  │
+│  │  server.py /invocations:                       │  │
+│  │    1. Extract tenant_id from headers/payload   │  │
+│  │    2. Inject permissions (Plan A)              │  │
+│  │    3. openclaw agent --session-id <tenant_id>  │  │
+│  │       --message <text> --json                  │  │
+│  │    4. Audit response (Plan E)                  │  │
+│  │    5. Return JSON response                     │  │
 │  └────────────────────────────────────────────────┘  │
-└──────────────────────┬───────────────────────────────┘
-                       │ (on permission violation)
-                       ▼
-┌──────────────────────────────────────────────────────┐
-│  Auth Agent  (separate AgentCore session)            │
-│  ├── Risk-assessed approval notification             │
-│  ├── Send to admin via WhatsApp/Telegram             │
-│  ├── 30-minute auto-reject                           │
-│  └── Approve → issue token or update SSM profile     │
+│                                                      │
+│  AgentCore 自动管理:                                  │
+│  ├── 同一 sessionId → 复用已有 microVM (秒级响应)    │
+│  ├── 新 sessionId → 拉起新 microVM (~30s 冷启动)    │
+│  └── idle 15min → SIGTERM → S3 flush → 释放          │
 └──────────────────────────────────────────────────────┘
 
-Supporting Services:
-  SSM Parameter Store  → per-tenant permission profiles, gateway token, system prompts
-  CloudWatch Logs      → structured JSON per tenant (compliance, forensics)
-  ECR                  → Agent Container Docker image
-  CloudTrail           → every Bedrock API call audited
+关键设计: 零入侵
+├── OpenClaw Gateway 不知道自己在和 proxy 通信 (AWS_ENDPOINT_URL 环境变量)
+├── microVM 里的 OpenClaw 不知道自己在企业平台上 (标准 CLI 调用)
+├── IM channel 配置和普通单用户部署完全一样
+└── 升级 OpenClaw: rebuild 镜像 push ECR，所有租户下次请求自动用新版本
 ```
+
+### Verified End-to-End Flow (2026-03-16)
+
+完整链路已验证通过:
+
+```
+Telegram 消息 → OpenClaw Gateway → AWS SDK Bedrock call (HTTP/2)
+  → AWS_ENDPOINT_URL_BEDROCK_RUNTIME=http://localhost:8091
+  → bedrock_proxy_h2.js (Node.js HTTP/2 proxy, 提取消息 + channel/sender)
+  → Tenant Router (Python, 派生 tenant_id, 调 AgentCore API)
+  → AgentCore invoke_agent_runtime (Firecracker microVM 冷启动 ~30s)
+  → entrypoint.sh (S3 pull workspace) → server.py → openclaw agent CLI
+  → Bedrock Nova 2 Lite → "Hello! How can I help you today?"
+  → 响应原路返回 → Telegram 收到回复
+```
+
+| 指标 | 数值 |
+|------|------|
+| 冷启动延迟 | ~30s (首次请求，含 microVM 拉起 + OpenClaw 初始化) |
+| 热请求延迟 | ~10s (microVM 已运行，openclaw agent CLI 执行) |
+| microVM idle 超时 | 15 分钟 (可配置) |
+| 最大生命周期 | 8 小时 (可配置) |
 
 ### Security Model
 
@@ -243,14 +278,16 @@ Supporting Services:
 
 ```
 agent-container/           # Docker image for AgentCore Runtime
-├── server.py              # HTTP wrapper: Plan A + E enforcement
+├── server.py              # HTTP wrapper: openclaw agent CLI subprocess + Plan A/E
+├── entrypoint.sh          # microVM lifecycle: config → server.py → S3 sync
 ├── permissions.py         # SSM profile read/write, permission checks
 ├── safety.py              # Input validation, memory poisoning detection
 ├── identity.py            # ApprovalToken lifecycle (max 24h TTL)
 ├── memory.py              # Optional AgentCore Memory persistence
 ├── observability.py       # Structured CloudWatch JSON logs
-├── openclaw.json          # OpenClaw config template
-└── Dockerfile             # Multi-stage: OpenClaw + Python 3.12
+├── openclaw.json          # OpenClaw config template (Bedrock provider, no gateway)
+├── Dockerfile             # ARM64: Python 3.12 + AWS CLI + Node.js 22 + OpenClaw
+└── build-on-ec2.sh        # Remote build when local Docker unavailable
 
 auth-agent/                # Authorization Agent
 ├── server.py              # HTTP entry point with input validation
@@ -259,7 +296,10 @@ auth-agent/                # Authorization Agent
 └── permission_request.py  # PermissionRequest dataclass
 
 src/gateway/
-└── tenant_router.py       # Gateway → AgentCore routing (tenant derivation + invocation)
+├── tenant_router.py       # Gateway → AgentCore routing (tenant derivation + invocation)
+├── bedrock_proxy_h2.js    # HTTP/2 proxy: intercepts Bedrock calls, forwards to Tenant Router
+├── bedrock_proxy.py       # HTTP/1.1 proxy (for curl testing, not used in production)
+└── start_multitenant.sh   # Service startup helper script
 
 src/utils/
 └── agentcore.ts           # SessionKey derivation, response formatting

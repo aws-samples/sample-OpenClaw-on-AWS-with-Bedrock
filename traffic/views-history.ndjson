@@ -89,3 +89,13 @@
   "documentation_url": "https://docs.github.com/rest/metrics/traffic#get-page-views",
   "status": "403"
 }}
+{"fetched_at":"2026-03-16","views":{
+  "message": "Resource not accessible by integration",
+  "documentation_url": "https://docs.github.com/rest/metrics/traffic#get-page-views",
+  "status": "403"
+}}
+{"fetched_at":"2026-03-17","views":{
+  "message": "Resource not accessible by integration",
+  "documentation_url": "https://docs.github.com/rest/metrics/traffic#get-page-views",
+  "status": "403"
+}}
