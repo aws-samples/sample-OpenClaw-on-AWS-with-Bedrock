@@ -17,6 +17,20 @@ AWS_REGION="${AWS_REGION:-us-east-1}"
 
 echo "[entrypoint] START tenant=${TENANT_ID} bucket=${S3_BUCKET}"
 
+# =============================================================================
+# Step 0: Node.js runtime optimizations (before any openclaw invocation)
+# =============================================================================
+
+# V8 Compile Cache (Node.js 22+) — pre-warmed at Docker build time
+if [ -d /app/.compile-cache ]; then
+    export NODE_COMPILE_CACHE=/app/.compile-cache
+    echo "[entrypoint] V8 compile cache enabled"
+fi
+
+# Force IPv4 for Node.js 22 VPC compatibility
+# Node.js 22 Happy Eyeballs tries IPv6 first, times out in VPC without IPv6
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--dns-result-order=ipv4first"
+
 # Prepare workspace
 mkdir -p "$WORKSPACE" "$WORKSPACE/memory" "$WORKSPACE/skills"
 echo "$TENANT_ID" > /tmp/tenant_id

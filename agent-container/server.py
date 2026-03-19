@@ -89,7 +89,29 @@ def _audit_response(tenant_id: str, response_text: str, allowed_tools: list) -> 
             logger.warning("AUDIT: blocked tool '%s' in response tenant_id=%s", tool, tenant_id)
 
 
-def invoke_openclaw(tenant_id: str, message: str, timeout: int = 300) -> dict:
+def invoke_openclaw(tenant_id: str, message: str, timeout: int = 300, max_retries: int = 2) -> dict:
+    """
+    Run openclaw agent CLI with automatic retry on transient failures.
+    Retries on: empty output, JSON parse errors, timeouts.
+    Does NOT retry on successful responses (even if the content is an error message).
+    """
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            return _invoke_openclaw_once(tenant_id, message, timeout)
+        except RuntimeError as e:
+            last_error = e
+            if attempt < max_retries:
+                wait = (attempt + 1) * 2  # 2s, 4s linear backoff
+                logger.warning(
+                    "openclaw retry %d/%d after %ds: %s",
+                    attempt + 1, max_retries, wait, e,
+                )
+                time.sleep(wait)
+    raise last_error
+
+
+def _invoke_openclaw_once(tenant_id: str, message: str, timeout: int = 300) -> dict:
     """
     Run: openclaw agent --session-id <tenant_id> --message <message> --json
     Returns parsed JSON result dict.

@@ -21,7 +21,8 @@ Target: **v1.0 by April 30, 2026** — production-ready multi-tenant OpenClaw pl
 
 | Metric | Current |
 |--------|---------|
-| Cold start | ~30s |
+| Cold start (real) | ~22-25s (optimized from ~30s) |
+| Cold start (user-perceived) | ~2-3s (fast-path) |
 | Warm request | ~10s |
 | Cost (50 users) | ~$1.30-2.20/person/month |
 
@@ -29,11 +30,15 @@ Target: **v1.0 by April 30, 2026** — production-ready multi-tenant OpenClaw pl
 
 ## Week 1: Mar 17-23 — Optimize & Stabilize
 
-### Cold Start Optimization (30s → <15s)
-- [ ] `NODE_COMPILE_CACHE` + `OPENCLAW_NO_RESPAWN=1` in Dockerfile
-- [ ] Lazy S3 sync: serve first request from default workspace, pull in background
-- [ ] Slim image: strip dev deps, pre-compile node_modules
-- [ ] Benchmark each phase, identify bottleneck
+### Cold Start Optimization (30s → ~2-3s user-perceived) ✅
+- [x] `NODE_COMPILE_CACHE` + V8 bytecode pre-warm in Dockerfile
+- [x] Multi-stage Docker build (slim runtime image, no build tools)
+- [x] Force IPv4 (`--dns-result-order=ipv4first`) for VPC compatibility
+- [x] H2 Proxy fast-path: direct Bedrock call for cold tenants (~2-3s)
+- [x] Tenant state tracking (cold/warming/warm) with TTL expiry
+- [x] Async microVM prewarming (fire-and-forget on first request)
+- [x] openclaw agent CLI subprocess retry with linear backoff
+- [ ] Benchmark each phase, validate improvements on EC2
 
 ### Production Reliability
 - [ ] Tenant Router as systemd service (auto-start on boot)

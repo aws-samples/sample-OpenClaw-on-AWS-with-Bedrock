@@ -3,8 +3,14 @@
  * Bedrock Converse API HTTP/2 Proxy for OpenClaw Multi-Tenant Platform.
  *
  * Intercepts AWS SDK Bedrock Converse API calls (HTTP/2) from OpenClaw Gateway,
- * extracts user message, forwards to Tenant Router → AgentCore → microVM,
+ * extracts user message, forwards to Tenant Router -> AgentCore -> microVM,
  * returns response in Bedrock Converse API format.
+ *
+ * Cold-start optimization (fast-path):
+ *   When a tenant's microVM is cold, the proxy responds in ~2-3s via a direct
+ *   Bedrock Converse call (no SOUL.md/memory/skills) while asynchronously
+ *   triggering the full AgentCore pipeline to pre-warm the microVM.
+ *   Subsequent messages use the warm microVM with full OpenClaw capabilities.
  *
  * Usage:
  *   TENANT_ROUTER_URL=http://127.0.0.1:8090 node bedrock_proxy_h2.js
@@ -13,20 +19,117 @@
 
 const http2 = require('node:http2');
 const http = require('node:http');
+const https = require('node:https');
 const { URL } = require('node:url');
+const crypto = require('node:crypto');
 
 const PORT = parseInt(process.env.PROXY_PORT || '8091');
 const TENANT_ROUTER_URL = process.env.TENANT_ROUTER_URL || 'http://127.0.0.1:8090';
+const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
+const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID || 'global.amazon.nova-2-lite-v1:0';
+
+// Fast-path: enable/disable via env var (default: enabled)
+const FAST_PATH_ENABLED = process.env.FAST_PATH_ENABLED !== 'false';
+// Tenant state expiry: after this many ms without activity, tenant goes back to cold
+// AgentCore idle timeout is 15 min, so we use 20 min to be safe
+const TENANT_WARM_TTL_MS = parseInt(process.env.TENANT_WARM_TTL_MS || '1200000');
+// Warming timeout: how long to wait for Tenant Router before falling back to fast-path
+const WARMING_TIMEOUT_MS = parseInt(process.env.WARMING_TIMEOUT_MS || '8000');
 
 function log(msg) {
   console.log(`${new Date().toISOString()} [bedrock-proxy-h2] ${msg}`);
 }
 
+// =============================================================================
+// Tenant State Management
+// =============================================================================
+
+// States: 'cold' -> 'warming' -> 'warm' -> (TTL expires) -> 'cold'
+const tenantState = new Map();
+
+function getTenantKey(channel, userId) {
+  return `${channel}__${userId}`;
+}
+
+function getTenantStatus(key) {
+  const entry = tenantState.get(key);
+  if (!entry) return 'cold';
+  // Check TTL expiry
+  if (Date.now() - entry.lastSeen > TENANT_WARM_TTL_MS) {
+    tenantState.delete(key);
+    return 'cold';
+  }
+  return entry.status;
+}
+
+function setTenantStatus(key, status) {
+  tenantState.set(key, { status, lastSeen: Date.now() });
+}
+
+function touchTenant(key) {
+  const entry = tenantState.get(key);
+  if (entry) entry.lastSeen = Date.now();
+}
+
+// Periodic cleanup of expired entries (every 5 min)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of tenantState) {
+    if (now - entry.lastSeen > TENANT_WARM_TTL_MS) {
+      tenantState.delete(key);
+    }
+  }
+}, 300000);
+
+// =============================================================================
+// Fast-Path: Direct Bedrock Converse API call (no OpenClaw, no SOUL.md)
+// =============================================================================
+
+let bedrockClient = null;
+
+async function initBedrockClient() {
+  if (bedrockClient) return bedrockClient;
+  try {
+    const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
+    bedrockClient = new BedrockRuntimeClient({ region: AWS_REGION });
+    // Store ConverseCommand on the client for later use
+    bedrockClient._ConverseCommand = ConverseCommand;
+    log('Bedrock SDK client initialized for fast-path');
+    return bedrockClient;
+  } catch (e) {
+    log(`Bedrock SDK not available (fast-path disabled): ${e.message}`);
+    return null;
+  }
+}
+
+async function fastPathBedrock(userText) {
+  const client = await initBedrockClient();
+  if (!client) return null;
+
+  try {
+    const cmd = new client._ConverseCommand({
+      modelId: BEDROCK_MODEL_ID,
+      messages: [{ role: 'user', content: [{ text: userText }] }],
+      system: [{ text: 'You are a helpful AI assistant. Be concise and friendly.' }],
+      inferenceConfig: { maxTokens: 1024 },
+    });
+    const resp = await client.send(cmd);
+    const text = resp.output?.message?.content?.[0]?.text || 'No response';
+    return text;
+  } catch (e) {
+    log(`Fast-path Bedrock error: ${e.message}`);
+    return null;
+  }
+}
+
+// =============================================================================
+// Message Extraction (unchanged from original)
+// =============================================================================
+
 function extractUserMessage(body) {
   const messages = body.messages || [];
   const systemParts = body.system || [];
 
-  // Last user message
   let userText = '';
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === 'user') {
@@ -40,87 +143,48 @@ function extractUserMessage(body) {
     }
   }
 
-  // Extract channel/sender identity from user message text first (primary),
-  // then fall back to system prompt regex (legacy), then MD5 hash (last resort).
-  //
-  // OpenClaw embeds identity in user messages, not system prompts. Formats:
-  //   Slack:    "Slack DM from W017LFGP267: hello"
-  //             "Slack message in #general from W017LFGP267: hello"
-  //   WhatsApp: "WhatsApp message from 8613800138000: hello"
-  //   Telegram: "Telegram message from 123456789: hello"
-  //             "Telegram message in GroupName from 123456789: hello"
-  //   Discord:  "Discord DM from username#1234: hello"
-  //             "Discord message in #channel from username#1234: hello"
-
   let channel = 'unknown';
   let userId = 'unknown';
 
-  // --- Primary: extract from user message text ---
-
-  // Slack DM: "Slack DM from <userId>:"
+  // Primary: extract from user message text
   const slackDm = userText.match(/Slack DM from ([\w]+):/i);
-  // Slack channel: "Slack message in #<channel> from <userId>:"
   const slackChan = userText.match(/Slack (?:message )?in #([\w-]+).*?from ([\w]+):/i);
-  // WhatsApp: "WhatsApp message from <phone>:"
   const waDm = userText.match(/WhatsApp (?:message |DM )?from ([\w+\-.]+):/i);
-  // WhatsApp group: "WhatsApp message in <group> from <phone>:"
   const waGroup = userText.match(/WhatsApp (?:message )?in (.+?) from ([\w+\-.]+):/i);
-  // Telegram: "Telegram message from <userId>:"
   const tgDm = userText.match(/Telegram (?:message |DM )?from ([\w]+):/i);
-  // Telegram group: "Telegram message in <group> from <userId>:"
   const tgGroup = userText.match(/Telegram (?:message )?in (.+?) from ([\w]+):/i);
-  // Discord DM: "Discord DM from <user>:"
   const dcDm = userText.match(/Discord DM from ([\w#]+):/i);
-  // Discord channel: "Discord message in #<channel> from <user>:"
   const dcChan = userText.match(/Discord (?:message )?in #([\w-]+).*?from ([\w#]+):/i);
 
-  if (slackChan) {
-    channel = 'slack';
-    userId = 'chan_' + slackChan[1] + '_' + slackChan[2];
-  } else if (slackDm) {
-    channel = 'slack';
-    userId = 'dm_' + slackDm[1];
-  } else if (waGroup) {
-    channel = 'whatsapp';
-    userId = 'grp_' + waGroup[2];
-  } else if (waDm) {
-    channel = 'whatsapp';
-    userId = waDm[1];
-  } else if (tgGroup) {
-    channel = 'telegram';
-    userId = 'grp_' + tgGroup[2];
-  } else if (tgDm) {
-    channel = 'telegram';
-    userId = tgDm[1];
-  } else if (dcChan) {
-    channel = 'discord';
-    userId = 'chan_' + dcChan[1] + '_' + dcChan[2];
-  } else if (dcDm) {
-    channel = 'discord';
-    userId = 'dm_' + dcDm[1];
-  }
+  if (slackChan) { channel = 'slack'; userId = 'chan_' + slackChan[1] + '_' + slackChan[2]; }
+  else if (slackDm) { channel = 'slack'; userId = 'dm_' + slackDm[1]; }
+  else if (waGroup) { channel = 'whatsapp'; userId = 'grp_' + waGroup[2]; }
+  else if (waDm) { channel = 'whatsapp'; userId = waDm[1]; }
+  else if (tgGroup) { channel = 'telegram'; userId = 'grp_' + tgGroup[2]; }
+  else if (tgDm) { channel = 'telegram'; userId = tgDm[1]; }
+  else if (dcChan) { channel = 'discord'; userId = 'chan_' + dcChan[1] + '_' + dcChan[2]; }
+  else if (dcDm) { channel = 'discord'; userId = 'dm_' + dcDm[1]; }
 
-  // --- Fallback: system prompt regex (legacy / future structured metadata) ---
+  // Fallback: system prompt regex
   if (userId === 'unknown') {
     const systemText = systemParts
       .map(p => (typeof p === 'string' ? p : p.text || ''))
       .join(' ');
-
     const chMatch = systemText.match(/(?:channel|source|platform)[:\s]+(\w+)/i);
     if (chMatch) channel = chMatch[1].toLowerCase();
-
     const idMatch = systemText.match(/(?:sender|from|user|recipient|target)[:\s]+([\w@+\-.]+)/i);
     if (idMatch) userId = idMatch[1];
-
-    // --- Last resort: MD5 hash for stable but opaque tenant_id ---
     if (userId === 'unknown') {
-      const crypto = require('node:crypto');
       userId = 'sys-' + crypto.createHash('md5').update(systemText.slice(0, 500)).digest('hex').slice(0, 12);
     }
   }
 
   return { userText, channel, userId };
 }
+
+// =============================================================================
+// Tenant Router Forwarding
+// =============================================================================
 
 function forwardToTenantRouter(channel, userId, message) {
   return new Promise((resolve, reject) => {
@@ -152,70 +216,116 @@ function forwardToTenantRouter(channel, userId, message) {
   });
 }
 
-// Create HTTP/2 server (cleartext, no TLS — for local use)
-const server = http2.createServer();
+/**
+ * Fire-and-forget: trigger Tenant Router to start microVM prewarming.
+ * Does not wait for response. Errors are logged and swallowed.
+ */
+function prewarmTenantRouter(channel, userId, message) {
+  const tenantKey = getTenantKey(channel, userId);
+  log(`Prewarming microVM for ${tenantKey}`);
 
-server.on('stream', (stream, headers) => {
-  const method = headers[':method'];
-  const path = headers[':path'] || '/';
+  forwardToTenantRouter(channel, userId, message)
+    .then(() => {
+      setTenantStatus(tenantKey, 'warm');
+      log(`Prewarm complete: ${tenantKey} -> warm`);
+    })
+    .catch(e => {
+      log(`Prewarm failed for ${tenantKey}: ${e.message}`);
+      // Stay in 'warming' state; next request will retry
+    });
+}
 
-  if (method === 'GET' && (path === '/ping' || path === '/')) {
-    stream.respond({ ':status': 200, 'content-type': 'application/json' });
-    stream.end(JSON.stringify({ status: 'healthy', service: 'bedrock-proxy-h2' }));
-    return;
-  }
+/**
+ * Try Tenant Router with a timeout. If it responds in time, great.
+ * If not, return null so caller can fall back to fast-path.
+ */
+function tryTenantRouterWithTimeout(channel, userId, message, timeoutMs) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), timeoutMs);
 
-  if (method !== 'POST') {
-    stream.respond({ ':status': 405 });
-    stream.end('Method not allowed');
-    return;
-  }
-
-  const isStream = path.includes('converse-stream');
-  let body = '';
-
-  stream.on('data', chunk => body += chunk);
-  stream.on('end', async () => {
-    try {
-      const parsed = JSON.parse(body);
-      const { userText, channel, userId } = extractUserMessage(parsed);
-
-      log(`Request: ${path} channel=${channel} user=${userId} msg=${userText.slice(0, 60)}`);
-
-      if (!userText) {
-        if (isStream) {
-          stream.respond({ ':status': 200, 'content-type': 'application/vnd.amazon.eventstream' });
-          const evts = buildEventStream("I didn't receive a message.");
-          for (const e of evts) stream.write(e);
-          stream.end();
-        } else {
-          const resp = buildConverseResponse("I didn't receive a message.");
-          stream.respond({ ':status': 200, 'content-type': 'application/json' });
-          stream.end(JSON.stringify(resp));
-        }
-        return;
-      }
-
-      const responseText = await forwardToTenantRouter(channel, userId, userText);
-      log(`Response: ${responseText.slice(0, 80)}`);
-
-      if (isStream) {
-        // Bedrock ConverseStream expects application/vnd.amazon.eventstream binary format
-        stream.respond({ ':status': 200, 'content-type': 'application/vnd.amazon.eventstream' });
-        const evts = buildEventStream(responseText);
-        for (const e of evts) stream.write(e);
-        stream.end();
-      } else {
-        stream.respond({ ':status': 200, 'content-type': 'application/json' });
-        stream.end(JSON.stringify(buildConverseResponse(responseText)));
-      }
-    } catch (e) {
-      log(`Error: ${e.message}`);
-      stream.respond({ ':status': 500, 'content-type': 'application/json' });
-      stream.end(JSON.stringify({ message: e.message }));
-    }
+    forwardToTenantRouter(channel, userId, message)
+      .then(text => {
+        clearTimeout(timer);
+        resolve(text);
+      })
+      .catch(() => {
+        clearTimeout(timer);
+        resolve(null);
+      });
   });
-});
+}
+
+// =============================================================================
+// Core Request Router (fast-path + warm path)
+// =============================================================================
+
+/**
+ * Route a request based on tenant state:
+ *   warm    -> forward to Tenant Router (full OpenClaw, ~10s)
+ *   warming -> try Tenant Router with timeout, fallback to fast-path
+ *   cold    -> fast-path Bedrock (~2-3s) + async prewarm
+ */
+async function routeRequest(channel, userId, userText) {
+  const tenantKey = getTenantKey(channel, userId);
+  const status = getTenantStatus(tenantKey);
+
+  log(`Route: ${tenantKey} status=${status} fast_path=${FAST_PATH_ENABLED}`);
+
+  // --- Warm: microVM is running, use full OpenClaw pipeline ---
+  if (status === 'warm') {
+    touchTenant(tenantKey);
+    const text = await forwardToTenantRouter(channel, userId, userText);
+    return text;
+  }
+
+  // --- Fast-path disabled: always go through Tenant Router ---
+  if (!FAST_PATH_ENABLED) {
+    if (status === 'cold') setTenantStatus(tenantKey, 'warming');
+    const text = await forwardToTenantRouter(channel, userId, userText);
+    setTenantStatus(tenantKey, 'warm');
+    return text;
+  }
+
+  // --- Warming: microVM might be ready, try with timeout ---
+  if (status === 'warming') {
+    const text = await tryTenantRouterWithTimeout(channel, userId, userText, WARMING_TIMEOUT_MS);
+    if (text) {
+      setTenantStatus(tenantKey, 'warm');
+      return text;
+    }
+    // Timeout: fall through to fast-path
+    log(`Warming timeout for ${tenantKey}, using fast-path`);
+    const fastText = await fastPathBedrock(userText);
+    if (fastText) return fastText;
+    // Fast-path also failed: wait for full pipeline
+    const fullText = await forwardToTenantRouter(channel, userId, userText);
+    setTenantStatus(tenantKey, 'warm');
+    return fullText;
+  }
+
+  // --- Cold: first request for this tenant ---
+  setTenantStatus(tenantKey, 'warming');
+
+  // Async: trigger microVM prewarm (fire-and-forget)
+  prewarmTenantRouter(channel, userId, userText);
+
+  // Sync: fast-path direct Bedrock call (~2-3s)
+  const fastText = await fastPathBedrock(userText);
+  if (fastText) {
+    log(`Fast-path response for ${tenantKey}: ${fastText.slice(0, 60)}`);
+    return fastText;
+  }
+
+  // Fast-path failed (SDK not available or Bedrock error): wait for full pipeline
+  log(`Fast-path unavailable for ${tenantKey}, waiting for Tenant Router`);
+  const fullText = await forwardToTenantRouter(channel, userId, userText);
+  setTenantStatus(tenantKey, 'warm');
+  return fullText;
+}
+
+// =============================================================================
+// Response Builders (Bedrock Converse API format)
+// =============================================================================
 
 function buildConverseResponse(text) {
   return {
@@ -300,11 +410,91 @@ function buildEventStream(text) {
   return events;
 }
 
-// Also listen on HTTP/1.1 for health checks and curl testing
+// =============================================================================
+// HTTP/2 Server (main — handles AWS SDK Bedrock calls from OpenClaw Gateway)
+// =============================================================================
+
+const server = http2.createServer();
+
+server.on('stream', (stream, headers) => {
+  const method = headers[':method'];
+  const path = headers[':path'] || '/';
+
+  if (method === 'GET' && (path === '/ping' || path === '/')) {
+    stream.respond({ ':status': 200, 'content-type': 'application/json' });
+    stream.end(JSON.stringify({
+      status: 'healthy',
+      service: 'bedrock-proxy-h2',
+      fastPath: FAST_PATH_ENABLED,
+      tenants: tenantState.size,
+    }));
+    return;
+  }
+
+  if (method !== 'POST') {
+    stream.respond({ ':status': 405 });
+    stream.end('Method not allowed');
+    return;
+  }
+
+  const isStream = path.includes('converse-stream');
+  let body = '';
+
+  stream.on('data', chunk => body += chunk);
+  stream.on('end', async () => {
+    try {
+      const parsed = JSON.parse(body);
+      const { userText, channel, userId } = extractUserMessage(parsed);
+
+      log(`Request: ${path} channel=${channel} user=${userId} msg=${userText.slice(0, 60)}`);
+
+      if (!userText) {
+        const noMsg = "I didn't receive a message.";
+        if (isStream) {
+          stream.respond({ ':status': 200, 'content-type': 'application/vnd.amazon.eventstream' });
+          for (const e of buildEventStream(noMsg)) stream.write(e);
+          stream.end();
+        } else {
+          stream.respond({ ':status': 200, 'content-type': 'application/json' });
+          stream.end(JSON.stringify(buildConverseResponse(noMsg)));
+        }
+        return;
+      }
+
+      // Core routing: fast-path for cold tenants, full pipeline for warm
+      const responseText = await routeRequest(channel, userId, userText);
+      log(`Response: ${responseText.slice(0, 80)}`);
+
+      if (isStream) {
+        stream.respond({ ':status': 200, 'content-type': 'application/vnd.amazon.eventstream' });
+        for (const e of buildEventStream(responseText)) stream.write(e);
+        stream.end();
+      } else {
+        stream.respond({ ':status': 200, 'content-type': 'application/json' });
+        stream.end(JSON.stringify(buildConverseResponse(responseText)));
+      }
+    } catch (e) {
+      log(`Error: ${e.message}`);
+      stream.respond({ ':status': 500, 'content-type': 'application/json' });
+      stream.end(JSON.stringify({ message: e.message }));
+    }
+  });
+});
+
+// =============================================================================
+// HTTP/1.1 Server (health checks + curl testing)
+// =============================================================================
+
 const h1Server = http.createServer((req, res) => {
   if (req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'healthy', service: 'bedrock-proxy-h2', note: 'Use HTTP/2 for Bedrock API' }));
+    res.end(JSON.stringify({
+      status: 'healthy',
+      service: 'bedrock-proxy-h2',
+      fastPath: FAST_PATH_ENABLED,
+      tenants: tenantState.size,
+      note: 'Use HTTP/2 for Bedrock API',
+    }));
     return;
   }
 
@@ -315,7 +505,7 @@ const h1Server = http.createServer((req, res) => {
       const parsed = JSON.parse(body);
       const { userText, channel, userId } = extractUserMessage(parsed);
       log(`H1 Request: channel=${channel} user=${userId} msg=${userText.slice(0, 60)}`);
-      const responseText = await forwardToTenantRouter(channel, userId, userText);
+      const responseText = await routeRequest(channel, userId, userText);
       log(`H1 Response: ${responseText.slice(0, 80)}`);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(buildConverseResponse(responseText)));
@@ -326,12 +516,22 @@ const h1Server = http.createServer((req, res) => {
   });
 });
 
+// =============================================================================
+// Startup
+// =============================================================================
+
 server.listen(PORT, '0.0.0.0', () => {
   log(`HTTP/2 proxy listening on port ${PORT}`);
   log(`Tenant Router: ${TENANT_ROUTER_URL}`);
+  log(`Fast-path: ${FAST_PATH_ENABLED ? 'ENABLED' : 'DISABLED'} (model: ${BEDROCK_MODEL_ID})`);
+  log(`Tenant warm TTL: ${TENANT_WARM_TTL_MS / 1000}s, warming timeout: ${WARMING_TIMEOUT_MS}ms`);
 });
 
-// HTTP/1.1 on PORT+1 for health checks
 h1Server.listen(PORT + 1, '0.0.0.0', () => {
   log(`HTTP/1.1 health check on port ${PORT + 1}`);
 });
+
+// Pre-initialize Bedrock client at startup (non-blocking)
+if (FAST_PATH_ENABLED) {
+  initBedrockClient().catch(() => {});
+}

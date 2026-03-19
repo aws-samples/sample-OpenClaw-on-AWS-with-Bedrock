@@ -314,12 +314,58 @@ EC2 上运行的 Python HTTP 服务 (port 8090):
 
 ---
 
+## 冷启动优化 (2026-03-19)
+
+### 优化措施 (已实现)
+
+| 优化 | 改动文件 | 预期收益 | 风险 |
+|------|---------|---------|------|
+| Multi-stage Docker Build | Dockerfile | 镜像瘦身 ~40%, ECR pull -2~3s | 低 |
+| V8 Compile Cache | Dockerfile + entrypoint.sh | openclaw CLI 启动 -2s | 极低 |
+| 强制 IPv4 | entrypoint.sh | 消除 VPC IPv6 超时 | 极低 |
+| openclaw CLI 子进程重试 | server.py | 偶发失败自动恢复 | 低 |
+| H2 Proxy Fast-Path | bedrock_proxy_h2.js | 冷启动用户感知 2-3s | 中 |
+
+### Fast-Path 设计
+
+H2 Proxy 维护 tenant 状态表 (cold/warming/warm):
+- cold: 首次请求 → 直接调 Bedrock Converse API (~2-3s 返回) + 异步触发 microVM 预热
+- warming: 尝试 Tenant Router (8s 超时)，超时则 fast-path fallback
+- warm: 正常转发 Tenant Router → AgentCore (热路径, ~10s)
+- 20 分钟无活动 → 回到 cold (AgentCore idle timeout 15 分钟)
+
+Fast-path 是裸 Bedrock 调用，无 SOUL.md/memory/skills。零侵入 OpenClaw。
+通过 `FAST_PATH_ENABLED=false` 环境变量可完全关闭。
+
+### 优化后目标
+
+| 场景 | 优化前 | 优化后 |
+|------|--------|--------|
+| 冷启动 (真实) | ~30s | ~22-25s |
+| 冷启动 (用户感知) | ~30s | ~2-3s |
+| 热请求 | ~10s | ~10s (不变) |
+
+### 竞品对比分析
+
+参考 `github.com/aws-samples/sample-host-openclaw-on-amazon-bedrock-agentcore`:
+- 他的方案: lightweight agent shim (17 tools) + OpenAI proxy + WebSocket bridge + Lambda webhook
+- 侵入性高: 改 OpenClaw provider 配置、依赖 WebSocket 内部协议、版本耦合多处
+- 我们的方案: CLI 子进程 + 原生 Bedrock + 环境变量拦截 + fast-path 直接 Bedrock
+- 零侵入: OpenClaw 代码不改，升级只需 rebuild 镜像
+
+借鉴的优化 (零侵入): V8 Compile Cache, Multi-stage build, IPv4 强制, Proxy JIT warm-up
+不采用的方案: OpenAI proxy (增加中间层), WebSocket bridge (协议耦合), Lambda webhook (不支持 WhatsApp/Discord 长连接)
+
+详细设计文档: `docs/cold-start-optimization-design.md`
+
+---
+
 ## 下一步 (优先级排序)
 
-1. **重启 Gateway 并验证 IM 端到端** — 重启 OpenClaw Gateway（baseUrl 指向 proxy），从 Telegram/WhatsApp 发消息验证完整链路
+1. **EC2 部署验证** — rebuild Docker 镜像 (multi-stage), 部署 H2 Proxy (fast-path), 端到端测试
 2. **第二个租户测试** — 验证两个不同 tenant_id 的隔离性（不同员工发消息，各自独立的 microVM）
 3. **S3 workspace 写回验证** — 确认 MEMORY.md 更新后能 sync 回 S3
-4. **冷启动优化** — 当前 E2E ~25s (含冷启动)，目标 < 15s
+4. **STS Scoped Credentials** — 每租户 S3 路径隔离 (Week 2)
 5. **Admin Console 集成** — 管理员配置员工角色、权限、查看审计日志
 
 ---
@@ -339,3 +385,4 @@ EC2 上运行的 Python HTTP 服务 (port 8090):
 | src/gateway/bedrock_proxy.py | Bedrock HTTP/1.1 Proxy (curl 测试用，生产用 H2 版本) |
 | clawdbot-bedrock-agentcore-multitenancy.yaml | CloudFormation: EC2 + ECR + S3 + SSM + IAM |
 | deploy-multitenancy.sh | 一键部署脚本 |
+| docs/cold-start-optimization-design.md | 冷启动优化设计文档 (6 项优化, 4 阶段实施) |
