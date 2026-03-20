@@ -15,6 +15,13 @@ Metadata:
           - InstanceType
           - KeyPairName
       - Label:
+          default: "GitHub App Integration (Optional)"
+        Parameters:
+          - GitHubAppId
+          - GitHubAppInstallationId
+          - GitHubAppPrivateKey
+          - GitHubRepoUrl
+      - Label:
           default: "Network Configuration"
         Parameters:
           - CreateVPCEndpoints
@@ -86,6 +93,27 @@ Parameters:
       - "true"
       - "false"
 
+  GitHubAppId:
+    Type: String
+    Default: ""
+    Description: "GitHub App ID for repository access (leave empty to skip GitHub integration)"
+
+  GitHubAppInstallationId:
+    Type: String
+    Default: ""
+    Description: "GitHub App Installation ID for the target organization/account"
+
+  GitHubAppPrivateKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: "GitHub App private key in PEM format (stored as SSM SecureString, never written to disk)"
+
+  GitHubRepoUrl:
+    Type: String
+    Default: ""
+    Description: "GitHub repo HTTPS URL to clone (e.g. https://github.com/org/repo.git)"
+
 Conditions:
   CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, "none"]]
@@ -122,6 +150,7 @@ Conditions:
       - Condition: IsEuNorth1
       - Condition: IsSaEast1
   CreateMantleEndpoint: !And [ Condition: CreateEndpoints, Condition: IsMantleSupportedRegion ]     
+  ConfigureGitHub: !Not [!Equals [!Ref GitHubAppId, ""]]
   EnableDocker: !Equals [!Ref EnableSandbox, "true"]
   ProtectData: !Equals [!Ref EnableDataProtection, "true"]
   DeleteData: !Not [!Equals [!Ref EnableDataProtection, "true"]]
@@ -808,6 +837,103 @@ Resources:
           SSMEOF
           chmod +x /home/ubuntu/ssm-portforward.sh
           chown ubuntu:ubuntu /home/ubuntu/ssm-portforward.sh
+
+          # Configure GitHub App credentials (if provided)
+          if [ "${GitHubAppId}" != "" ]; then
+            echo "[8.8/9] Configuring GitHub App credentials..."
+            STACK_NAME="${AWS::StackName}"
+
+            # Store private key in SSM (never written to disk)
+            aws ssm put-parameter \
+              --name "/openclaw/$STACK_NAME/github-app-key" \
+              --value "${GitHubAppPrivateKey}" \
+              --type "SecureString" \
+              --region $AWS_REGION \
+              --overwrite || echo "Failed to save GitHub App key to SSM"
+
+            # Write credential helper script (fetches key from SSM at runtime)
+            cat > /home/ubuntu/git-credential-github-app.py << 'GHCREDEOF'
+          #!/usr/bin/env python3
+          import json, time, urllib.request, subprocess, base64, os
+          from cryptography.hazmat.primitives import hashes, serialization
+          from cryptography.hazmat.primitives.asymmetric import padding
+
+          APP_ID = "PLACEHOLDER_APP_ID"
+          INSTALLATION_ID = "PLACEHOLDER_INSTALLATION_ID"
+          STACK_NAME = "PLACEHOLDER_STACK_NAME"
+          AWS_REGION = "PLACEHOLDER_REGION"
+
+          def get_pem():
+              out = subprocess.check_output([
+                  "aws", "ssm", "get-parameter",
+                  "--name", f"/openclaw/{STACK_NAME}/github-app-key",
+                  "--with-decryption",
+                  "--query", "Parameter.Value",
+                  "--output", "text",
+                  "--region", AWS_REGION
+              ])
+              return out.decode().strip()
+
+          def b64url(data):
+              return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+          def create_jwt(pem_str):
+              now = int(time.time())
+              header = b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+              payload = b64url(json.dumps({"iat": now - 60, "exp": now + 540, "iss": APP_ID}).encode())
+              key = serialization.load_pem_private_key(pem_str.encode(), password=None)
+              sig = key.sign(header + b"." + payload, padding.PKCS1v15(), hashes.SHA256())
+              return (header + b"." + payload + b"." + b64url(sig)).decode()
+
+          def get_token():
+              pem = get_pem()
+              jwt = create_jwt(pem)
+              url = f"https://api.github.com/app/installations/{INSTALLATION_ID}/access_tokens"
+              req = urllib.request.Request(url, data=b"{}", headers={
+                  "Authorization": f"Bearer {jwt}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json"
+              })
+              resp = urllib.request.urlopen(req)
+              return json.loads(resp.read())["token"]
+
+          if __name__ == "__main__":
+              token = get_token()
+              print("username=x-access-token")
+              print(f"password={token}")
+          GHCREDEOF
+
+            # Replace placeholders with actual values
+            sed -i "s/PLACEHOLDER_APP_ID/${GitHubAppId}/" /home/ubuntu/git-credential-github-app.py
+            sed -i "s/PLACEHOLDER_INSTALLATION_ID/${GitHubAppInstallationId}/" /home/ubuntu/git-credential-github-app.py
+            sed -i "s/PLACEHOLDER_STACK_NAME/$STACK_NAME/" /home/ubuntu/git-credential-github-app.py
+            sed -i "s/PLACEHOLDER_REGION/$AWS_REGION/" /home/ubuntu/git-credential-github-app.py
+
+            chmod 700 /home/ubuntu/git-credential-github-app.py
+            chown ubuntu:ubuntu /home/ubuntu/git-credential-github-app.py
+
+            # Install cryptography library
+            pip3 install --break-system-packages cryptography 2>/dev/null || true
+
+            # Configure git
+            cat > /home/ubuntu/.gitconfig << 'GITCFGEOF'
+          [credential]
+          	helper = /home/ubuntu/git-credential-github-app.py
+          [user]
+          	name = OpenClaw Dev Bot[bot]
+          	email = openclaw-dev-bot[bot]@users.noreply.github.com
+          GITCFGEOF
+            chmod 600 /home/ubuntu/.gitconfig
+            chown ubuntu:ubuntu /home/ubuntu/.gitconfig
+
+            # Clone the repo if URL provided
+            GITHUB_REPO_URL="${GitHubRepoUrl}"
+            if [ -n "$GITHUB_REPO_URL" ]; then
+              sudo -u ubuntu git clone "$GITHUB_REPO_URL" /home/ubuntu/repo || echo "Git clone failed"
+            fi
+
+            echo "GitHub App credentials configured (key stored in SSM, tokens generated on demand)"
+          fi
 
           # Complete
           echo "[9/9] Signaling CloudFormation..."
