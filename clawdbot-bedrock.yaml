@@ -42,6 +42,7 @@ Parameters:
     Default: "global.amazon.nova-2-lite-v1:0"
     Description: "Bedrock model ID - Nova 2 Lite offers best price-performance for everyday tasks"
     AllowedValues:
+      - "us.anthropic.claude-sonnet-4-6"
       - "global.amazon.nova-2-lite-v1:0"
       - "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
       - "us.amazon.nova-pro-v1:0"
