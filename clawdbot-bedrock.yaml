@@ -488,6 +488,7 @@ Resources:
           Ebs:
             VolumeSize: 30
             VolumeType: gp3
+            Encrypted: true
             DeleteOnTermination: true
       UserData:
         Fn::Base64: !Sub |
