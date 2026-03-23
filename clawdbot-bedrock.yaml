@@ -19,13 +19,13 @@ Metadata:
         Parameters:
           - GitHubAppId
           - GitHubAppInstallationId
-          - GitHubAppPrivateKey
+          - GitHubAppKeySSMPath
           - GitHubRepoUrl
       - Label:
           default: "Slack Integration (Optional)"
         Parameters:
-          - SlackBotToken
-          - SlackAppToken
+          - SlackBotTokenSSMPath
+          - SlackAppTokenSSMPath
       - Label:
           default: "Claude Code Integration (Optional)"
         Parameters:
@@ -113,28 +113,25 @@ Parameters:
     Default: ""
     Description: "GitHub App Installation ID for the target organization/account"
 
-  GitHubAppPrivateKey:
+  GitHubAppKeySSMPath:
     Type: String
     Default: ""
-    NoEcho: true
-    Description: "GitHub App private key in PEM format (stored as SSM SecureString, never written to disk)"
+    Description: "SSM Parameter Store path for GitHub App private key (e.g. /openclaw/github-app-key). Pre-store as SecureString before deploy."
 
   GitHubRepoUrl:
     Type: String
     Default: ""
     Description: "GitHub repo HTTPS URL to clone (e.g. https://github.com/org/repo.git)"
 
-  SlackBotToken:
+  SlackBotTokenSSMPath:
     Type: String
     Default: ""
-    NoEcho: true
-    Description: "Slack bot token (xoxb-...) stored in SSM SecureString, never on disk"
+    Description: "SSM Parameter Store path for Slack bot token (e.g. /openclaw/slack-bot-token). Pre-store as SecureString before deploy."
 
-  SlackAppToken:
+  SlackAppTokenSSMPath:
     Type: String
     Default: ""
-    NoEcho: true
-    Description: "Slack app token (xapp-...) for Socket Mode, stored in SSM SecureString"
+    Description: "SSM Parameter Store path for Slack app token (e.g. /openclaw/slack-app-token). Pre-store as SecureString before deploy."
 
   EnableClaudeCode:
     Type: String
@@ -181,7 +178,7 @@ Conditions:
       - Condition: IsSaEast1
   CreateMantleEndpoint: !And [ Condition: CreateEndpoints, Condition: IsMantleSupportedRegion ]     
   ConfigureGitHub: !Not [!Equals [!Ref GitHubAppId, ""]]
-  ConfigureSlack: !Not [!Equals [!Ref SlackBotToken, ""]]
+  ConfigureSlack: !Not [!Equals [!Ref SlackBotTokenSSMPath, ""]]
   ConfigureClaudeCode: !Equals [!Ref EnableClaudeCode, "true"]
   EnableDocker: !Equals [!Ref EnableSandbox, "true"]
   ProtectData: !Equals [!Ref EnableDataProtection, "true"]
@@ -396,7 +393,7 @@ Resources:
                 Action:
                   - 'ssm:PutParameter'
                   - 'ssm:GetParameter'
-                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/*'
         - PolicyName: BedrockMarketplacePolicy
           PolicyDocument:
             Version: '2012-10-17'
@@ -883,14 +880,11 @@ Resources:
           if [ "${GitHubAppId}" != "" ]; then
             echo "[8.8/9] Configuring GitHub App credentials..."
             STACK_NAME="${AWS::StackName}"
+            GITHUB_APP_KEY_SSM="${GitHubAppKeySSMPath}"
 
-            # Store private key in SSM (never written to disk)
-            aws ssm put-parameter \
-              --name "/openclaw/$STACK_NAME/github-app-key" \
-              --value "${GitHubAppPrivateKey}" \
-              --type "SecureString" \
-              --region $AWS_REGION \
-              --overwrite || echo "Failed to save GitHub App key to SSM"
+            # Verify the pre-stored SSM parameter is accessible
+            aws ssm get-parameter --name "$GITHUB_APP_KEY_SSM" --with-decryption --region $AWS_REGION > /dev/null 2>&1 \
+              || echo "WARNING: Cannot read GitHub App key from SSM path: $GITHUB_APP_KEY_SSM"
 
             # Write credential helper script (fetches key from SSM at runtime)
             cat > /home/ubuntu/git-credential-github-app.py << 'GHCREDEOF'
@@ -901,13 +895,13 @@ Resources:
 
           APP_ID = "PLACEHOLDER_APP_ID"
           INSTALLATION_ID = "PLACEHOLDER_INSTALLATION_ID"
-          STACK_NAME = "PLACEHOLDER_STACK_NAME"
+          SSM_KEY_PATH = "PLACEHOLDER_SSM_KEY_PATH"
           AWS_REGION = "PLACEHOLDER_REGION"
 
           def get_pem():
               out = subprocess.check_output([
                   "aws", "ssm", "get-parameter",
-                  "--name", f"/openclaw/{STACK_NAME}/github-app-key",
+                  "--name", SSM_KEY_PATH,
                   "--with-decryption",
                   "--query", "Parameter.Value",
                   "--output", "text",
@@ -947,7 +941,7 @@ Resources:
             # Replace placeholders with actual values
             sed -i "s/PLACEHOLDER_APP_ID/${GitHubAppId}/" /home/ubuntu/git-credential-github-app.py
             sed -i "s/PLACEHOLDER_INSTALLATION_ID/${GitHubAppInstallationId}/" /home/ubuntu/git-credential-github-app.py
-            sed -i "s/PLACEHOLDER_STACK_NAME/$STACK_NAME/" /home/ubuntu/git-credential-github-app.py
+            sed -i "s|PLACEHOLDER_SSM_KEY_PATH|$GITHUB_APP_KEY_SSM|" /home/ubuntu/git-credential-github-app.py
             sed -i "s/PLACEHOLDER_REGION/$AWS_REGION/" /home/ubuntu/git-credential-github-app.py
 
             chmod 700 /home/ubuntu/git-credential-github-app.py
@@ -976,29 +970,13 @@ Resources:
             echo "GitHub App credentials configured (key stored in SSM, tokens generated on demand)"
           fi
 
-          # Configure Slack tokens (if provided)
-          if [ "${SlackBotToken}" != "" ]; then
+          # Configure Slack tokens (if SSM paths provided)
+          if [ "${SlackBotTokenSSMPath}" != "" ]; then
             echo "[8.9/9] Configuring Slack credentials..."
-            STACK_NAME="${AWS::StackName}"
 
-            # Store Slack tokens in SSM (never on disk in plaintext)
-            aws ssm put-parameter \
-              --name "/openclaw/$STACK_NAME/slack-bot-token" \
-              --value "${SlackBotToken}" \
-              --type "SecureString" \
-              --region $AWS_REGION \
-              --overwrite || echo "Failed to save Slack bot token to SSM"
-
-            aws ssm put-parameter \
-              --name "/openclaw/$STACK_NAME/slack-app-token" \
-              --value "${SlackAppToken}" \
-              --type "SecureString" \
-              --region $AWS_REGION \
-              --overwrite || echo "Failed to save Slack app token to SSM"
-
-            # Retrieve tokens from SSM and inject into OpenClaw config
-            SLACK_BOT=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/slack-bot-token" --with-decryption --query Parameter.Value --output text --region $AWS_REGION)
-            SLACK_APP=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/slack-app-token" --with-decryption --query Parameter.Value --output text --region $AWS_REGION)
+            # Read tokens from pre-stored SSM parameters
+            SLACK_BOT=$(aws ssm get-parameter --name "${SlackBotTokenSSMPath}" --with-decryption --query Parameter.Value --output text --region $AWS_REGION)
+            SLACK_APP=$(aws ssm get-parameter --name "${SlackAppTokenSSMPath}" --with-decryption --query Parameter.Value --output text --region $AWS_REGION)
 
             # Update OpenClaw config with Slack tokens
             sudo -u ubuntu python3 << SLACKPY
