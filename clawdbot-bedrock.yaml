@@ -22,6 +22,15 @@ Metadata:
           - GitHubAppPrivateKey
           - GitHubRepoUrl
       - Label:
+          default: "Slack Integration (Optional)"
+        Parameters:
+          - SlackBotToken
+          - SlackAppToken
+      - Label:
+          default: "Claude Code Integration (Optional)"
+        Parameters:
+          - EnableClaudeCode
+      - Label:
           default: "Network Configuration"
         Parameters:
           - CreateVPCEndpoints
@@ -114,6 +123,26 @@ Parameters:
     Default: ""
     Description: "GitHub repo HTTPS URL to clone (e.g. https://github.com/org/repo.git)"
 
+  SlackBotToken:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: "Slack bot token (xoxb-...) stored in SSM SecureString, never on disk"
+
+  SlackAppToken:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: "Slack app token (xapp-...) for Socket Mode, stored in SSM SecureString"
+
+  EnableClaudeCode:
+    Type: String
+    Default: "false"
+    Description: "Install Claude Code and ACPX for coding agent delegation (requires manual 'claude' auth after deploy)"
+    AllowedValues:
+      - "true"
+      - "false"
+
 Conditions:
   CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, "none"]]
@@ -151,6 +180,8 @@ Conditions:
       - Condition: IsSaEast1
   CreateMantleEndpoint: !And [ Condition: CreateEndpoints, Condition: IsMantleSupportedRegion ]     
   ConfigureGitHub: !Not [!Equals [!Ref GitHubAppId, ""]]
+  ConfigureSlack: !Not [!Equals [!Ref SlackBotToken, ""]]
+  ConfigureClaudeCode: !Equals [!Ref EnableClaudeCode, "true"]
   EnableDocker: !Equals [!Ref EnableSandbox, "true"]
   ProtectData: !Equals [!Ref EnableDataProtection, "true"]
   DeleteData: !Not [!Equals [!Ref EnableDataProtection, "true"]]
@@ -365,6 +396,15 @@ Resources:
                   - 'ssm:PutParameter'
                   - 'ssm:GetParameter'
                 Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*'
+        - PolicyName: BedrockMarketplacePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'aws-marketplace:ViewSubscriptions'
+                  - 'aws-marketplace:Subscribe'
+                Resource: '*'
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance-role"
@@ -933,6 +973,144 @@ Resources:
             fi
 
             echo "GitHub App credentials configured (key stored in SSM, tokens generated on demand)"
+          fi
+
+          # Configure Slack tokens (if provided)
+          if [ "${SlackBotToken}" != "" ]; then
+            echo "[8.9/9] Configuring Slack credentials..."
+            STACK_NAME="${AWS::StackName}"
+
+            # Store Slack tokens in SSM (never on disk in plaintext)
+            aws ssm put-parameter \
+              --name "/openclaw/$STACK_NAME/slack-bot-token" \
+              --value "${SlackBotToken}" \
+              --type "SecureString" \
+              --region $AWS_REGION \
+              --overwrite || echo "Failed to save Slack bot token to SSM"
+
+            aws ssm put-parameter \
+              --name "/openclaw/$STACK_NAME/slack-app-token" \
+              --value "${SlackAppToken}" \
+              --type "SecureString" \
+              --region $AWS_REGION \
+              --overwrite || echo "Failed to save Slack app token to SSM"
+
+            # Retrieve tokens from SSM and inject into OpenClaw config
+            SLACK_BOT=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/slack-bot-token" --with-decryption --query Parameter.Value --output text --region $AWS_REGION)
+            SLACK_APP=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/slack-app-token" --with-decryption --query Parameter.Value --output text --region $AWS_REGION)
+
+            # Update OpenClaw config with Slack tokens
+            sudo -u ubuntu python3 << SLACKPY
+          import json
+          with open("/home/ubuntu/.openclaw/openclaw.json") as f:
+              c = json.load(f)
+          c.setdefault("channels", {})
+          c["channels"]["slack"] = {
+              "mode": "socket",
+              "enabled": True,
+              "botToken": "$SLACK_BOT",
+              "appToken": "$SLACK_APP",
+              "groupPolicy": "allowlist",
+              "dmPolicy": "open",
+              "allowFrom": ["*"],
+              "streaming": "partial",
+              "nativeStreaming": True
+          }
+          with open("/home/ubuntu/.openclaw/openclaw.json", "w") as f:
+              json.dump(c, f, indent=2)
+          print("Slack configured")
+          SLACKPY
+
+            unset SLACK_BOT SLACK_APP
+            echo "Slack credentials configured (tokens stored in SSM)"
+          fi
+
+          # Configure Claude Code + ACPX (if enabled)
+          if [ "${EnableClaudeCode}" = "true" ]; then
+            echo "[8.95/9] Configuring Claude Code + ACPX..."
+
+            # Install Claude Code
+            sudo -u ubuntu bash << 'CCINSTALL'
+          export HOME=/home/ubuntu
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+          npm install -g @anthropic-ai/claude-code@latest --timeout=300000 || echo "Claude Code install failed"
+          CCINSTALL
+
+            # Upgrade ACPX in the plugin extensions dir
+            OPENCLAW_MJS=$(find /home/ubuntu/.nvm -path "*/node_modules/openclaw/openclaw.mjs" 2>/dev/null | head -1)
+            OPENCLAW_DIR=$(dirname "$OPENCLAW_MJS" 2>/dev/null)
+            if [ -n "$OPENCLAW_DIR" ] && [ -d "$OPENCLAW_DIR/extensions/acpx" ]; then
+              sudo -u ubuntu bash << ACPXINSTALL
+          export HOME=/home/ubuntu
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+          cd "$OPENCLAW_DIR/extensions/acpx"
+          npm install acpx@latest --omit=dev 2>&1 || echo "ACPX upgrade failed"
+          echo "ACPX version: \$(node_modules/.bin/acpx --version 2>&1)"
+          ACPXINSTALL
+            fi
+
+            # Install acpx globally as well
+            sudo -u ubuntu bash << 'ACPXGLOBAL'
+          export HOME=/home/ubuntu
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+          npm install -g acpx@latest 2>&1 || echo "Global acpx install failed"
+          ACPXGLOBAL
+
+            # Create ACPX config
+            sudo -u ubuntu mkdir -p /home/ubuntu/.acpx
+            sudo -u ubuntu tee /home/ubuntu/.acpx/config.json > /dev/null << 'ACPXCFG'
+          {"defaultAgent":"claude","defaultPermissions":"approve-all","nonInteractivePermissions":"deny","authPolicy":"skip","ttl":300}
+          ACPXCFG
+            chmod 600 /home/ubuntu/.acpx/config.json
+
+            # Create Claude Code settings with workspace trust
+            sudo -u ubuntu mkdir -p /home/ubuntu/.claude
+            sudo -u ubuntu tee /home/ubuntu/.claude/settings.json > /dev/null << 'CCSETTINGS'
+          {"trustedDirectories":["/home/ubuntu/repo"]}
+          CCSETTINGS
+
+            # Update OpenClaw config with ACPX plugin
+            sudo -u ubuntu python3 << 'ACPXPY'
+          import json
+          with open("/home/ubuntu/.openclaw/openclaw.json") as f:
+              c = json.load(f)
+          c.setdefault("plugins", {})
+          c["plugins"]["allow"] = ["acpx", "telegram", "whatsapp", "discord", "googlechat", "slack", "imessage"]
+          c["plugins"].setdefault("entries", {})
+          c["plugins"]["entries"]["acpx"] = {
+              "enabled": True,
+              "config": {
+                  "permissionMode": "approve-all",
+                  "nonInteractivePermissions": "deny"
+              }
+          }
+          with open("/home/ubuntu/.openclaw/openclaw.json", "w") as f:
+              json.dump(c, f, indent=2)
+          print("ACPX plugin configured")
+          ACPXPY
+
+            echo "Claude Code + ACPX configured (run 'claude' interactively once to authenticate)"
+          fi
+
+          # Harden environment
+          echo "[8.99/9] Hardening file permissions..."
+          chmod 600 /home/ubuntu/.openclaw/openclaw.json 2>/dev/null || true
+          chmod 600 /home/ubuntu/.gitconfig 2>/dev/null || true
+          chmod 700 /home/ubuntu/.openclaw 2>/dev/null || true
+          chmod 700 /home/ubuntu/.claude 2>/dev/null || true
+          chmod 700 /home/ubuntu/.acpx 2>/dev/null || true
+
+          # Add systemd env vars to bashrc for SSM sessions
+          if ! grep -q XDG_RUNTIME_DIR /home/ubuntu/.bashrc 2>/dev/null; then
+            cat >> /home/ubuntu/.bashrc << 'BASHRCEOF'
+
+          # Systemd user session env vars
+          export XDG_RUNTIME_DIR=/run/user/1000
+          export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+          BASHRCEOF
           fi
 
           # Complete
