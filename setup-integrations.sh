@@ -206,6 +206,18 @@ ACPXPY
   echo "[integrations] Claude Code + ACPX configured (run 'claude' interactively to authenticate)"
 fi
 
+# ── GitHub CLI ──────────────────────────────────────────────────────────
+echo "[integrations] Installing GitHub CLI..."
+(type -p wget >/dev/null || apt-get install -y wget) \
+  && mkdir -p -m 755 /etc/apt/keyrings \
+  && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+  && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli-stable.list > /dev/null \
+  && apt-get update \
+  && apt-get install -y gh \
+  && echo "GitHub CLI installed: $(gh --version | head -1)" \
+  || echo "GitHub CLI install failed"
+
 # ── Harden permissions ──────────────────────────────────────────────────
 echo "[integrations] Hardening file permissions..."
 chmod 600 /home/ubuntu/.openclaw/openclaw.json 2>/dev/null || true
