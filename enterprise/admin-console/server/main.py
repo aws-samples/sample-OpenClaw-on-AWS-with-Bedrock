@@ -1206,29 +1206,17 @@ def get_playground_profiles():
 
 def _admin_assistant_direct(message: str) -> dict:
     """
-    PATH B: IT Admin Assistant — runs directly on EC2's OpenClaw CLI.
+    PATH B: IT Admin Assistant — runs OpenClaw CLI on EC2.
 
-    This is completely separate from PATH A (employee agents via AgentCore).
+    The H2 Proxy (bedrock_proxy_h2.js) detects admin sessions and proxies
+    the Bedrock request directly to real Bedrock (bypassing Tenant Router).
+    This means OpenClaw on EC2 keeps all its tools (shell, file, browser)
+    and reads the local SOUL.md for identity.
 
-    PATH A (employees): IM → Gateway → H2 Proxy → Tenant Router → AgentCore microVM → Bedrock
-    PATH B (admin):     Admin Console → FastAPI → subprocess(openclaw CLI) → Bedrock (direct)
-
-    Key differences from PATH A:
-    - Runs as subprocess on EC2, NOT in AgentCore Firecracker microVM
-    - Uses separate HOME dir (/home/ubuntu/.openclaw-admin-home/) to avoid
-      interfering with the Gateway's OpenClaw config
-    - The admin HOME's openclaw.json has baseUrl pointing to real Bedrock
-      (https://bedrock-runtime.us-east-1.amazonaws.com), NOT the H2 Proxy
-      (localhost:8091). This prevents the request from being intercepted
-      and routed to AgentCore.
-    - Identity is injected via message prefix because OpenClaw's bootstrap
-      mechanism overwrites SOUL.md files on session initialization.
-    - Has real access to EC2 filesystem, services, logs (read-only by policy)
-
-    JSON output handling:
-    - OpenClaw EC2 CLI outputs nested format: {"result": {"payloads": [{"text": "..."}]}}
-    - OpenClaw in microVM outputs flat format: {"payloads": [{"text": "..."}]}
-    - When Gateway WebSocket fails, OpenClaw writes JSON to stderr instead of stdout
+    Flow: FastAPI → subprocess(openclaw CLI) → OpenClaw reads SOUL.md →
+          OpenClaw calls Bedrock via H2 Proxy → H2 Proxy detects admin →
+          H2 Proxy forwards to real Bedrock (not Tenant Router) →
+          Response back to OpenClaw → back to FastAPI → Admin Console
     """
     import subprocess as _sp
     profile = {"role": "it_admin",
@@ -1240,34 +1228,18 @@ def _admin_assistant_direct(message: str) -> dict:
     env_path = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin:/usr/local/bin:/usr/bin:/bin"
 
     try:
-        # Hourly session ID — forces OpenClaw to re-read workspace on each new hour
         import time as _admin_t
-        session_id = f"admin-{int(_admin_t.time()) // 3600}"
+        session_id = f"admin-assistant"  # Stable session for conversation continuity
 
-        # Separate HOME dir: OpenClaw reads $HOME/.openclaw/openclaw.json
-        # Admin HOME has baseUrl → real Bedrock (bypasses H2 Proxy)
-        admin_home = "/home/ubuntu/.openclaw-admin-home"
-
-        # Inject IT Admin identity via message prefix.
-        # We can't use SOUL.md because OpenClaw's bootstrap overwrites it
-        # with its default template on session initialization.
-        admin_prefix = (
-            "[SYSTEM INSTRUCTION: You are the IT Admin Assistant for OpenClaw Enterprise. "
-            "You run on EC2 instance i-0aa07bd9a04fa2255. You have read-only access to the system. "
-            "You can check service status, read logs, query DynamoDB/S3, but NEVER restart services, "
-            "delete files, or modify system configs. Respond in the user's language.]\n\n"
-        )
-        prefixed_message = admin_prefix + message
-
-        cmd = ["sudo", "-u", "ubuntu", "env", f"PATH={env_path}", f"HOME={admin_home}",
+        cmd = ["sudo", "-u", "ubuntu", "env", f"PATH={env_path}", "HOME=/home/ubuntu",
                openclaw_bin, "agent", "--session-id", session_id,
-               "--message", prefixed_message, "--json", "--timeout", "120"]
+               "--message", message, "--json", "--timeout", "120"]
         result = _sp.run(cmd, capture_output=True, text=True, timeout=130)
 
         stdout = result.stdout.strip()
         stderr = result.stderr.strip()
 
-        # OpenClaw may write JSON to stderr when Gateway WebSocket fails (fallback mode)
+        # OpenClaw may write JSON to stderr in Gateway fallback mode
         raw = stdout if (stdout and '{' in stdout) else stderr if (stderr and '{' in stderr) else ""
 
         if raw and '{' in raw:
@@ -1275,8 +1247,6 @@ def _admin_assistant_direct(message: str) -> dict:
             try:
                 decoder = json.JSONDecoder()
                 data, _ = decoder.raw_decode(raw, json_start)
-                # EC2 CLI: {"runId":..., "result": {"payloads": [{"text": "..."}]}}
-                # microVM: {"payloads": [{"text": "..."}]}
                 result_obj = data.get("result", data)
                 payloads = result_obj.get("payloads", [])
                 text = " ".join(p.get("text", "") for p in payloads if p.get("text")).strip()
@@ -1284,7 +1254,7 @@ def _admin_assistant_direct(message: str) -> dict:
                     text = data.get("text", result_obj.get("text", ""))
                 if text:
                     return {"response": text, "tenant_id": "admin", "profile": profile,
-                            "plan_a": profile["planA"], "plan_e": "✅ Direct EC2", "source": "ec2-direct"}
+                            "plan_a": profile["planA"], "plan_e": "✅ EC2 via H2 bypass", "source": "ec2-direct"}
             except (json.JSONDecodeError, ValueError):
                 pass
 

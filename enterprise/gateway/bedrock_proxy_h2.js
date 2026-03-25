@@ -492,6 +492,67 @@ server.on('stream', (stream, headers) => {
       log(`DEBUG-MSG: ${userText.slice(0,300)}`);
       log(`Request: ${path} channel=${channel} user=${userId} msg=${userText.slice(0, 60)}`);
 
+      // =====================================================================
+      // PATH B: Admin Assistant bypass — proxy directly to real Bedrock
+      // Admin sessions should NOT go through Tenant Router → AgentCore.
+      // Instead, forward the original Bedrock request to the real endpoint.
+      // This preserves OpenClaw's full system prompt (SOUL.md) and tool defs.
+      // =====================================================================
+      const sessionId = parsed.system?.map(s => typeof s === 'string' ? s : s.text || '').join(' ') || '';
+      const isAdmin = sessionId.includes('admin-assistant') || sessionId.includes('IT Admin Assistant') || (userId === 'admin');
+
+      if (isAdmin) {
+        log(`PATH B: Admin bypass — proxying to real Bedrock (skip Tenant Router)`);
+        try {
+          const client = await initBedrockClient();
+          if (client) {
+            // Extract model ID from the URL path
+            const modelMatch = path.match(/model\/([^/]+)/);
+            const modelId = modelMatch ? decodeURIComponent(modelMatch[1]) : BEDROCK_MODEL_ID;
+
+            const cmd = new client._ConverseCommand({
+              modelId,
+              messages: parsed.messages || [],
+              system: parsed.system || [],
+              inferenceConfig: parsed.inferenceConfig || { maxTokens: 4096 },
+              toolConfig: parsed.toolConfig || undefined,
+            });
+            const resp = await client.send(cmd);
+            const content = resp.output?.message?.content || [];
+
+            if (isStream) {
+              // Build event stream from response
+              const texts = content.filter(c => c.text).map(c => c.text);
+              const toolUses = content.filter(c => c.toolUse);
+              // For streaming, send text + tool use blocks
+              const fullResp = JSON.stringify({
+                output: resp.output,
+                stopReason: resp.stopReason,
+                usage: resp.usage,
+              });
+              stream.respond({ ':status': 200, 'content-type': 'application/vnd.amazon.eventstream' });
+              for (const e of buildEventStream(texts.join('\n') || JSON.stringify(content))) stream.write(e);
+              stream.end();
+            } else {
+              stream.respond({ ':status': 200, 'content-type': 'application/json' });
+              stream.end(JSON.stringify({
+                output: resp.output,
+                stopReason: resp.stopReason,
+                usage: resp.usage,
+                metrics: { latencyMs: 0 },
+              }));
+            }
+            return;
+          }
+        } catch (adminErr) {
+          log(`Admin bypass error: ${adminErr.message}, falling through to normal routing`);
+        }
+      }
+
+      // =====================================================================
+      // PATH A: Employee agents — route through Tenant Router → AgentCore
+      // =====================================================================
+
       if (!userText) {
         const noMsg = "I didn't receive a message.";
         if (isStream) {
