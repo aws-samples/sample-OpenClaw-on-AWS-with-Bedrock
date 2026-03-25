@@ -325,11 +325,11 @@ export function StatusDot({ status }: { status: 'active' | 'idle' | 'error' | 'a
   const colorMap: Record<string, string> = {
     active: 'bg-success', idle: 'bg-text-muted', error: 'bg-danger', archived: 'bg-text-muted',
     inactive: 'bg-text-muted', pending: 'bg-info', disconnected: 'bg-warning', expired: 'bg-danger',
-    bound: 'bg-success', revoked: 'bg-danger',
+    bound: 'bg-success', revoked: 'bg-danger', completed: 'bg-text-muted',
   };
   const labelMap: Record<string, string> = {
     active: 'Active', idle: 'Idle', bound: 'Bound', pending: 'Pending', expired: 'Expired',
-    disconnected: 'Disconnected', error: 'Error', revoked: 'Revoked',
+    disconnected: 'Disconnected', error: 'Error', revoked: 'Revoked', completed: 'Completed',
   };
   return (
     <span className="inline-flex items-center gap-1.5">

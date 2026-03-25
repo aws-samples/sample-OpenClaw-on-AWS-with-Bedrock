@@ -1599,94 +1599,102 @@ def _query_cloudwatch_sessions(region: str, minutes: int = 30) -> list:
 
 @app.get("/api/v1/monitor/sessions")
 def get_sessions(source: str = "auto", authorization: str = Header(default="")):
-    """Return active sessions — merge DynamoDB seed data + real CloudWatch sessions.
-    Enrich CloudWatch sessions with employee/agent names from DynamoDB."""
+    """Return sessions — seed data as 'completed', real sessions with dynamic status."""
     user = _get_current_user(authorization)
+    import time as _t
 
-    # Always start with DynamoDB seed sessions (have proper names, conversations)
-    db_sessions = db.get_sessions()
-
-    # Enrich DynamoDB sessions that have raw tenant IDs (from real AgentCore usage tracking)
     employees = db.get_employees()
     agents_list = db.get_agents()
     emp_map = {e["id"]: e for e in employees}
     agent_by_emp = {a.get("employeeId", ""): a for a in agents_list if a.get("employeeId")}
+    now_ms = _t.time() * 1000
 
-    enriched_db = []
+    # 1. Seed sessions from DynamoDB (have conversations, proper names)
+    db_sessions = db.get_sessions()
+    enriched = []
     for s in db_sessions:
         eid = s.get("employeeId", "")
-        # Skip sessions with no useful data
         if not eid or eid == "unknown":
             continue
-        # If already has a proper name, keep it
-        if s.get("employeeName") and s["employeeName"] != eid and len(s.get("agentName", "")) > 3:
-            enriched_db.append(s)
-            continue
-        # Try to resolve raw ID to employee
-        emp = emp_map.get(eid)
-        if emp:
-            agent = agent_by_emp.get(emp["id"])
-            s["employeeName"] = emp["name"]
-            s["agentId"] = agent["id"] if agent else s.get("agentId", "")
-            s["agentName"] = agent["name"] if agent else f"Agent ({emp.get('positionName', '')})"
-            if not s.get("channel") or s["channel"] == "unknown":
-                s["channel"] = emp.get("channels", ["portal"])[0]
-            if not s.get("startedAt"):
-                s["startedAt"] = s.get("lastActive", "")
-            enriched_db.append(s)
-        # else: skip unresolvable sessions (noise from raw CloudWatch data)
 
-    # Merge CloudWatch real sessions (from actual AgentCore invocations)
+        # Resolve names if needed
+        if not s.get("employeeName") or s["employeeName"] == eid:
+            emp = emp_map.get(eid)
+            if emp:
+                agent = agent_by_emp.get(emp["id"])
+                s["employeeName"] = emp["name"]
+                s["agentId"] = agent["id"] if agent else s.get("agentId", "")
+                s["agentName"] = agent["name"] if agent else ""
+                if not s.get("channel") or s["channel"] == "unknown":
+                    s["channel"] = emp.get("channels", ["portal"])[0]
+            else:
+                continue
+
+        # Determine status based on lastActive timestamp
+        last_active = s.get("lastActive", s.get("startedAt", ""))
+        if last_active:
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+                la_time = _dt.fromisoformat(last_active.replace("Z", "+00:00")).timestamp() * 1000
+                age_min = (now_ms - la_time) / 60000
+                if age_min < 15:
+                    s["status"] = "active"
+                elif age_min < 60:
+                    s["status"] = "idle"
+                else:
+                    s["status"] = "completed"
+            except Exception:
+                s["status"] = "completed"
+        else:
+            s["status"] = "completed"
+
+        if not s.get("startedAt"):
+            s["startedAt"] = last_active or ""
+        enriched.append(s)
+
+    # 2. CloudWatch real sessions (last 2 hours)
     cw_sessions = _query_cloudwatch_sessions("us-east-1", minutes=120)
     if cw_sessions:
-        employees = db.get_employees()
-        agents = db.get_agents()
-        emp_map = {e["id"]: e for e in employees}
-        agent_map = {a.get("employeeId", ""): a for a in agents if a.get("employeeId")}
-
-        db_session_ids = {s.get("id") for s in enriched_db}
-
+        existing_emps = {s.get("employeeId") for s in enriched}
         for cw in cw_sessions:
-            # Resolve employee from tenant_id parts
             raw_id = cw.get("employeeId", "")
             emp = emp_map.get(raw_id)
             if not emp:
-                # Try SSM user-mapping lookup (Discord user ID → emp-xxx)
                 for e in employees:
                     if raw_id in (e.get("employeeNo", ""), e.get("id", "")):
                         emp = e
                         break
-
-            if emp:
-                agent = agent_map.get(emp["id"])
-                cw["employeeId"] = emp["id"]
-                cw["employeeName"] = emp["name"]
-                cw["agentId"] = agent["id"] if agent else ""
-                cw["agentName"] = agent["name"] if agent else f"Agent ({emp['positionName']})"
-                cw["channel"] = emp.get("channels", ["unknown"])[0] if not cw.get("channel") or cw["channel"] == "unknown" else cw["channel"]
-            else:
-                # Skip sessions we can't resolve — they're noise
+            if not emp:
                 continue
 
-            # Add startedAt from timestamp if missing
+            agent = agent_by_emp.get(emp["id"])
+            cw["employeeId"] = emp["id"]
+            cw["employeeName"] = emp["name"]
+            cw["agentId"] = agent["id"] if agent else ""
+            cw["agentName"] = agent["name"] if agent else f"Agent ({emp['positionName']})"
+            cw["channel"] = emp.get("channels", ["discord"])[0] if not cw.get("channel") or cw["channel"] == "unknown" else cw["channel"]
+            cw["status"] = "active"
+
             if cw.get("timestamp") and not cw.get("startedAt"):
-                from datetime import datetime as _dt, timezone as _tz
-                cw["startedAt"] = _dt.fromtimestamp(cw["timestamp"] / 1000, tz=_tz.utc).isoformat()
+                from datetime import datetime as _dt2, timezone as _tz2
+                cw["startedAt"] = _dt2.fromtimestamp(cw["timestamp"] / 1000, tz=_tz2.utc).isoformat()
 
-            # Only add if not already in DB sessions
-            if cw.get("id") not in db_session_ids:
-                enriched_db.append(cw)
+            # Replace existing session for same employee (real data > seed data)
+            if emp["id"] in existing_emps:
+                enriched = [s for s in enriched if s.get("employeeId") != emp["id"]]
+            enriched.append(cw)
 
-    sessions = enriched_db
+    # Sort: active first, then by turns descending
+    status_order = {"active": 0, "idle": 1, "completed": 2}
+    enriched.sort(key=lambda s: (status_order.get(s.get("status", "completed"), 3), -(s.get("turns", 0))))
 
     # Scope for managers
     if user and user.role == "manager":
         scope = _get_dept_scope(user)
         if scope is not None:
-            employees_list = db.get_employees()
-            emp_ids = {e["id"] for e in employees_list if e.get("departmentId") in scope}
-            sessions = [s for s in sessions if s.get("employeeId") in emp_ids]
-    return sessions
+            emp_ids = {e["id"] for e in employees if e.get("departmentId") in scope}
+            enriched = [s for s in enriched if s.get("employeeId") in emp_ids]
+    return enriched
 
 
 @app.get("/api/v1/monitor/sessions/{session_id}")
