@@ -302,7 +302,7 @@ For employees who don't use IM tools, the Web Portal provides the same experienc
 | SSM Plugin | Latest | [Install guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) — required for EC2 access without SSH |
 
 **AWS requirements:**
-- Bedrock model access enabled for your account — go to [AWS Console → Bedrock → Model Access](https://console.aws.amazon.com/bedrock/home#/modelaccess) and enable **Amazon Nova 2 Lite** (default model). Enable others if you plan to use them.
+- Bedrock model access for **third-party models** — Amazon Nova models (Nova Lite, Nova Pro) are available by default with no approval needed. If you plan to use Claude models (required for the IT Admin Assistant) or other third-party models, go to [AWS Console → Bedrock → Model Access](https://console.aws.amazon.com/bedrock/home#/modelaccess) and enable **Anthropic Claude Haiku** at minimum.
 - Bedrock AgentCore available in `us-east-1` and `us-west-2`.
 - IAM permissions: `cloudformation:*`, `ec2:*`, `iam:*`, `ecr:*`, `s3:*`, `ssm:*`, `bedrock:*`, `dynamodb:*`
 
