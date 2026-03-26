@@ -56,7 +56,7 @@ Parameters:
       - "c5.xlarge"
 
   KeyPairName:
-    Type: String
+    Type: AWS::EC2::KeyPair::KeyName
     Default: "none"
     Description: "EC2 key pair for emergency SSH access (optional - set to 'none' to skip)"
 

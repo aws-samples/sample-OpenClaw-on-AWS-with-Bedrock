@@ -61,7 +61,7 @@ Parameters:
     Description: "macOS AMI ID - 'auto' uses region-specific AMI from Mappings, or specify custom AMI ID"
 
   KeyPairName:
-    Type: String
+    Type: AWS::EC2::KeyPair::KeyName
     Default: "none"
     Description: "EC2 key pair for emergency SSH access (optional - set to 'none' to skip)"
 
