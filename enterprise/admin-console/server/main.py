@@ -1864,10 +1864,12 @@ def portal_channels(authorization: str = Header(default="")):
 
 
 def _list_user_mappings_for_employee(emp_id: str, channel_prefix: str) -> bool:
-    """Check if any SSM mapping exists for this employee on the given channel."""
+    """Check if any SSM mapping exists for this employee on the given channel.
+    Always uses us-east-1 (where agent container reads mappings from)."""
     try:
+        import boto3 as _b3_chk
         prefix = _mapping_prefix()
-        ssm = _ssm_client()
+        ssm = _b3_chk.client("ssm", region_name="us-east-1")
         resp = ssm.get_parameters_by_path(Path=prefix, Recursive=True, MaxResults=50)
         for p in resp.get("Parameters", []):
             if p.get("Value") == emp_id and channel_prefix in p.get("Name", ""):

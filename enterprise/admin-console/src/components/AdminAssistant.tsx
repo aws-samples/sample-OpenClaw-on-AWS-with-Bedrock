@@ -12,7 +12,7 @@
  * Has real access to EC2 filesystem, services, and logs (read-only).
  */
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { MessageSquare, X, Send, Bot, User, Minimize2, Trash2 } from 'lucide-react';
+import { Terminal, X, Send, Bot, User, Minimize2, Trash2, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useAuth } from '../contexts/AuthContext';
 import { api } from '../api/client';
@@ -103,13 +103,17 @@ export default function AdminAssistant() {
           'fixed bottom-6 right-6 z-[90] flex items-center justify-center rounded-full shadow-lg',
           'transition-all duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)]',
           open
-            ? 'h-12 w-12 bg-surface-container-highest text-text-muted hover:bg-dark-hover rotate-0'
-            : 'h-14 w-14 bg-primary text-white hover:bg-primary/90 hover:scale-110'
+            ? 'h-12 w-12 bg-surface-container-highest text-text-muted hover:bg-dark-hover'
+            : 'h-14 w-14 bg-gradient-to-br from-primary to-indigo-600 text-white shadow-lg shadow-primary/30 hover:scale-110'
         )}
       >
-        <span className={clsx('transition-all duration-300', open ? 'rotate-0 scale-100' : 'rotate-0 scale-100')}>
-          {open ? <X size={20} /> : <MessageSquare size={24} />}
-        </span>
+        {open
+          ? <X size={20} />
+          : <div className="relative flex items-center justify-center">
+              <Terminal size={22} />
+              <Sparkles size={10} className="absolute -top-1 -right-1 text-yellow-300" />
+            </div>
+        }
         {!open && messages.length > 1 && (
           <span className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-danger text-[10px] text-white font-medium animate-scale-enter">
             {messages.filter(m => m.role === 'assistant').length}

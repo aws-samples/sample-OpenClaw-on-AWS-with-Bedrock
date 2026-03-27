@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { Link2, Plus, Users, User, GitBranch, Smartphone, Trash2 } from 'lucide-react';
+import { IM_ICONS } from '../components/IMIcons';
 import { Card, StatCard, Badge, Button, PageHeader, Table, Modal, Select, Tabs, StatusDot } from '../components/ui';
 import { useBindings, useEmployees, useAgents, usePositions, useCreateBinding, useBulkProvision, useRoutingRules, useUserMappings, useCreateUserMapping, useDeleteUserMapping, useApprovePairing } from '../hooks/useApi';
 import { CHANNEL_LABELS } from '../types';
@@ -16,9 +17,9 @@ function RevokeTable({ mappings, employees, onRevoke, isPending }: {
 
   const key = useCallback((r: any) => `${r.channel}__${r.channelUserId}`, []);
 
-  const channelIcon: Record<string, string> = {
-    telegram: '✈️', discord: '🎮', slack: '💬',
-    whatsapp: '📱', wechat: '🟢', feishu: '🪶',
+  const ChannelIcon = ({ channel }: { channel: string }) => {
+    const Icon = IM_ICONS[channel];
+    return Icon ? <Icon size={22} /> : <Smartphone size={22} className="text-text-muted" />;
   };
 
   return (
@@ -29,7 +30,7 @@ function RevokeTable({ mappings, employees, onRevoke, isPending }: {
         const isConfirming = confirming === rKey;
         return (
           <div key={rKey} className="flex items-center gap-3 rounded-lg bg-dark-bg border border-dark-border/40 px-4 py-2.5">
-            <span className="text-lg">{channelIcon[r.channel] || '💬'}</span>
+            <ChannelIcon channel={r.channel} />
             <Badge color="info" >{r.channel}</Badge>
             <code className="text-xs text-text-secondary bg-dark-hover px-2 py-0.5 rounded flex-shrink-0">
               {r.channelUserId}

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { CheckCircle, Loader2, RefreshCw, Link2, ExternalLink, Clock, AlertCircle } from 'lucide-react';
 import { Card, Badge, Button } from '../../components/ui';
 import { api } from '../../api/client';
+import { IM_ICONS } from '../../components/IMIcons';
 
 interface Channel {
   id: string;
@@ -13,14 +14,14 @@ interface Channel {
 }
 
 const CHANNELS: Channel[] = [
-  { id: 'telegram', label: 'Telegram', icon: '✈️', description: 'Scan QR or click the link to open @acme_enterprise_bot', available: true },
-  { id: 'discord', label: 'Discord', icon: '🎮', description: 'Connect to ACME Agent in your company Discord server', available: true },
-  { id: 'slack', label: 'Slack', icon: '💬', description: 'Connect to ACME Agent in your Slack workspace', available: false, note: 'coming-soon' },
-  { id: 'feishu', label: 'Feishu / Lark', icon: '🪶', description: 'Connect to the enterprise Feishu bot', available: false, note: 'coming-soon' },
-  { id: 'teams', label: 'Microsoft Teams', icon: '🟦', description: 'Connect to ACME Agent in Microsoft Teams', available: false, note: 'coming-soon' },
-  { id: 'googlechat', label: 'Google Chat', icon: '💬', description: 'Connect to ACME Agent in Google Chat', available: false, note: 'coming-soon' },
-  { id: 'whatsapp', label: 'WhatsApp', icon: '📱', description: 'Personal messaging — not recommended for enterprise use', available: false, note: 'not-enterprise' },
-  { id: 'wechat', label: 'WeChat', icon: '🟢', description: 'Personal messaging — not recommended for enterprise use', available: false, note: 'not-enterprise' },
+  { id: 'telegram', label: 'Telegram', icon: '', description: 'Scan QR or click the link to open @acme_enterprise_bot', available: true },
+  { id: 'discord', label: 'Discord', icon: '', description: 'Connect to ACME Agent in your company Discord server', available: true },
+  { id: 'slack', label: 'Slack', icon: '', description: 'Connect to ACME Agent in your Slack workspace', available: false, note: 'coming-soon' },
+  { id: 'teams', label: 'Microsoft Teams', icon: '', description: 'Connect to ACME Agent in Microsoft Teams', available: false, note: 'coming-soon' },
+  { id: 'feishu', label: 'Feishu / Lark', icon: '', description: 'Connect to the enterprise Feishu bot', available: false, note: 'coming-soon' },
+  { id: 'googlechat', label: 'Google Chat', icon: '', description: 'Connect to ACME Agent in Google Chat', available: false, note: 'coming-soon' },
+  { id: 'whatsapp', label: 'WhatsApp', icon: '', description: 'Personal messaging — not recommended for enterprise use', available: false, note: 'not-enterprise' },
+  { id: 'wechat', label: 'WeChat', icon: '', description: 'Personal messaging — not recommended for enterprise use', available: false, note: 'not-enterprise' },
 ];
 
 type StepState = 'idle' | 'loading' | 'waiting' | 'done' | 'error' | 'expired';
@@ -87,7 +88,7 @@ function ChannelWizard({ channel, onDone, onCancel }: { channel: Channel; onDone
   if (state === 'idle') return (
     <div className="space-y-4">
       <div className="rounded-xl bg-surface-dim p-4 text-center">
-        <p className="text-4xl mb-2">{channel.icon}</p>
+        <div className="flex justify-center mb-2">{IM_ICONS[channel.id] ? (() => { const Icon = IM_ICONS[channel.id]; return <Icon size={48} />; })() : null}</div>
         <h3 className="text-base font-semibold text-text-primary">{channel.label}</h3>
         <p className="text-sm text-text-muted mt-1">{channel.description}</p>
       </div>
@@ -231,7 +232,7 @@ export default function BindIM() {
                 : 'cursor-pointer hover:border-primary/40'
             }`}>
               <div className="flex items-start gap-3">
-                <span className="text-2xl">{ch.icon}</span>
+                <div className="flex-shrink-0 mt-0.5">{(() => { const Icon = IM_ICONS[ch.id]; return Icon ? <Icon size={28} /> : null; })()}</div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                     <h3 className="text-sm font-semibold text-text-primary">{ch.label}</h3>
