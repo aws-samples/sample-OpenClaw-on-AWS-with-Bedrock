@@ -3856,16 +3856,23 @@ def update_runtime_lifecycle(runtime_id: str, body: dict, authorization: str = H
         import boto3 as _b3r2
         ac = _b3r2.client("bedrock-agentcore-control", region_name="us-east-1")
         detail = ac.get_agent_runtime(agentRuntimeId=runtime_id)
-        ac.update_agent_runtime(
-            agentRuntimeId=runtime_id,
-            agentRuntimeArtifact=detail["agentRuntimeArtifact"],
-            roleArn=detail["roleArn"],
-            networkConfiguration=detail["networkConfiguration"],
-            lifecycleConfiguration={
+        # IMPORTANT: always pass environmentVariables — AgentCore clears them if omitted
+        existing_env = detail.get("environmentVariables") or {}
+        kwargs: dict = {
+            "agentRuntimeId": runtime_id,
+            "agentRuntimeArtifact": detail["agentRuntimeArtifact"],
+            "roleArn": detail["roleArn"],
+            "networkConfiguration": detail["networkConfiguration"],
+            "lifecycleConfiguration": {
                 "idleRuntimeSessionTimeout": body.get("idleTimeoutSec", 900),
                 "maxLifetime": body.get("maxLifetimeSec", 28800),
             },
-        )
+        }
+        if existing_env:
+            kwargs["environmentVariables"] = existing_env
+        if detail.get("protocolConfiguration"):
+            kwargs["protocolConfiguration"] = detail["protocolConfiguration"]
+        ac.update_agent_runtime(**kwargs)
         return {"saved": True}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -3893,8 +3900,9 @@ def update_runtime_config(runtime_id: str, body: dict, authorization: str = Head
             if sg_ids and subnet_ids:
                 network_cfg["networkModeConfig"] = {"securityGroups": sg_ids, "subnets": subnet_ids}
 
-        # Build updated environment variables
-        existing_env = detail.get("environmentVariables", {})
+        # Build updated environment variables — always preserve existing ones
+        # (AgentCore clears environmentVariables if the field is omitted from update)
+        existing_env = detail.get("environmentVariables") or {}
         new_env = dict(existing_env)
         if body.get("modelId"):
             new_env["BEDROCK_MODEL_ID"] = body["modelId"]
