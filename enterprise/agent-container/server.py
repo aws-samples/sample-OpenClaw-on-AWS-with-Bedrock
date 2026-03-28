@@ -784,6 +784,7 @@ def _invoke_openclaw_once(tenant_id: str, message: str, timeout: int = 300) -> d
     if os.geteuid() == 0 and os.path.isdir("/home/ubuntu"):
         path_val = env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
         aws_region = env.get("AWS_REGION", "us-east-1")
+        workspace_val = env.get("OPENCLAW_WORKSPACE", WORKSPACE)
         cmd = [
             "sudo", "-u", "ubuntu",
             "env",
@@ -791,6 +792,8 @@ def _invoke_openclaw_once(tenant_id: str, message: str, timeout: int = 300) -> d
             "HOME=/home/ubuntu",
             f"AWS_REGION={aws_region}",
             f"AWS_DEFAULT_REGION={aws_region}",
+            f"OPENCLAW_WORKSPACE={workspace_val}",
+            "OPENCLAW_SKIP_ONBOARDING=1",
         ] + openclaw_cmd
         run_env = None  # let sudo handle the environment
     else:
