@@ -4682,6 +4682,27 @@ def start_always_on_agent(agent_id: str, authorization: str = Header(default="")
         f"/{stack}-multitenancy-agent:latest"
     )
 
+    # Resolve per-agent bot tokens for Plan A direct IM connection
+    # IT stores these in SSM when provisioning always-on for an employee
+    telegram_token = ""
+    discord_token = ""
+    try:
+        ssm_tok = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        try:
+            telegram_token = ssm_tok.get_parameter(
+                Name=f"/openclaw/{stack}/always-on/{agent_id}/telegram-token",
+                WithDecryption=True)["Parameter"]["Value"]
+        except Exception:
+            pass
+        try:
+            discord_token = ssm_tok.get_parameter(
+                Name=f"/openclaw/{stack}/always-on/{agent_id}/discord-token",
+                WithDecryption=True)["Parameter"]["Value"]
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     # Stop any existing task for this agent first
     try:
         ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
@@ -4714,14 +4735,17 @@ def start_always_on_agent(agent_id: str, authorization: str = Header(default="")
                     "name": "always-on-agent",
                     "image": ecr_image,
                     "environment": [
-                        {"name": "SESSION_ID",       "value": f"shared__{agent_id}"},
-                        {"name": "SHARED_AGENT_ID",  "value": agent_id},
-                        {"name": "S3_BUCKET",        "value": bucket},
-                        {"name": "STACK_NAME",       "value": stack},
-                        {"name": "AWS_REGION",       "value": _GATEWAY_REGION},
-                        {"name": "DYNAMODB_TABLE",   "value": ddb_table},
-                        {"name": "DYNAMODB_REGION",  "value": ddb_region},
-                        {"name": "SYNC_INTERVAL",    "value": "120"},
+                        {"name": "SESSION_ID",         "value": f"shared__{agent_id}"},
+                        {"name": "SHARED_AGENT_ID",    "value": agent_id},
+                        {"name": "S3_BUCKET",          "value": bucket},
+                        {"name": "STACK_NAME",         "value": stack},
+                        {"name": "AWS_REGION",         "value": _GATEWAY_REGION},
+                        {"name": "DYNAMODB_TABLE",     "value": ddb_table},
+                        {"name": "DYNAMODB_REGION",    "value": ddb_region},
+                        {"name": "SYNC_INTERVAL",      "value": "120"},
+                        # Plan A: direct IM — inject bot tokens if provisioned
+                        {"name": "TELEGRAM_BOT_TOKEN", "value": telegram_token},
+                        {"name": "DISCORD_BOT_TOKEN",  "value": discord_token},
                     ],
                 }]
             },
@@ -4811,6 +4835,47 @@ def stop_always_on_agent(agent_id: str, authorization: str = Header(default=""))
         pass
 
     return {"stopped": True, "agentId": agent_id, "taskArn": task_arn}
+
+
+@app.put("/api/v1/admin/always-on/{agent_id}/tokens")
+def set_always_on_tokens(agent_id: str, body: dict, authorization: str = Header(default="")):
+    """Store IM bot tokens for a always-on agent (Plan A: direct IM connection).
+    Tokens are stored as SSM SecureStrings and injected at ECS task startup."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+    saved = {}
+    for channel, key in [("telegram", "telegram-token"), ("discord", "discord-token")]:
+        token = body.get(f"{channel}BotToken", "").strip()
+        if token:
+            ssm.put_parameter(
+                Name=f"/openclaw/{stack}/always-on/{agent_id}/{key}",
+                Value=token, Type="SecureString", Overwrite=True)
+            saved[channel] = True
+        elif body.get(f"clear{channel.capitalize()}Token"):
+            try:
+                ssm.delete_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/{key}")
+            except Exception:
+                pass
+            saved[channel] = False
+    return {"saved": saved, "agentId": agent_id,
+            "note": "Tokens stored. Restart the always-on container to activate direct IM."}
+
+
+@app.get("/api/v1/admin/always-on/{agent_id}/tokens")
+def get_always_on_tokens(agent_id: str, authorization: str = Header(default="")):
+    """Check which IM tokens are configured for an always-on agent (masked)."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+    result = {}
+    for channel, key in [("telegram", "telegram-token"), ("discord", "discord-token")]:
+        try:
+            ssm.get_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/{key}")
+            result[channel] = "configured"  # don't return actual token
+        except Exception:
+            result[channel] = "not_configured"
+    return result
 
 
 @app.get("/api/v1/admin/always-on/{agent_id}/status")

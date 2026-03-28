@@ -84,9 +84,67 @@ sed -e "s|\${AWS_REGION}|${AWS_REGION}|g" \
 echo "[entrypoint] openclaw.json written to $OPENCLAW_CONFIG_DIR/openclaw.json"
 
 # =============================================================================
+# Step 0.55: Synchronous workspace assembly for always-on containers
+# For ECS always-on containers, run workspace_assembler BEFORE starting the
+# Gateway so the Gateway reads a fully assembled SOUL.md from the first session.
+# Only runs if SHARED_AGENT_ID or SESSION_ID is set (i.e., we know the employee).
+# =============================================================================
+if [ "$EFS_MODE" = "true" ] || [ -n "${SHARED_AGENT_ID:-}" ]; then
+    # Quick S3 sync to get latest personal SOUL + workspace files before assembly
+    aws s3 sync "${S3_BASE}/workspace/" "$WORKSPACE/" \
+        --quiet --region "$AWS_REGION" 2>/dev/null || true
+    # Run workspace_assembler synchronously (will get SOUL from S3 + assemble)
+    if [ -f "/app/workspace_assembler.py" ] && [ "$BASE_TENANT_ID" != "unknown" ]; then
+        timeout 25 python3 /app/workspace_assembler.py \
+            --tenant "$TENANT_ID" \
+            --workspace "$WORKSPACE" \
+            --bucket "$S3_BUCKET" \
+            --stack "$STACK_NAME" \
+            --region "$AWS_REGION" 2>&1 | head -5 \
+            && echo "[entrypoint] Pre-Gateway workspace assembly complete" \
+            || echo "[entrypoint] Pre-Gateway assembly timed out (non-fatal, Gateway will use available SOUL)"
+    fi
+fi
+
+# =============================================================================
+# Step 0.6: Inject IM bot tokens into openclaw.json (for always-on direct IM)
+# When TELEGRAM_BOT_TOKEN or DISCORD_BOT_TOKEN env vars are set, inject them
+# into openclaw.json so the Gateway connects directly to IM on startup.
+# This enables Plan A: per-employee dedicated bot with direct IM connection.
+# =============================================================================
+if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] || [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+    python3 -c "
+import json, os, sys
+
+config_path = os.path.expanduser('~/.openclaw/openclaw.json')
+with open(config_path) as f:
+    c = json.load(f)
+
+c.setdefault('channels', {})
+
+tg_token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+if tg_token:
+    c['channels'].setdefault('telegram', {})
+    c['channels']['telegram']['botToken'] = tg_token
+    c['channels']['telegram'].setdefault('accounts', {}).setdefault('default', {})['botToken'] = tg_token
+    print('[entrypoint] Telegram bot token injected')
+
+dc_token = os.environ.get('DISCORD_BOT_TOKEN', '')
+if dc_token:
+    c['channels'].setdefault('discord', {})
+    c['channels']['discord']['token'] = dc_token
+    print('[entrypoint] Discord bot token injected')
+
+with open(config_path, 'w') as f:
+    json.dump(c, f, indent=2)
+" 2>&1 || echo "[entrypoint] Bot token injection failed (non-fatal)"
+fi
+
+# =============================================================================
 # Step 0.6: Start OpenClaw Gateway — native session management + memory
 # Gateway must run BEFORE server.py so OpenClaw agent CLI can connect to it.
 # Without Gateway, OpenClaw falls back to embedded mode (no memory compaction).
+# With bot tokens injected above, Gateway auto-connects to IM channels.
 # =============================================================================
 openclaw gateway --port 18789 > /tmp/openclaw-gateway.log 2>&1 &
 GATEWAY_PID=$!
