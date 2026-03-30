@@ -641,7 +641,18 @@ export interface SecurityRuntime {
   id: string; name: string; status: string;
   containerUri: string; roleArn: string; model: string;
   idleTimeoutSec: number; maxLifetimeSec: number;
+  guardrailId?: string; guardrailVersion?: string;
   createdAt: string; version: string;
+}
+
+export interface Guardrail {
+  id: string; name: string; status: string; version: string; updatedAt: string;
+}
+
+export interface GuardrailEvent {
+  id: string; timestamp: string; actorName: string; actorId: string;
+  guardrailId: string; guardrailVersion: string; guardrailSource: string;
+  guardrailPolicy: string; detail: string; status: string;
 }
 
 export function useSecurityRuntimes() {
@@ -756,8 +767,26 @@ export function useUpdateRuntimeConfig() {
       runtimeId: string; containerUri?: string; roleArn?: string;
       networkMode?: string; securityGroupIds?: string[]; subnetIds?: string[];
       modelId?: string; idleTimeoutSec?: number; maxLifetimeSec?: number;
+      guardrailId?: string; guardrailVersion?: string;
     }) => api.put(`/security/runtimes/${data.runtimeId}/config`, data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['security-runtimes'] }),
+  });
+}
+
+export function useGuardrails() {
+  return useQuery<{ guardrails: Guardrail[]; error?: string }>({
+    queryKey: ['guardrails'],
+    queryFn: () => api.get('/security/guardrails'),
+    staleTime: 60_000,
+  });
+}
+
+export function useGuardrailEvents(limit = 50) {
+  return useQuery<{ events: GuardrailEvent[]; error?: string }>({
+    queryKey: ['guardrail-events', limit],
+    queryFn: () => api.get(`/audit/guardrail-events?limit=${limit}`),
+    staleTime: 15_000,
+    refetchInterval: 30_000,
   });
 }
 

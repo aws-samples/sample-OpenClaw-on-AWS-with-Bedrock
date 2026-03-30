@@ -42,8 +42,9 @@ Every agent invocation runs in an isolated Firecracker microVM — the same hype
 | L2 — Application | Skills manifest `allowedRoles`/`blockedRoles` | ⚠️ Code bug risk |
 | **L3 — IAM** | **Runtime role has no permission on target resource** | **Impossible** |
 | **L4 — Compute** | **Firecracker microVM per invocation, isolated at hypervisor level** | **Impossible** |
+| **L5 — Guardrail** | **Bedrock Guardrail checks every input + output: topic denial, PII filtering, compliance policies** | **Impossible — AWS-managed, semantic AI layer** |
 
-Each runtime tier has its own Docker image, its own IAM role, and its own Firecracker boundary. An intern's agent IAM role literally cannot read the exec S3 bucket — even if the LLM tries.
+Each runtime tier has its own Docker image, its own IAM role, its own Firecracker boundary, and an optional Bedrock Guardrail. An intern's agent IAM role literally cannot read the exec S3 bucket — even if the LLM tries. And even if it could, the Guardrail blocks the output before it reaches the user.
 
 Additional controls: no public ports (SSM only) · IAM roles throughout, no hardcoded credentials · gateway token in SSM SecureString, never on disk · VPC isolation between runtimes.
 
@@ -77,6 +78,7 @@ Additional controls: no public ports (SSM only) · IAM roles throughout, no hard
 | **Three-Layer SOUL** | Global (IT) → Position (dept admin) → Personal (employee). 3 stakeholders, 3 layers, one merged identity. Same LLM — Finance Analyst vs SDE have completely different personalities and permissions |
 | **Self-Service IM Pairing** | Employee scans QR code from Portal → connects Telegram / Feishu / Discord in 30 seconds. No IT ticket, no admin approval |
 | **Multi-Runtime Architecture** | Standard tier (Nova 2 Lite, scoped IAM) vs Executive tier (Claude Sonnet 4.6, full access). Different Docker images, different models, different IAM roles — infrastructure-level isolation |
+| **Bedrock Guardrails (L5)** | Assign any Bedrock Guardrail to a Runtime from Security Center UI. Topic denial, PII filtering, and compliance policies wrap every user input and agent output — no OpenClaw source code changes needed. Standard employees get blocked; exec tier is unrestricted. Full block audit trail in Audit Center. |
 | **Org Directory KB** | Company directory (every employee, R&R, contact, agent capabilities) seeded from org data and injected into every agent — agents know who to contact and can draft messages for you |
 | **Position → Runtime Routing** | 3-tier routing chain: employee override → position rule → default. Assign positions to runtimes from Security Center UI, propagates to all members automatically |
 | **Per-Employee Model Config** | Override model, context window, compaction settings, and response language at position OR employee level from Agent Factory → Configuration tab |
@@ -198,6 +200,7 @@ Runtime: Executive (C-Suite / Senior Leadership)
 | L2 — Application | Skills manifest `allowedRoles`/`blockedRoles` | ⚠️ Code bug risk |
 | **L3 — IAM** | **Runtime role has no permission on target resource** | **✅ Impossible** |
 | L4 — Network | VPC isolation between Runtimes | ✅ Infrastructure-level |
+| **L5 — Guardrail** | **Bedrock Guardrail per Runtime: topic denial, PII, compliance. Wraps ALL inputs + outputs.** | **✅ Impossible — AWS-managed semantic AI filter** |
 
 #### 3. Digital Twin — AI Availability Beyond Office Hours
 

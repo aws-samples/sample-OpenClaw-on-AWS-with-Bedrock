@@ -4835,6 +4835,8 @@ def get_security_runtimes(authorization: str = Header(default="")):
                     "region": env.get("AWS_REGION", "us-east-1"),
                     "idleTimeoutSec": lc.get("idleRuntimeSessionTimeout", 900),
                     "maxLifetimeSec": lc.get("maxLifetime", 28800),
+                    "guardrailId": env.get("GUARDRAIL_ID", ""),
+                    "guardrailVersion": env.get("GUARDRAIL_VERSION", ""),
                     "createdAt": detail.get("createdAt", "").isoformat() if hasattr(detail.get("createdAt", ""), "isoformat") else str(detail.get("createdAt", "")),
                     "version": detail.get("agentRuntimeVersion", "1"),
                 })
@@ -4910,6 +4912,16 @@ def update_runtime_config(runtime_id: str, body: dict, authorization: str = Head
             except Exception:
                 pass
 
+        # Guardrail binding: store as env vars; "" means remove guardrail
+        if "guardrailId" in body:
+            gid = body["guardrailId"].strip()
+            if gid:
+                new_env["GUARDRAIL_ID"] = gid
+                new_env["GUARDRAIL_VERSION"] = body.get("guardrailVersion", "DRAFT").strip() or "DRAFT"
+            else:
+                new_env.pop("GUARDRAIL_ID", None)
+                new_env.pop("GUARDRAIL_VERSION", None)
+
         role_arn = body.get("roleArn") or detail["roleArn"]
         idle = body.get("idleTimeoutSec") or detail.get("lifecycleConfiguration", {}).get("idleRuntimeSessionTimeout", 900)
         max_life = body.get("maxLifetimeSec") or detail.get("lifecycleConfiguration", {}).get("maxLifetime", 28800)
@@ -4984,6 +4996,52 @@ def create_runtime(body: CreateRuntimeRequest, authorization: str = Header(defau
         return {"created": True, "runtimeId": resp.get("agentRuntimeId", ""), "status": resp.get("status", "")}
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+# ── Guardrails ───────────────────────────────────────────────────────────────
+
+@app.get("/api/v1/security/guardrails")
+def list_guardrails(authorization: str = Header(default="")):
+    """List all Bedrock Guardrails available in this account/region."""
+    _require_role(authorization, roles=["admin"])
+    try:
+        import boto3 as _b3gr
+        bedrock = _b3gr.client("bedrock", region_name=_GATEWAY_REGION)
+        resp = bedrock.list_guardrails(maxResults=100)
+        guardrails = []
+        for g in resp.get("guardrails", []):
+            guardrails.append({
+                "id": g["id"],
+                "name": g["name"],
+                "status": g.get("status", "READY"),
+                "version": g.get("version", "DRAFT"),
+                "updatedAt": g.get("updatedAt", "").isoformat() if hasattr(g.get("updatedAt", ""), "isoformat") else str(g.get("updatedAt", "")),
+            })
+        return {"guardrails": guardrails}
+    except Exception as e:
+        return {"guardrails": [], "error": str(e)}
+
+
+@app.get("/api/v1/audit/guardrail-events")
+def get_guardrail_events(authorization: str = Header(default=""), limit: int = 50):
+    """Fetch guardrail_block audit events from DynamoDB."""
+    _require_role(authorization, roles=["admin", "manager"])
+    try:
+        table = boto3.resource("dynamodb", region_name=DYNAMODB_REGION).Table(DYNAMODB_TABLE)
+        resp = table.query(
+            IndexName="GSI1",
+            KeyConditionExpression=Key("GSI1PK").eq("TYPE#audit"),
+            ScanIndexForward=False,
+            Limit=limit * 5,  # over-fetch since we filter by eventType
+        )
+        events = [item for item in resp.get("Items", []) if item.get("eventType") == "guardrail_block"]
+        events = events[:limit]
+        for e in events:
+            e.pop("PK", None); e.pop("SK", None)
+            e.pop("GSI1PK", None); e.pop("GSI1SK", None)
+        return {"events": events}
+    except Exception as e:
+        return {"events": [], "error": str(e)}
 
 
 # ── Separate resource endpoints for dropdowns ──────────────────────────────

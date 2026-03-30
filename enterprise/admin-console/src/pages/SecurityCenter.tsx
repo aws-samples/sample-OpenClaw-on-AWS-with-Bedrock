@@ -14,6 +14,7 @@ import {
   useModelConfig, useUpdateModelConfig, useUpdateFallbackModel,
   useSetPositionModel, useRemovePositionModel,
   usePositionRuntimeMap, useSetPositionRuntime, useDeletePositionRuntime,
+  useGuardrails,
 } from '../hooks/useApi';
 import { Select } from '../components/ui';
 
@@ -63,6 +64,7 @@ function RuntimeEditModal({ rt, models, onClose }: { rt: any; models: any[]; onC
   const { data: ecrData } = useEcrImages();
   const { data: iamData } = useIamRoles();
   const { data: vpcData } = useVpcResources();
+  const { data: guardrailsData } = useGuardrails();
   const updateConfig = useUpdateRuntimeConfig();
 
   const [containerUri, setContainerUri] = useState(rt.containerUri || '');
@@ -73,6 +75,8 @@ function RuntimeEditModal({ rt, models, onClose }: { rt: any; models: any[]; onC
   const [subnetIds, setSubnetIds] = useState<string[]>(rt.subnetIds || []);
   const [idle, setIdle] = useState(rt.idleTimeoutSec || 900);
   const [maxLife, setMaxLife] = useState(rt.maxLifetimeSec || 28800);
+  const [guardrailId, setGuardrailId] = useState(rt.guardrailId || '');
+  const [guardrailVersion, setGuardrailVersion] = useState(rt.guardrailVersion || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -98,6 +102,7 @@ function RuntimeEditModal({ rt, models, onClose }: { rt: any; models: any[]; onC
       await updateConfig.mutateAsync({
         runtimeId: rt.id, containerUri, roleArn, modelId,
         networkMode, securityGroupIds, subnetIds, idleTimeoutSec: idle, maxLifetimeSec: maxLife,
+        guardrailId, guardrailVersion: guardrailVersion || 'DRAFT',
       });
       onClose();
     } catch (e: any) {
@@ -154,6 +159,44 @@ function RuntimeEditModal({ rt, models, onClose }: { rt: any; models: any[]; onC
           <p className="text-xs font-semibold text-text-secondary flex items-center gap-1.5"><Clock size={12} /> Lifecycle</p>
           <TimeSlider label="Idle timeout (no msg → microVM released)" value={idle} onChange={setIdle} />
           <TimeSlider label="Max lifetime (force restart ceiling)" value={maxLife} onChange={setMaxLife} />
+        </div>
+
+        {/* Guardrail Binding */}
+        <div>
+          <label className="mb-1.5 block text-xs font-semibold text-text-secondary flex items-center gap-1.5">
+            <Shield size={12} className="text-warning" /> Bedrock Guardrail (L5 Content Policy)
+          </label>
+          {guardrailsData?.guardrails && guardrailsData.guardrails.length > 0 ? (
+            <select
+              value={guardrailId}
+              onChange={e => {
+                setGuardrailId(e.target.value);
+                const g = guardrailsData.guardrails.find(g => g.id === e.target.value);
+                setGuardrailVersion(g?.version || '1');
+              }}
+              className="w-full rounded-xl border border-dark-border/60 bg-surface-dim px-4 py-2.5 text-sm text-text-primary focus:border-primary/60 focus:outline-none"
+            >
+              <option value="">— No Guardrail (unrestricted) —</option>
+              {guardrailsData.guardrails.map(g => (
+                <option key={g.id} value={g.id}>{g.name} (v{g.version}) · {g.id}</option>
+              ))}
+            </select>
+          ) : (
+            <input value={guardrailId} onChange={e => setGuardrailId(e.target.value)}
+              className="w-full rounded-xl border border-dark-border/60 bg-surface-dim px-4 py-2.5 text-xs font-mono text-text-primary focus:border-primary/60 focus:outline-none"
+              placeholder="Guardrail ID (e.g. b44c26tk2kds) — leave blank for none" />
+          )}
+          {guardrailId && (
+            <div className="mt-2">
+              <label className="mb-1 block text-xs text-text-muted">Version</label>
+              <input value={guardrailVersion} onChange={e => setGuardrailVersion(e.target.value)}
+                className="w-full rounded-xl border border-dark-border/60 bg-surface-dim px-4 py-2 text-xs font-mono text-text-primary focus:border-primary/60 focus:outline-none"
+                placeholder="1" />
+            </div>
+          )}
+          <p className="mt-1.5 text-[10px] text-text-muted">
+            Guardrail checks user input and agent output on every invocation. Exec Runtime leave blank — no restriction.
+          </p>
         </div>
 
         {/* Network Mode */}
@@ -349,6 +392,11 @@ function RuntimeCard({ rt, models }: { rt: any; models: any[] }) {
               extra: <><Badge color={isExec ? 'danger' : 'info'}>{isExec ? 'Full Access' : 'Scoped'}</Badge>
                       <a href={`https://console.aws.amazon.com/iam/home#/roles/${roleName}`} target="_blank" rel="noreferrer"><ExternalLink size={11} className="text-text-muted hover:text-primary ml-1" /></a></> },
             { label: 'Network', value: networkMode, extra: null },
+            { label: 'Guardrail (L5)',
+              value: rt.guardrailId ? `${rt.guardrailId} v${rt.guardrailVersion || '1'}` : '—',
+              extra: rt.guardrailId
+                ? <Badge color="warning"><Shield size={10} className="mr-0.5" />Active</Badge>
+                : <Badge color="default">None</Badge> },
           ].map(row => (
             <div key={row.label} className="flex items-center justify-between rounded-xl bg-surface-dim px-3 py-2">
               <span className="text-xs text-text-muted">{row.label}</span>
@@ -859,6 +907,7 @@ export default function SecurityCenter() {
                   { layer: 'L2', name: 'Application', color: 'warning', desc: 'Skills manifest allowedRoles / blockedRoles', note: 'App-level · Code bug risk', strong: false },
                   { layer: 'L3', name: 'IAM Role', color: 'success', desc: 'Runtime execution role has no permission on target resource', note: 'Infrastructure · Cannot be bypassed', strong: true },
                   { layer: 'L4', name: 'Network', color: 'success', desc: 'VPC isolation between Runtimes', note: 'Infrastructure · Cannot be bypassed', strong: true },
+                  { layer: 'L5', name: 'Bedrock Guardrail', color: 'success', desc: 'Content policy: topic denial, PII filtering, compliance guardrails on every input + output', note: 'AWS-managed · Semantically aware · Cannot be bypassed', strong: true },
                 ].map(l => (
                   <div key={l.layer} className={`flex items-center gap-4 rounded-xl px-4 py-3 ${l.strong ? 'bg-success/5 border border-success/20' : 'bg-surface-dim border border-transparent'}`}>
                     <div className={`w-2 h-2 rounded-full ${l.strong ? 'bg-success' : 'bg-warning'} shrink-0`} />

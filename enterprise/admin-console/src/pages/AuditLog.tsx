@@ -1,12 +1,13 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Shield, Download, Search, AlertTriangle, CheckCircle, XCircle, Info, Clock, Brain, Scan, Loader, Sparkles } from 'lucide-react';
+import { Shield, Download, Search, AlertTriangle, CheckCircle, XCircle, Info, Clock, Brain, Scan, Loader, Sparkles, ShieldAlert, Filter } from 'lucide-react';
 import { Card, Badge, Button, PageHeader, Table, StatCard, Tabs } from '../components/ui';
-import { useAuditEntries, useAuditInsights, useRunAuditScan } from '../hooks/useApi';
+import { useAuditEntries, useAuditInsights, useRunAuditScan, useGuardrailEvents } from '../hooks/useApi';
 import type { AuditEntry } from '../types';
 
 const eventTypeOptions = [
   { label: 'All Events', value: 'all' },
+  { label: 'Guardrail Block', value: 'guardrail_block' },
   { label: 'Agent Invocation', value: 'agent_invocation' },
   { label: 'Tool Execution', value: 'tool_execution' },
   { label: 'Permission Denied', value: 'permission_denied' },
@@ -46,9 +47,11 @@ export default function AuditLog() {
 
   const { data: AUDIT_ENTRIES = [] } = useAuditEntries({ limit: 50, eventType: eventType !== 'all' ? eventType : undefined });
   const { data: insightsData, refetch: refetchInsights } = useAuditInsights();
+  const { data: guardrailData } = useGuardrailEvents(50);
   const runScan = useRunAuditScan();
   const insights = insightsData?.insights || [];
   const insightsSummary = insightsData?.summary;
+  const guardrailEvents = guardrailData?.events || [];
 
   // Compute stats
   const stats = useMemo(() => {
@@ -92,11 +95,12 @@ export default function AuditLog() {
       />
 
       {/* Summary Stats */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-5 mb-6">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-6 mb-6">
         <StatCard title="Total Events" value={stats.total} icon={<Shield size={22} />} color="primary" />
         <StatCard title="Agent Invocations" value={stats.invocations} icon={<CheckCircle size={22} />} color="success" />
         <StatCard title="Tool Executions" value={stats.toolExecs} icon={<Clock size={22} />} color="info" />
         <StatCard title="Permission Denied" value={stats.blocked} icon={<XCircle size={22} />} color="danger" />
+        <StatCard title="Guardrail Blocks" value={guardrailEvents.length} icon={<ShieldAlert size={22} />} color="warning" />
         <StatCard title="Config Changes" value={stats.configChanges} icon={<AlertTriangle size={22} />} color="warning" />
       </div>
 
@@ -107,6 +111,7 @@ export default function AuditLog() {
             { id: 'timeline', label: 'Event Timeline', count: filtered.length },
             { id: 'breakdown', label: 'Breakdown' },
             { id: 'security', label: 'Security Alerts', count: stats.blocked || undefined },
+            { id: 'guardrail', label: 'Guardrail Events', count: guardrailEvents.length || undefined },
           ]}
           activeTab={activeTab}
           onChange={setActiveTab}
@@ -322,6 +327,60 @@ export default function AuditLog() {
                       </div>
                     </div>
                   ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'guardrail' && (
+            <div>
+              <div className="rounded-xl bg-warning/5 border border-warning/20 px-4 py-3 text-xs text-warning mb-4 flex items-center gap-2">
+                <ShieldAlert size={16} />
+                <span>Bedrock Guardrail intercepts — every blocked user input and filtered agent output. Standard Runtime only. Exec Runtime has no guardrail restrictions.</span>
+              </div>
+
+              {guardrailEvents.length === 0 ? (
+                <div className="text-center py-12 text-text-muted">
+                  <ShieldAlert size={32} className="mx-auto mb-3 opacity-30" />
+                  <p className="text-sm">No guardrail blocks yet</p>
+                  <p className="text-xs mt-1">Blocks appear here when Standard Runtime agents trigger topic denial or PII rules.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {guardrailEvents.map(e => (
+                    <div key={e.id} className="flex items-start gap-4 rounded-xl bg-amber-500/5 border border-amber-500/20 px-4 py-3">
+                      <ShieldAlert size={18} className="text-amber-400 mt-0.5 shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap mb-1">
+                          <span className="text-sm font-semibold text-amber-300">{e.actorName}</span>
+                          <Badge color="warning">{e.guardrailSource === 'INPUT' ? 'Input blocked' : 'Output filtered'}</Badge>
+                          {e.guardrailPolicy && <Badge color="default">{e.guardrailPolicy.replace(/-/g, ' ')}</Badge>}
+                          <span className="text-xs font-mono text-text-muted">{e.guardrailId} v{e.guardrailVersion}</span>
+                        </div>
+                        <p className="text-sm text-text-secondary truncate">{e.detail}</p>
+                        <p className="text-xs text-text-muted mt-1">{new Date(e.timestamp).toLocaleString()}</p>
+                      </div>
+                      <Badge color="danger">Blocked</Badge>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="mt-4 rounded-xl bg-dark-bg p-4">
+                <h4 className="text-sm font-medium text-text-primary mb-2">Guardrail Enforcement Summary</h4>
+                <div className="grid grid-cols-3 gap-4 text-center">
+                  <div>
+                    <p className="text-2xl font-semibold text-amber-400">{guardrailEvents.length}</p>
+                    <p className="text-xs text-text-muted">Total Blocks</p>
+                  </div>
+                  <div>
+                    <p className="text-2xl font-semibold text-text-primary">{guardrailEvents.filter(e => e.guardrailSource === 'INPUT').length}</p>
+                    <p className="text-xs text-text-muted">Input Blocked</p>
+                  </div>
+                  <div>
+                    <p className="text-2xl font-semibold text-text-primary">{guardrailEvents.filter(e => e.guardrailSource === 'OUTPUT').length}</p>
+                    <p className="text-xs text-text-muted">Output Filtered</p>
+                  </div>
                 </div>
               </div>
             </div>

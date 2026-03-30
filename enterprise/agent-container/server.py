@@ -61,6 +61,11 @@ _config_version: str = ""
 _config_version_checked_at: float = 0.0
 _CONFIG_VERSION_CHECK_INTERVAL = 300  # seconds (5 minutes)
 
+# Guardrail config read from environment variables set on the Runtime.
+# Exec Runtime has no GUARDRAIL_ID → no guardrail enforcement.
+GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")
+GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "DRAFT")
+
 
 def _check_and_refresh_config_version() -> None:
     """Check DynamoDB CONFIG#global-version and clear assembly cache if changed.
@@ -907,6 +912,110 @@ def _invoke_openclaw_once(tenant_id: str, message: str, timeout: int = 300) -> d
     return data
 
 
+def _apply_guardrail(text: str, source: str, tenant_id: str) -> str:
+    """Apply Bedrock Guardrail to text.  Returns the blockedMessaging string if
+    content was blocked/filtered; returns empty string if content passes.
+    source must be 'INPUT' or 'OUTPUT'.
+    Logs a guardrail_block audit event to DynamoDB if blocked."""
+    try:
+        import boto3 as _b3gr
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        bedrock = _b3gr.client("bedrock-runtime", region_name=region)
+        resp = bedrock.apply_guardrail(
+            guardrailIdentifier=GUARDRAIL_ID,
+            guardrailVersion=GUARDRAIL_VERSION,
+            source=source,
+            content=[{"text": {"text": text}}],
+        )
+        action = resp.get("action", "NONE")
+        if action in ("GUARDRAIL_INTERVENED",):
+            # Extract the blockedMessaging from outputs
+            blocked_msg = ""
+            for out in resp.get("outputs", []):
+                t = out.get("text", "")
+                if t:
+                    blocked_msg = t
+                    break
+            if not blocked_msg:
+                blocked_msg = "该话题涉及未公开业务信息。根据合规政策，AI 助手无法提供相关内容，请联系合规部门。"
+
+            # Log guardrail_block audit event (fire-and-forget)
+            policy_name = ""
+            assessments = resp.get("assessments", [])
+            if assessments:
+                topics = assessments[0].get("topicPolicy", {}).get("topics", [])
+                if topics:
+                    policy_name = topics[0].get("name", "")
+
+            threading.Thread(
+                target=_write_guardrail_block_to_dynamodb,
+                args=(tenant_id, text[:200], source, policy_name),
+                daemon=True,
+            ).start()
+
+            logger.info("Guardrail %s BLOCKED source=%s tenant=%s policy=%s", GUARDRAIL_ID, source, tenant_id, policy_name)
+            return blocked_msg
+        return ""
+    except Exception as e:
+        logger.warning("Guardrail check failed (non-fatal, allowing): %s", e)
+        return ""
+
+
+def _write_guardrail_block_to_dynamodb(tenant_id: str, input_snippet: str, source: str, policy_name: str):
+    """Write a guardrail_block audit event to DynamoDB."""
+    try:
+        import boto3 as _b3gb
+        from datetime import datetime, timezone
+        ddb = _b3gb.resource("dynamodb", region_name=DYNAMODB_REGION)
+        table = ddb.Table(DYNAMODB_TABLE)
+        now = datetime.now(timezone.utc)
+        audit_id = f"grd-{int(now.timestamp() * 1000)}"
+
+        # Resolve display name
+        base_id = tenant_id
+        parts = tenant_id.split("__")
+        if len(parts) >= 2:
+            base_id = parts[1]
+        try:
+            with open("/tmp/base_tenant_id") as f:
+                resolved = f.read().strip()
+                if resolved and resolved != "unknown":
+                    base_id = resolved
+        except Exception:
+            pass
+
+        actor_name = base_id
+        try:
+            emp_resp = table.get_item(Key={"PK": "ORG#acme", "SK": f"EMP#{base_id}"})
+            emp_item = emp_resp.get("Item", {})
+            if emp_item.get("name"):
+                actor_name = emp_item["name"]
+        except Exception:
+            pass
+
+        table.put_item(Item={
+            "PK": "ORG#acme",
+            "SK": f"AUDIT#{audit_id}",
+            "GSI1PK": "TYPE#audit",
+            "GSI1SK": f"AUDIT#{audit_id}",
+            "id": audit_id,
+            "timestamp": now.isoformat(),
+            "eventType": "guardrail_block",
+            "actorId": base_id,
+            "actorName": actor_name,
+            "targetType": "guardrail",
+            "targetId": GUARDRAIL_ID,
+            "guardrailId": GUARDRAIL_ID,
+            "guardrailVersion": GUARDRAIL_VERSION,
+            "guardrailSource": source,
+            "guardrailPolicy": policy_name,
+            "detail": f"Guardrail blocked {source.lower()}: {input_snippet}",
+            "status": "blocked",
+        })
+    except Exception as e:
+        logger.warning("Guardrail block audit write failed (non-fatal): %s", e)
+
+
 class AgentCoreHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):  # noqa: A002
@@ -959,6 +1068,15 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
         # Check if global config (SOUL/KB) changed — evicts stale assembly cache
         _check_and_refresh_config_version()
 
+        # ── Guardrail INPUT check ─────────────────────────────────────────────
+        # Reads GUARDRAIL_ID from env (set per-Runtime). Exec Runtime has no
+        # GUARDRAIL_ID so this is a no-op for exec agents.
+        if GUARDRAIL_ID:
+            blocked_msg = _apply_guardrail(message, source="INPUT", tenant_id=tenant_id)
+            if blocked_msg:
+                self._respond(200, {"response": blocked_msg, "status": "guardrail_blocked", "guardrailId": GUARDRAIL_ID})
+                return
+
         # Check session takeover — if admin has taken over, skip agent invocation
         stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
         region = os.environ.get("AWS_REGION", "us-east-1")
@@ -1003,6 +1121,13 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
             if not response_text:
                 logger.warning("Empty response_text from openclaw, raw data keys: %s", list(data.keys()))
                 response_text = "(no response)"
+
+            # ── Guardrail OUTPUT check ────────────────────────────────────────
+            if GUARDRAIL_ID:
+                blocked_msg = _apply_guardrail(response_text, source="OUTPUT", tenant_id=tenant_id)
+                if blocked_msg:
+                    self._respond(200, {"response": blocked_msg, "status": "guardrail_blocked", "guardrailId": GUARDRAIL_ID})
+                    return
 
             # Plan E audit
             try:
