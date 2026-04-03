@@ -54,6 +54,50 @@ const tenantState = new Map();
 // Stored in-memory only; a proxy restart loses pending pairings (user re-scans QR to retry)
 const pendingPairings = new Map();
 
+// Binding cache: avoids a DynamoDB lookup on every IM message.
+// key: `${channel}:${userId}` → { bound: bool, empId: str, expiresAt: number }
+// TTL: 60 seconds. Binding changes take effect within 1 minute.
+const _bindingCache = new Map();
+const _BINDING_CACHE_TTL = 60_000;
+
+// IM channels that require a valid employee binding before the bot will respond.
+// Portal/web sessions use JWT auth and don't go through this check.
+const _IM_CHANNELS_REQUIRING_BINDING = new Set([
+  'telegram', 'discord', 'feishu', 'dingtalk', 'slack', 'teams',
+  'googlechat', 'whatsapp', 'wechat', 'line', 'viber',
+]);
+
+async function checkImBinding(channel, userId) {
+  const key = `${channel}:${userId}`;
+  const cached = _bindingCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) return cached;
+
+  try {
+    const http = require('node:http');
+    const result = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: '127.0.0.1', port: 8099,
+        path: `/api/v1/internal/im-binding-check?channel=${encodeURIComponent(channel)}&channelUserId=${encodeURIComponent(userId)}`,
+        method: 'GET',
+      }, (res) => {
+        let data = '';
+        res.on('data', c => data += c);
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); } catch { resolve({ bound: false }); }
+        });
+      });
+      req.on('error', () => resolve({ bound: false }));
+      req.setTimeout(3000, () => { req.destroy(); resolve({ bound: true }); }); // fail open on timeout
+      req.end();
+    });
+    const entry = { ...result, expiresAt: Date.now() + _BINDING_CACHE_TTL };
+    _bindingCache.set(key, entry);
+    return entry;
+  } catch {
+    return { bound: true }; // fail open — better to respond than to silently drop
+  }
+}
+
 function getTenantKey(channel, userId) {
   return `${channel}__${userId}`;
 }
@@ -710,6 +754,20 @@ server.on('stream', (stream, headers) => {
         } catch (pairErr) {
           log(`PATH C: Pairing error (falling through): ${pairErr.message}`);
         }
+      }
+
+      // ── Strict binding enforcement ─────────────────────────────────────
+      // Only respond to IM accounts that have been explicitly bound to an
+      // employee via the Portal. Portal/web sessions (userId starts with
+      // "emp-") are always allowed — they use JWT auth, not IM binding.
+      if (_IM_CHANNELS_REQUIRING_BINDING.has(channel) && !userId.startsWith('emp-')) {
+        const binding = await checkImBinding(channel, userId);
+        if (!binding.bound) {
+          log(`Binding check: ${channel}:${userId} not bound — rejecting`);
+          injectResponse('此账号尚未绑定到企业员工账户。请通过员工门户（Portal）扫码绑定后再使用。');
+          return;
+        }
+        log(`Binding check: ${channel}:${userId} → ${binding.employeeId}`);
       }
 
       // Core routing: fast-path for cold tenants, full pipeline for warm

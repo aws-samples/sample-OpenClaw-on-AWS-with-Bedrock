@@ -4399,6 +4399,32 @@ def get_im_channels(authorization: str = Header(default="")):
     return result
 
 
+@app.get("/api/v1/internal/im-binding-check")
+def im_binding_check(channel: str, channelUserId: str):
+    """Internal endpoint called by H2 Proxy before routing each IM message.
+    Strict enforcement: only respond to IM accounts that have a valid employee binding.
+    No auth required — only accessible from the same EC2 (internal network)."""
+    # Primary: DynamoDB channel-specific lookup
+    m = db.get_user_mapping(channel, channelUserId)
+    if m and m.get("employeeId"):
+        return {"bound": True, "employeeId": m["employeeId"]}
+    # Fallback: scan MAPPING# for bare channelUserId (Feishu OU IDs, etc.)
+    try:
+        import boto3 as _b3bc
+        from boto3.dynamodb.conditions import Key as _KBC, Attr as _ABC
+        ddb = _b3bc.resource("dynamodb", region_name=os.environ.get("DYNAMODB_REGION", "us-east-2"))
+        table = ddb.Table(os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise"))
+        resp = table.query(
+            KeyConditionExpression=_KBC("PK").eq("ORG#acme") & _KBC("SK").begins_with("MAPPING#"),
+            FilterExpression=_ABC("channelUserId").eq(channelUserId),
+        )
+        if resp.get("Items"):
+            return {"bound": True, "employeeId": resp["Items"][0]["employeeId"]}
+    except Exception:
+        pass
+    return {"bound": False}
+
+
 @app.post("/api/v1/admin/im-channels/{channel}/test")
 def test_im_channel(channel: str, authorization: str = Header(default="")):
     """Test bot connection for a channel by asking OpenClaw if it has the channel configured.
