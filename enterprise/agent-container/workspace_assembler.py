@@ -328,6 +328,12 @@ def assemble_workspace(
     emp_name = ""
     emp_no = ""
     pos_name = ""
+    # _b_id initialized here so section 10 (SESSION_CONTEXT) can safely reference it
+    # even if the boto3 lookup below throws before setting _b_id
+    _b_id = tenant_id
+    _parts_id = tenant_id.split("__")
+    if len(_parts_id) >= 2:
+        _b_id = _parts_id[1]
     try:
         import boto3 as _b3id
         ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
@@ -374,6 +380,72 @@ def assemble_workspace(
     with open(identity_path, "w") as f:
         f.write(identity + "\n")
     logger.info("Generated IDENTITY.md for %s (%s)", emp_name or _b_id, pos_name or pos_id)
+
+    # 10. Generate SESSION_CONTEXT.md — written once at cold start.
+    # Tells the agent its operating mode and who it is talking to.
+    # The session_id prefix encodes the access path:
+    #   emp__   → normal employee session (Portal + all IM channels share this)
+    #   pt__    → portal session (same as emp__, legacy alias)
+    #   pgnd__  → Playground (IT admin testing as this employee, read-only)
+    #   twin__  → Digital Twin mode (external callers, conversations visible to employee)
+    #   admin__ → IT Admin assistant session
+    session_ctx_path = os.path.join(workspace, "SESSION_CONTEXT.md")
+    try:
+        prefix = tenant_id.split("__")[0] if "__" in tenant_id else ""
+        verified_name = emp_name or _b_id
+
+        if prefix in ("emp", "pt"):
+            session_ctx = (
+                "# Session Context\n\n"
+                f"**Mode:** Employee Session\n"
+                f"**Authenticated User:** {verified_name}\n"
+                f"**Verification:** Confirmed (enterprise identity — SSO or IM binding)\n\n"
+                "You are speaking directly with the authenticated employee listed above. "
+                "Use their name naturally in conversation. "
+                "You have full read/write access to this workspace."
+            )
+        elif prefix == "pgnd":
+            session_ctx = (
+                "# Session Context\n\n"
+                f"**Mode:** Playground (Admin Test)\n"
+                f"**Employee Being Simulated:** {verified_name}\n"
+                f"**Operator:** IT Administrator\n\n"
+                "This is an administrative test session. An IT admin is testing your "
+                "behavior as this employee's agent. Respond as you normally would for "
+                "this employee's role. Do NOT write back to the employee workspace — "
+                "this session is read-only with respect to memory."
+            )
+        elif prefix == "twin":
+            session_ctx = (
+                "# Session Context\n\n"
+                f"**Mode:** Digital Twin\n"
+                f"**Represented Employee:** {verified_name}\n"
+                f"**Caller:** External visitor or colleague (identity unverified)\n\n"
+                f"You are acting as {verified_name}'s digital representative. "
+                "The person you are speaking with may not be the employee themselves — "
+                "they could be a colleague, partner, or visitor interacting with the digital twin. "
+                f"All conversations in this mode are visible to {verified_name} in their Portal."
+            )
+        elif prefix == "admin":
+            session_ctx = (
+                "# Session Context\n\n"
+                "**Mode:** IT Admin Assistant\n"
+                "**Operator:** Authorized IT Administrator\n\n"
+                "You are assisting an IT administrator. You may discuss system configuration, "
+                "employee settings, and platform management topics."
+            )
+        else:
+            session_ctx = (
+                "# Session Context\n\n"
+                f"**Mode:** Standard Session\n"
+                f"**Session ID:** {tenant_id}\n"
+            )
+
+        with open(session_ctx_path, "w") as f:
+            f.write(session_ctx + "\n")
+        logger.info("SESSION_CONTEXT.md written: mode=%s user=%s", prefix or "default", verified_name)
+    except Exception as e:
+        logger.warning("SESSION_CONTEXT.md generation failed (non-fatal): %s", e)
 
     return {
         "merged_soul_chars": len(merged_soul),

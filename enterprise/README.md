@@ -139,17 +139,33 @@ We don't fork, patch, or modify a single line of OpenClaw source code. Instead, 
 
 ```
 workspace/
-├── SOUL.md      ← Agent identity & rules (assembled from 3 layers)
-├── AGENTS.md    ← Workflow definitions
-├── TOOLS.md     ← Tool permissions
-├── USER.md      ← Employee preferences
-├── MEMORY.md    ← Persistent memory
-├── memory/      ← Daily memory files (per-turn checkpoint)
-├── knowledge/   ← Position-scoped + global documents (KB-injected)
-└── skills/      ← Role-filtered skill packages
+├── SOUL.md            ← Agent identity & rules (assembled from 3 layers)
+├── AGENTS.md          ← Workflow definitions
+├── TOOLS.md           ← Tool permissions
+├── USER.md            ← Employee preferences
+├── MEMORY.md          ← Persistent memory
+├── memory/            ← Daily memory files (per-turn checkpoint)
+├── knowledge/         ← Position-scoped + global documents (KB-injected)
+├── skills/            ← Role-filtered skill packages
+├── IDENTITY.md        ← Employee name + position (generated, not editable)
+├── CHANNELS.md        ← Employee's bound IM channels (for outbound notifications)
+└── SESSION_CONTEXT.md ← Access path + caller identity (written once at cold start)
 ```
 
 The `workspace_assembler` merges Global + Position + Personal layers into these files before OpenClaw reads them. OpenClaw doesn't know it's running in an enterprise context — it just reads its workspace as usual.
+
+`SESSION_CONTEXT.md` is the access path identity file. It is written **once per cold start** by `workspace_assembler` and encodes exactly which access path triggered this session, verified by the `session_id` prefix the Tenant Router assigns:
+
+| Session Prefix | Access Path | Content Written |
+|----------------|-------------|-----------------|
+| `emp__emp-id__` | Employee Portal + all bound IM channels (shared session) | Authenticated user name, "Verification: Confirmed" |
+| `pt__emp-id__` | Portal (legacy alias, same behavior as `emp__`) | Same as above |
+| `pgnd__emp-id__` | Playground — IT admin testing as this employee | "Admin Test Session, read-only memory" |
+| `twin__emp-id__` | Digital Twin — external caller, no auth required | "Caller unverified, conversations visible to employee in Portal" |
+| `admin__...` | IT Admin Assistant | "Authorized IT Administrator" |
+| `tg__`, `dc__`, etc. | Raw IM fallback (unresolved user, before pairing) | "Standard Session" |
+
+**Why this matters:** Without SESSION_CONTEXT.md, the agent cannot distinguish Portal from Playground from Digital Twin — all three would access the same workspace and respond identically. With it, Playground explicitly tells the agent not to write back to employee memory, and Digital Twin tells the agent the caller is unverified and the conversation is visible to the represented employee.
 
 #### 2. Serverless-First + Always-on Hybrid
 
@@ -264,28 +280,48 @@ The org directory KB (seeded via `seed_knowledge_docs.py`, refreshed by re-runni
 │  └── IT Admin Assistant (Claude API, 10 whitelisted tools)       │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  PATH A: Personal Employee Agents                                │
+│  PATH 1: IT Admin Assistant                                      │
 │  ┌────────────────────────────────────────────────────────┐      │
-│  │  IM Message (Discord/Telegram/Feishu/Slack/Portal)     │      │
-│  │    ↓ OpenClaw Gateway (port 18789)                     │      │
-│  │    ↓ H2 Proxy (port 8091) — extracts sender_id        │      │
-│  │    ↓ Tenant Router — 3-tier routing                    │      │
-│  │      1. always-on agent? → Docker container (no wait) │      │
-│  │      2. position rule?   → Assigned AgentCore Runtime  │      │
-│  │      3. default          → Standard AgentCore Runtime  │      │
-│  │    ↓ AgentCore (Firecracker microVM per tenant)        │      │
-│  │    ↓ workspace_assembler: SOUL merge + KB inject       │      │
-│  │    ↓ OpenClaw + Bedrock → Response                     │      │
+│  │  Admin Console floating chat bubble (admin role only)  │      │
+│  │    session_id prefix: admin__                          │      │
+│  │    SESSION_CONTEXT.md → "IT Admin Assistant"           │      │
+│  │    Claude API direct (not AgentCore), 10 whitelisted   │      │
+│  │    tools, no shell, no subprocess                      │      │
 │  └────────────────────────────────────────────────────────┘      │
 │                                                                  │
-│  PATH B: Digital Twin (no auth required)                         │
+│  PATH 2: Playground (IT admin testing as employee)               │
+│  ┌────────────────────────────────────────────────────────┐      │
+│  │  Admin Console → Agents → Playground tab               │      │
+│  │    session_id prefix: pgnd__emp-id__                   │      │
+│  │    SESSION_CONTEXT.md → "Playground (Admin Test),      │      │
+│  │      read-only with respect to memory"                 │      │
+│  │    Reads employee's workspace; no write-back           │      │
+│  └────────────────────────────────────────────────────────┘      │
+│                                                                  │
+│  PATH 3: Employee Portal (webchat, authenticated)                │
+│  PATH 4: IM Channels (Telegram/Feishu/Discord/Slack — bound)    │
+│  ┌────────────────────────────────────────────────────────┐      │
+│  │  Paths 3 and 4 share the SAME AgentCore session        │      │
+│  │    H2 Proxy enforces binding: unbound IM → rejected    │      │
+│  │    Tenant Router resolves channel user_id → emp_id     │      │
+│  │    session_id prefix: emp__emp-id__  (both paths)      │      │
+│  │    SESSION_CONTEXT.md → "Employee Session, Verified"   │      │
+│  │    Full read/write to employee workspace               │      │
+│  │    → 3-tier routing: always-on? → position? → default  │      │
+│  │    → AgentCore (Firecracker microVM per emp-id)        │      │
+│  │    → workspace_assembler: SOUL + IDENTITY + channels   │      │
+│  │    → OpenClaw + Bedrock → Response                     │      │
+│  └────────────────────────────────────────────────────────┘      │
+│                                                                  │
+│  PATH 5: Digital Twin (public URL, no auth)                      │
 │  ┌────────────────────────────────────────────────────────┐      │
 │  │  GET /twin/{token} → public HTML chat page             │      │
 │  │  POST /public/twin/{token}/chat                        │      │
-│  │    ↓ Lookup token → employee_id                        │      │
-│  │    ↓ Tenant Router (channel=twin)                      │      │
-│  │    ↓ Agent gets "DIGITAL TWIN MODE" injected in SOUL   │      │
-│  │    ↓ Responds as employee's AI representative          │      │
+│  │    Lookup token → employee_id                          │      │
+│  │    session_id prefix: twin__emp-id__                   │      │
+│  │    SESSION_CONTEXT.md → "Digital Twin, caller          │      │
+│  │      unverified, visible to employee in Portal"        │      │
+│  │    Separate twin_workspace (not employee's main)       │      │
 │  └────────────────────────────────────────────────────────┘      │
 │                                                                  │
 │  PATH C: Always-on Shared Agents                                 │
