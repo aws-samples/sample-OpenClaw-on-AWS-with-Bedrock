@@ -430,10 +430,6 @@ Resources:
           exec > >(tee /var/log/openclaw-setup.log)
           exec 2>&1
           
-          echo "=========================================="
-          echo "OpenClaw AWS Native Setup: $(date)"
-          echo "=========================================="
-          
           export DEBIAN_FRONTEND=noninteractive
           
           # Mount data volume
@@ -542,16 +538,16 @@ Resources:
           ARCH=$(uname -m)
           if [ "$ARCH" = "aarch64" ]; then
             echo "ARM64 detected, installing with --ignore-scripts to skip native build..."
-            npm install -g openclaw@latest --timeout=300000 --ignore-scripts || {
+            npm install -g openclaw@2026.3.24 --timeout=300000 --ignore-scripts || {
               echo "OpenClaw installation failed on arm64, retrying..."
               npm cache clean --force
-              npm install -g openclaw@latest --timeout=300000 --ignore-scripts
+              npm install -g openclaw@2026.3.24 --timeout=300000 --ignore-scripts
             }
           else
-            npm install -g openclaw@latest --timeout=300000 || {
+            npm install -g openclaw@2026.3.24 --timeout=300000 || {
               echo "OpenClaw installation failed, retrying..."
               npm cache clean --force
-              npm install -g openclaw@latest --timeout=300000
+              npm install -g openclaw@2026.3.24 --timeout=300000
             }
           fi
           
@@ -666,11 +662,7 @@ Resources:
           # Install and start gateway
           # Wait for user@1000 systemd session to be ready
           for i in $(seq 1 15); do
-            if [ -S /run/user/1000/bus ]; then
-              echo "User systemd session ready"
-              break
-            fi
-            echo "Waiting for user session... $i/15"
+            [ -S /run/user/1000/bus ] && break
             sleep 2
           done
           
@@ -683,13 +675,8 @@ Resources:
           '
           
           # Wait for daemon to be ready and verify port 18789 is listening
-          echo "Waiting for OpenClaw daemon to start..."
           for i in $(seq 1 30); do
-            if ss -tlnp 2>/dev/null | grep -q ':18789'; then
-              echo "OpenClaw daemon is up on port 18789"
-              break
-            fi
-            echo "Attempt $i/30: port 18789 not ready yet, waiting..."
+            ss -tlnp 2>/dev/null | grep -q ':18789' && break
             sleep 2
           done
           
@@ -719,52 +706,10 @@ Resources:
           
           # Feishu/Lark (community plugin)
           npm install -g openclaw-feishu@latest --timeout=60000 2>/dev/null || echo "Feishu plugin install skipped"
+
+          # WeChat personal (Tencent official plugin)
+          openclaw plugins install @tencent/openclaw-weixin@latest 2>/dev/null || echo "WeChat plugin install skipped"
           '
-          
-          # Create SOUL.md — first-message onboarding prompt
-          sudo -u ubuntu cat > /home/ubuntu/.openclaw/SOUL.md << 'SOUL_EOF'
-          # OpenClaw on AWS
-
-          You are an AI assistant running on AWS with Amazon Bedrock. You are helpful, concise, and friendly.
-
-          ## First Conversation
-
-          When a user sends their very first message (no prior conversation history), start by warmly greeting them and then help them connect a messaging platform. Say something like:
-
-          "Welcome! I'm your AI assistant running on AWS. Before we dive in, let's connect me to your favorite messaging app so you can chat with me anytime.
-
-          Which platform would you like to connect?
-          1. 📱 WhatsApp — scan a QR code from your phone
-          2. ✈️ Telegram — create a bot via @BotFather
-          3. 🎮 Discord — add me to your server
-          4. 💼 Slack — install me in your workspace
-          5. 🐦 Feishu/Lark — connect via webhook bridge
-
-          Just reply with a number or platform name, and I'll walk you through the setup step by step."
-
-          After the user chooses, guide them through the specific setup:
-
-          **WhatsApp**: Tell them to go to the Web UI (Channels → Add Channel → WhatsApp), then on their phone: WhatsApp → Settings → Linked Devices → Link a Device → scan the QR code.
-
-          **Telegram**: Tell them to message @BotFather on Telegram, send /newbot, choose a name and username (must end with 'bot'), copy the token, then paste it in Web UI (Channels → Add Channel → Telegram).
-
-          **Discord**: Tell them to visit discord.com/developers/applications, create a new app, go to Bot → Add Bot, copy the token, enable Message Content Intent, generate an invite URL, then paste the token in Web UI (Channels → Add Channel → Discord).
-
-          **Slack**: Tell them to visit api.slack.com/apps, create a new app, add bot scopes (chat:write, channels:history), install to workspace, copy the Bot User OAuth Token, then paste in Web UI (Channels → Add Channel → Slack).
-
-          **Feishu/Lark**: Tell them this uses a community bridge plugin. They need to configure their Feishu bot credentials in the Web UI. Point them to the docs: https://docs.openclaw.ai/channels or the community plugin page.
-
-          ## Ongoing Conversations
-
-          After the first conversation, be a helpful general-purpose assistant. You can:
-          - Answer questions using web search
-          - Help with coding, writing, analysis
-          - Manage tasks and reminders
-          - Process files and documents
-
-          Be concise. Get to the point. If there's a good answer, give it directly.
-          SOUL_EOF
-          chown ubuntu:ubuntu /home/ubuntu/.openclaw/SOUL.md
           
           # Save token to SSM Parameter Store (encrypted, never written to disk)
           STACK_NAME="${AWS::StackName}"
@@ -783,28 +728,13 @@ Resources:
           # Create SSM access script (retrieves token from SSM at runtime — never stored on disk)
           cat > /home/ubuntu/ssm-portforward.sh << 'SSMEOF'
           #!/bin/bash
-          IMDS_TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-          INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-          REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
-          STACK_NAME=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=aws:cloudformation:stack-name" --query "Tags[0].Value" --output text --region $REGION)
-          TOKEN=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/gateway-token" --with-decryption --query Parameter.Value --output text --region $REGION)
-
-          echo "=========================================="
-          echo "OpenClaw SSM Port Forwarding"
-          echo "=========================================="
-          echo ""
-          echo "Run on your local computer:"
-          echo ""
-          echo "aws ssm start-session \\"
-          echo "  --target $INSTANCE_ID \\"
-          echo "  --region $REGION \\"
-          echo "  --document-name AWS-StartPortForwardingSession \\"
-          echo "  --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'"
-          echo ""
-          echo "Then open in browser:"
-          echo "http://localhost:18789/?token=$TOKEN"
-          echo ""
-          echo "=========================================="
+          T=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          ID=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/instance-id)
+          R=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/placement/region)
+          SN=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$ID" "Name=key,Values=aws:cloudformation:stack-name" --query "Tags[0].Value" --output text --region $R)
+          TK=$(aws ssm get-parameter --name "/openclaw/$SN/gateway-token" --with-decryption --query Parameter.Value --output text --region $R)
+          echo "Port forward: aws ssm start-session --target $ID --region $R --document-name AWS-StartPortForwardingSession --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'"
+          echo "Browser: http://localhost:18789/?token=$TK"
           SSMEOF
           chmod +x /home/ubuntu/ssm-portforward.sh
           chown ubuntu:ubuntu /home/ubuntu/ssm-portforward.sh
@@ -834,10 +764,6 @@ Resources:
 
           echo "Signal sent successfully"
           
-          echo "=========================================="
-          echo "OpenClaw installation complete!"
-          echo "Token stored in SSM Parameter Store"
-          echo "=========================================="
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance"
