@@ -276,6 +276,14 @@ echo "[entrypoint] Background sync PID=${BG_PID}"
 cleanup() {
     echo "[entrypoint] SIGTERM — flushing workspace"
 
+    # Step 0: Deregister SSM endpoint so Tenant Router stops routing to this container
+    if [ -n "${SHARED_AGENT_ID:-}" ]; then
+        aws ssm delete-parameter \
+            --name "/openclaw/${STACK_NAME}/always-on/${SHARED_AGENT_ID}/endpoint" \
+            --region "$AWS_REGION" 2>/dev/null || true
+        echo "[entrypoint] SSM endpoint deregistered for ${SHARED_AGENT_ID}"
+    fi
+
     # Step 1: Stop server first — no new requests during shutdown
     kill "$SERVER_PID" 2>/dev/null || true
 
@@ -306,11 +314,11 @@ cleanup() {
         if [ "$EFS_MODE" = "true" ]; then
             # EFS → S3 snapshot: only memory + MEMORY.md (other files already in S3 from bootstrap)
             echo "[entrypoint] EFS → S3 cross-mode snapshot..."
-            aws s3 sync "$WORKSPACE/memory/" "${SYNC_TARGET}memory/" \
+            timeout 15 aws s3 sync "$WORKSPACE/memory/" "${SYNC_TARGET}memory/" \
                 --region "$AWS_REGION" --quiet 2>/dev/null || true
-            aws s3 cp "$WORKSPACE/MEMORY.md" "${SYNC_TARGET}MEMORY.md" \
+            timeout 10 aws s3 cp "$WORKSPACE/MEMORY.md" "${SYNC_TARGET}MEMORY.md" \
                 --region "$AWS_REGION" --quiet 2>/dev/null || true
-            aws s3 cp "$WORKSPACE/HEARTBEAT.md" "${SYNC_TARGET}HEARTBEAT.md" \
+            timeout 10 aws s3 cp "$WORKSPACE/HEARTBEAT.md" "${SYNC_TARGET}HEARTBEAT.md" \
                 --region "$AWS_REGION" --quiet 2>/dev/null || true
         else
             # Standard S3 mode: full sync

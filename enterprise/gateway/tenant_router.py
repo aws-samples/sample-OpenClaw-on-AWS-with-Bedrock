@@ -225,9 +225,8 @@ def derive_tenant_id(channel: str, user_id: str) -> str:
     sanitized = re.sub(r"[^a-zA-Z0-9_.\-]", "_", user_id.strip())
 
     # Hash suffix ensures minimum 33 chars for AgentCore runtimeSessionId
-    # 19 hex chars ensures even short channel+user combos reach 33+ chars
-    from datetime import date as _d
-    hash_suffix = hashlib.sha256(f"{channel}:{user_id}:{_d.today().strftime('%Y%m%d')}".encode()).hexdigest()[:19]
+    # Stable across days — Session Storage persists across stop/resume cycles
+    hash_suffix = hashlib.sha256(f"{channel}:{user_id}".encode()).hexdigest()[:19]
     tenant_id = f"{channel_short}__{sanitized}__{hash_suffix}"
 
     # Pad to 33 chars minimum if still too short

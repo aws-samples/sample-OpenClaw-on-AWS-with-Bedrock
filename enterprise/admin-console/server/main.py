@@ -5829,6 +5829,7 @@ def start_always_on_agent(agent_id: str, authorization: str = Header(default="")
                         {"name": "DYNAMODB_TABLE",     "value": ddb_table},
                         {"name": "DYNAMODB_REGION",    "value": ddb_region},
                         {"name": "SYNC_INTERVAL",      "value": "120"},
+                        {"name": "EFS_ENABLED",        "value": "true"},
                         # Plan A: direct IM — inject bot tokens if provisioned
                         {"name": "TELEGRAM_BOT_TOKEN", "value": telegram_token},
                         {"name": "DISCORD_BOT_TOKEN",  "value": discord_token},
@@ -5914,8 +5915,8 @@ def stop_always_on_agent(agent_id: str, authorization: str = Header(default=""))
         ddb = _b3d2.resource("dynamodb", region_name=ddb_region)
         ddb.Table(os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")).update_item(
             Key={"PK": "ORG#acme", "SK": f"AGENT#{agent_id}"},
-            UpdateExpression="SET deployMode = :m, containerStatus = :s REMOVE ecsTaskArn",
-            ExpressionAttributeValues={":m": "personal", ":s": "stopped"},
+            UpdateExpression="SET deployMode = :m, containerStatus = :s, ecsTaskArn = :empty",
+            ExpressionAttributeValues={":m": "serverless", ":s": "stopped", ":empty": ""},
         )
     except Exception:
         pass
@@ -6041,6 +6042,7 @@ def reload_always_on_agent(agent_id: str, body: dict, authorization: str = Heade
                     {"name": "DYNAMODB_TABLE",     "value": ddb_table},
                     {"name": "DYNAMODB_REGION",    "value": ddb_region},
                     {"name": "SYNC_INTERVAL",      "value": "120"},
+                    {"name": "EFS_ENABLED",        "value": "true"},
                     {"name": "TELEGRAM_BOT_TOKEN", "value": telegram_token},
                     {"name": "DISCORD_BOT_TOKEN",  "value": discord_token},
                 ],
