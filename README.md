@@ -320,7 +320,7 @@ Built on top of the Multi-Tenant AgentCore Runtime, the Enterprise platform adds
 | 26 skills | Role-filtered with `allowedRoles`/`blockedRoles` manifests |
 | Sample org | 20 employees, 20 agents, 13 departments — seed scripts included |
 
-**[→ Enterprise Platform Guide](enterprise/README.md)** · **[→ Enterprise Roadmap](enterprise/ROADMAP.md)**
+**[→ Enterprise Platform Guide](README_ENTERPRISE.md)** · **[→ Enterprise Roadmap](enterprise/ROADMAP.md)**
 
 ### macOS (Apple Silicon) — For iOS/macOS Development
 
