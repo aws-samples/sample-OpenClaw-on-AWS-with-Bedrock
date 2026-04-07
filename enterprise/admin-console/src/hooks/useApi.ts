@@ -1071,7 +1071,8 @@ export function useInstallOperator() {
 export interface EksDeployParams {
   agentId: string;
   model?: string;
-  registry?: string;
+  image?: string;
+  globalRegistry?: string;
   bedrockRoleArn?: string;
   skills?: string[];
   storageClass?: string;

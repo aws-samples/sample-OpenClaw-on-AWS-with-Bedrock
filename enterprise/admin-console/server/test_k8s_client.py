@@ -165,7 +165,7 @@ class TestCreateOpenClawInstance(unittest.IsolatedAsyncioTestCase):
         await self.client.create_openclaw_instance(
             namespace="openclaw", agent_name="agt-1", employee_id="emp-1",
             position_id="pos-sde", model="m",
-            registry="834204282212.dkr.ecr.cn-northwest-1.amazonaws.com.cn/agent:v2",
+            image="834204282212.dkr.ecr.cn-northwest-1.amazonaws.com.cn/agent:v2",
         )
         body = self.client._custom_objects.create_namespaced_custom_object.call_args[1]["body"]
         self.assertEqual(body["spec"]["image"]["repository"],
@@ -178,7 +178,7 @@ class TestCreateOpenClawInstance(unittest.IsolatedAsyncioTestCase):
         await self.client.create_openclaw_instance(
             namespace="openclaw", agent_name="agt-1", employee_id="emp-1",
             position_id="pos-sde", model="m",
-            registry="834204282212.dkr.ecr.cn-northwest-1.amazonaws.com.cn/agent",
+            image="834204282212.dkr.ecr.cn-northwest-1.amazonaws.com.cn/agent",
         )
         body = self.client._custom_objects.create_namespaced_custom_object.call_args[1]["body"]
         self.assertEqual(body["spec"]["image"]["repository"],

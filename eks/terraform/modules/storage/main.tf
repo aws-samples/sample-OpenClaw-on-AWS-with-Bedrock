@@ -6,7 +6,8 @@ resource "kubernetes_storage_class_v1" "ebs_gp3" {
   metadata {
     name = "ebs-sc"
     annotations = {
-      "storageclass.kubernetes.io/is-default-class" = "true"
+      # EFS is the default when enabled; EBS is fallback for block storage workloads
+      "storageclass.kubernetes.io/is-default-class" = var.enable_efs ? "false" : "true"
     }
   }
 
@@ -94,6 +95,9 @@ resource "kubernetes_storage_class_v1" "efs" {
 
   metadata {
     name = "efs-sc"
+    annotations = {
+      "storageclass.kubernetes.io/is-default-class" = "true"
+    }
   }
 
   storage_provisioner = "efs.csi.aws.com"

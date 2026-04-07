@@ -71,7 +71,8 @@ class K8sClient:
         employee_id: str,
         position_id: str,
         model: str,
-        registry: str = "",
+        image: str = "",
+        global_registry: str = "",
         bedrock_role_arn: str = "",
         workspace_files: Optional[dict] = None,
         skills: Optional[list] = None,
@@ -98,6 +99,12 @@ class K8sClient:
         seeded once via init-workspace container (never overwritten on restart).
 
         Args:
+            image: Container image URI for the main openclaw container (e.g. ECR URI).
+                   Overrides spec.image.repository/tag.
+            global_registry: Global registry override (spec.registry). Rewrites the registry
+                   portion of ALL container images (main, sidecars, init containers).
+                   Required for China regions where ghcr.io is inaccessible.
+                   Example: "834204282212.dkr.ecr.cn-northwest-1.amazonaws.com.cn"
             workspace_files: Dict of filename->content to seed into workspace.
             skills: List of ClawHub skill identifiers to install via init container.
             cpu_request/cpu_limit/memory_request/memory_limit: Compute resources.
@@ -180,7 +187,7 @@ class K8sClient:
 
         # Image: use agent-container ECR image if available, otherwise default
         # to the standard openclaw image (operator default: ghcr.io/openclaw/openclaw).
-        agent_ecr_image = registry or os.environ.get("AGENT_ECR_IMAGE", "")
+        agent_ecr_image = image or os.environ.get("AGENT_ECR_IMAGE", "")
         image_spec = {}
         if agent_ecr_image:
             # ECR URI may include tag (e.g. 123456.dkr.ecr.us-west-2.amazonaws.com/repo:tag)
@@ -193,6 +200,11 @@ class K8sClient:
                 "tag": tag,
                 "pullPolicy": "Always",
             }
+
+        # Global registry override — rewrites the registry portion of ALL images
+        # (main container, sidecars, init containers). Required for China regions
+        # where ghcr.io/docker.io are inaccessible. Images must be pre-mirrored.
+        registry_override = global_registry or os.environ.get("OPENCLAW_REGISTRY", "")
 
         # IRSA annotation for Bedrock access
         rbac_spec = {}
@@ -240,6 +252,7 @@ class K8sClient:
                 },
             },
             "spec": {
+                **({"registry": registry_override} if registry_override else {}),
                 **({"image": image_spec} if image_spec else {}),
                 "env": env_vars,
                 "config": {

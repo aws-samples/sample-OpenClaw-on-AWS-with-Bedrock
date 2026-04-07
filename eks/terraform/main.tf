@@ -15,20 +15,30 @@ provider "helm" {
     token                  = data.aws_eks_cluster_auth.this.token
   }
 
-  registry {
-    url      = "oci://public.ecr.aws"
-    username = "AWS"
-    password = data.aws_ecrpublic_authorization_token.this.password
+  # ECR Public OCI registry — auth required in global regions, anonymous in China
+  # (aws-cn partition cannot reach the us-east-1 ecrpublic endpoint)
+  dynamic "registry" {
+    for_each = local.is_china_region ? [] : [1]
+    content {
+      url      = "oci://public.ecr.aws"
+      username = "AWS"
+      password = data.aws_ecrpublic_authorization_token.this[0].password
+    }
   }
 }
 
+# ECR Public auth token — only available in global regions (requires us-east-1)
 data "aws_ecrpublic_authorization_token" "this" {
+  count    = local.is_china_region ? 0 : 1
   provider = aws.us_east_1
 }
 
+# us-east-1 provider alias for ECR Public token
+# In China partition this alias still exists but points to the deploy region
+# (the data source using it has count=0 so it's never called)
 provider "aws" {
   alias  = "us_east_1"
-  region = "us-east-1"
+  region = startswith(var.region, "cn-") ? var.region : "us-east-1"
 }
 
 provider "kubectl" {

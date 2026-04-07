@@ -352,6 +352,10 @@ function DeployEksModal({ agents, onDeploy, isPending, error, onClose }: {
   const [model, setModel] = useState(DEFAULT_MODELS[0].value);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  // Image overrides
+  const [imageOverride, setImageOverride] = useState('');
+  const [globalRegistry, setGlobalRegistry] = useState('');
+
   // Resources
   const [cpuRequest, setCpuRequest] = useState('500m');
   const [cpuLimit, setCpuLimit] = useState('2');
@@ -379,6 +383,10 @@ function DeployEksModal({ agents, onDeploy, isPending, error, onClose }: {
   const handleDeploy = async () => {
     if (!agentId) return;
     const params: EksDeployParams = { agentId, model };
+
+    // Image overrides
+    if (imageOverride) params.image = imageOverride;
+    if (globalRegistry) params.globalRegistry = globalRegistry;
 
     // Only send non-default values
     if (cpuRequest !== '500m') params.cpuRequest = cpuRequest;
@@ -436,6 +444,24 @@ function DeployEksModal({ agents, onDeploy, isPending, error, onClose }: {
           onChange={setModel}
           options={DEFAULT_MODELS}
         />
+
+        {/* Image overrides (important for China) */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Input
+            label="Container Image"
+            value={imageOverride}
+            onChange={setImageOverride}
+            placeholder="default: ghcr.io/openclaw/openclaw:latest"
+            description="Main OpenClaw container image (ECR URI for custom builds)"
+          />
+          <Input
+            label="Global Registry"
+            value={globalRegistry}
+            onChange={setGlobalRegistry}
+            placeholder="e.g. 834204282212.dkr.ecr.cn-northwest-1.amazonaws.com.cn"
+            description="Rewrites registry for ALL images (required for China regions)"
+          />
+        </div>
 
         {/* Resource presets */}
         <div>

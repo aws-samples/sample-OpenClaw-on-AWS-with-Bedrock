@@ -358,7 +358,9 @@ async def deploy_eks_agent(agent_id: str, body: dict = {}, authorization: str = 
 
     Body (all optional):
       - model: Bedrock model (default: env DEFAULT_MODEL)
-      - registry: ECR image URI (default: env AGENT_ECR_IMAGE)
+      - image: Container image URI for openclaw (default: env AGENT_ECR_IMAGE)
+      - globalRegistry: Global registry override for ALL images (default: env OPENCLAW_REGISTRY).
+            Required for China where ghcr.io is inaccessible. Images must be pre-mirrored.
       - bedrockRoleArn: IAM role for Bedrock IRSA
       - skills: list of ClawHub skill identifiers to install
       - storageClass: K8s StorageClass name (default: cluster default)
@@ -391,7 +393,8 @@ async def deploy_eks_agent(agent_id: str, body: dict = {}, authorization: str = 
     pos_id = agent.get("positionId", "")
     model = body.get("model", os.environ.get(
         "DEFAULT_MODEL", "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0"))
-    registry = body.get("registry", os.environ.get("AGENT_ECR_IMAGE", ""))
+    image = body.get("image", os.environ.get("AGENT_ECR_IMAGE", ""))
+    global_registry = body.get("globalRegistry", os.environ.get("OPENCLAW_REGISTRY", ""))
     bedrock_role_arn = body.get("bedrockRoleArn", os.environ.get("BEDROCK_ROLE_ARN", ""))
     skills = body.get("skills", [])
     storage_class = body.get("storageClass", os.environ.get("EKS_STORAGE_CLASS", ""))
@@ -417,7 +420,8 @@ async def deploy_eks_agent(agent_id: str, body: dict = {}, authorization: str = 
             employee_id=emp_id,
             position_id=pos_id,
             model=model,
-            registry=registry,
+            image=image,
+            global_registry=global_registry,
             bedrock_role_arn=bedrock_role_arn,
             workspace_files=workspace_files or None,
             skills=skills or None,

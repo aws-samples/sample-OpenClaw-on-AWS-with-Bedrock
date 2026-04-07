@@ -216,6 +216,58 @@ resource "aws_iam_role_policy" "admin_console" {
 }
 
 # -----------------------------------------------------------------------------
+# RBAC — Admin Console needs K8s API access to manage OpenClawInstance CRDs,
+# read pods/logs/deployments (operator status), and list CRDs.
+# -----------------------------------------------------------------------------
+resource "kubernetes_cluster_role_v1" "admin_console" {
+  metadata {
+    name = "admin-console"
+  }
+
+  rule {
+    api_groups = ["openclaw.rocks"]
+    resources  = ["openclawinstances", "openclawselfconfigs"]
+    verbs      = ["get", "list", "watch", "create", "update", "patch", "delete"]
+  }
+
+  rule {
+    api_groups = [""]
+    resources  = ["pods", "pods/log", "services", "serviceaccounts", "namespaces"]
+    verbs      = ["get", "list", "watch"]
+  }
+
+  rule {
+    api_groups = ["apps"]
+    resources  = ["deployments", "statefulsets"]
+    verbs      = ["get", "list", "watch"]
+  }
+
+  rule {
+    api_groups = ["apiextensions.k8s.io"]
+    resources  = ["customresourcedefinitions"]
+    verbs      = ["get", "list"]
+  }
+}
+
+resource "kubernetes_cluster_role_binding_v1" "admin_console" {
+  metadata {
+    name = "admin-console"
+  }
+
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "ClusterRole"
+    name      = kubernetes_cluster_role_v1.admin_console.metadata[0].name
+  }
+
+  subject {
+    kind      = "ServiceAccount"
+    name      = local.service_account
+    namespace = var.openclaw_namespace
+  }
+}
+
+# -----------------------------------------------------------------------------
 # EKS Pod Identity Association
 # -----------------------------------------------------------------------------
 resource "kubernetes_service_account_v1" "admin_console" {
