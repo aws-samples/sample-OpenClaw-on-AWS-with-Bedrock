@@ -1,0 +1,48 @@
+# OpenClaw instance with Kata Containers VM-level isolation
+apiVersion: openclaw.rocks/v1alpha1
+kind: OpenClawInstance
+metadata:
+  name: openclaw-kata
+  namespace: openclaw
+spec:
+  image:
+    repository: ghcr.io/openclaw/openclaw
+    tag: latest
+
+  config:
+    raw:
+      agents:
+        defaults:
+          model:
+            primary: "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+  security:
+    rbac:
+      serviceAccountAnnotations:
+        eks.amazonaws.com/role-arn: "REPLACE_WITH_BEDROCK_ROLE_ARN"
+
+  availability:
+    runtimeClassName: kata-qemu
+    nodeSelector:
+      katacontainers.io/kata-runtime: "true"
+    tolerations:
+      - key: kata
+        value: "true"
+        effect: NoSchedule
+
+  gateway:
+    enabled: true
+
+  storage:
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: efs-sc
+
+  resources:
+    requests:
+      cpu: "600m"
+      memory: "1200Mi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"

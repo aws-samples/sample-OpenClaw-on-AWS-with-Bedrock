@@ -1,0 +1,40 @@
+# Basic OpenClaw instance using AWS Bedrock via IRSA
+apiVersion: openclaw.rocks/v1alpha1
+kind: OpenClawInstance
+metadata:
+  name: openclaw-demo
+  namespace: openclaw
+spec:
+  image:
+    repository: ghcr.io/openclaw/openclaw
+    tag: latest
+
+  config:
+    raw:
+      agents:
+        defaults:
+          model:
+            primary: "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+  security:
+    rbac:
+      serviceAccountAnnotations:
+        # Replace with your Bedrock IRSA role ARN from terraform output
+        eks.amazonaws.com/role-arn: "REPLACE_WITH_BEDROCK_ROLE_ARN"
+
+  gateway:
+    enabled: true
+
+  storage:
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: efs-sc
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"

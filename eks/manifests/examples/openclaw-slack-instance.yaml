@@ -1,0 +1,48 @@
+# OpenClaw instance with Slack integration
+apiVersion: openclaw.rocks/v1alpha1
+kind: OpenClawInstance
+metadata:
+  name: openclaw-slack
+  namespace: openclaw
+spec:
+  image:
+    repository: ghcr.io/openclaw/openclaw
+    tag: latest
+
+  config:
+    raw:
+      agents:
+        defaults:
+          model:
+            primary: "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+  envFrom:
+    - secretRef:
+        name: openclaw-slack-credentials
+        # Create this secret with:
+        # kubectl create secret generic openclaw-slack-credentials \
+        #   --from-literal=SLACK_BOT_TOKEN=xoxb-... \
+        #   --from-literal=SLACK_APP_TOKEN=xapp-... \
+        #   -n openclaw
+
+  security:
+    rbac:
+      serviceAccountAnnotations:
+        eks.amazonaws.com/role-arn: "REPLACE_WITH_BEDROCK_ROLE_ARN"
+
+  gateway:
+    enabled: true
+
+  storage:
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: efs-sc
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"

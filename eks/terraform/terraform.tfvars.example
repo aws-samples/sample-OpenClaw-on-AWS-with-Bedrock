@@ -1,0 +1,22 @@
+# OpenClaw EKS Deployment Configuration
+#
+# Recommended: use the interactive wizard instead of editing this file:
+#   ./scripts/install.sh            # Interactive wizard
+#   ./scripts/install.sh workshop   # Workshop preset (fastest)
+#
+# Or copy this file to terraform.tfvars and customize:
+
+region           = "us-west-2"
+name             = "openclaw-eks"
+architecture     = "arm64"        # arm64 (Graviton, ~30% cheaper) or x86
+enable_efs       = true           # EFS for workspace persistence
+
+# Firecracker VM isolation (requires bare-metal, ~$4/hr on-demand)
+# enable_kata      = true
+# kata_hypervisor  = "fc"
+# enable_karpenter = true
+
+# Optional features
+# enable_alb_controller = true    # ALB Ingress controller
+# enable_monitoring     = true    # Prometheus + Grafana
+# enable_litellm        = true    # Multi-model AI proxy
