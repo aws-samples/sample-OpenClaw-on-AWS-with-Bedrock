@@ -171,7 +171,10 @@ Switch models with one CloudFormation parameter — no code changes:
 |-------|---------------------------|----------|
 | **Nova 2 Lite** (default) | $0.30 / $2.50 | Everyday tasks, 90% cheaper than Claude |
 | Nova Pro | $0.80 / $3.20 | Balanced performance, multimodal |
+| Claude Opus 4.6 | $15.00 / $75.00 | Most capable, complex agentic tasks |
+| Claude Opus 4.5 | $15.00 / $75.00 | Deep analysis, extended thinking |
 | Claude Sonnet 4.5 | $3.00 / $15.00 | Complex reasoning, coding |
+| Claude Sonnet 4 | $3.00 / $15.00 | Reliable coding and analysis |
 | Claude Haiku 4.5 | $1.00 / $5.00 | Fast and efficient |
 | DeepSeek R1 | $0.55 / $2.19 | Open-source reasoning |
 | Llama 3.3 70B | — | Open-source alternative |
