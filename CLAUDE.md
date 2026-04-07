@@ -15,10 +15,24 @@ This is **not** an application codebase -- it is infrastructure-as-code (CloudFo
 ├── .kiro/
 │   └── steering/
 │       └── deploy-moltbot-conversationally.md  # Kiro AI deployment guide (~1300 lines)
+├── eks/                           # EKS deployment (Terraform + scripts)
+│   ├── terraform/                 # Terraform modules (VPC, EKS, operator, admin-console, etc.)
+│   ├── manifests/                 # K8s manifest examples
+│   └── scripts/                   # Install, cleanup, validate scripts
+├── enterprise/                    # Enterprise platform (Admin Console, Agent Container, Gateway)
+│   ├── admin-console/             # React + FastAPI admin console
+│   │   ├── server/                # FastAPI backend (routers, services, db, s3ops)
+│   │   ├── src/                   # React frontend (pages, hooks, components)
+│   │   ├── Dockerfile             # Multi-stage build (Node + Python)
+│   │   └── deploy-eks.sh          # Standalone EKS deploy script
+│   ├── agent-container/           # OpenClaw agent Docker image
+│   └── gateway/                   # Tenant Router, Bedrock H2 Proxy
 ├── images/                        # Screenshots for documentation
+├── docs/
+│   └── DEPLOYMENT_EKS.md          # EKS deployment guide
 ├── README.md                      # Primary documentation (English)
 ├── README_CN.md                   # Chinese documentation
-├── DEPLOYMENT.md                  # Step-by-step deployment guide
+├── DEPLOYMENT.md                  # Step-by-step deployment guide (EC2)
 ├── SECURITY.md                    # Security architecture and best practices
 ├── TROUBLESHOOTING.md             # Common issues and resolution steps
 ├── QUICK_START_KIRO.md            # Kiro AI-guided deployment quickstart

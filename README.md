@@ -326,6 +326,25 @@ Built on top of the Multi-Tenant AgentCore Runtime, the Enterprise platform adds
 
 **[→ Enterprise Platform Guide](README_ENTERPRISE.md)** · **[→ Enterprise Roadmap](enterprise/ROADMAP.md)**
 
+### EKS (Kubernetes) — For Container-Native Deployments
+
+> Run the Enterprise Admin Console and OpenClaw agents on Amazon EKS. Uses the OpenClaw Operator (Helm) to manage agent pods via `OpenClawInstance` CRDs.
+
+```bash
+cd enterprise/admin-console
+bash deploy-eks.sh --cluster YOUR_CLUSTER --region us-west-2 --password YOUR_PASSWORD
+```
+
+| Feature | Details |
+|---------|---------|
+| **Admin Console on K8s** | FastAPI + React as a Deployment, Pod Identity for AWS access |
+| **Three runtimes** | Serverless (AgentCore) + ECS (Fargate) + **EKS (CRD-managed pods)** |
+| **Operator-managed** | OpenClaw Operator watches CRDs, creates StatefulSet + Service + PVC |
+| **Terraform module** | `eks/terraform/modules/admin-console/` — DynamoDB, S3, ECR, Pod Identity |
+| **Cluster association** | Discover and associate EKS clusters from the UI (Settings → EKS) |
+
+**[→ EKS Deployment Guide](docs/DEPLOYMENT_EKS.md)**
+
 ### macOS (Apple Silicon) — For iOS/macOS Development
 
 | Type | Chip | RAM | Monthly |

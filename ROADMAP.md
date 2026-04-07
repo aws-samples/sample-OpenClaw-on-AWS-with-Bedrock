@@ -96,7 +96,18 @@ Target: **v1.0 by April 30, 2026** — production-ready multi-tenant OpenClaw pl
 
 ---
 
-## Week 4: Apr 7-13 — Agent Orchestration & Hierarchy
+## Week 4: Apr 7-13 — EKS Runtime + Agent Orchestration
+
+### EKS as Third Runtime Backend ✅
+- [x] K8s client service (`kubernetes-asyncio`): CRD CRUD, pod status/logs, operator management
+- [x] Admin EKS router: deploy/stop/reload/status/logs, cluster discover/associate, operator install/upgrade
+- [x] 3-tier tenant routing: ECS → EKS → AgentCore (serverless fallback)
+- [x] Frontend: EKS tab in Settings (cluster/operator) and Agent Factory (instances)
+- [x] Terraform module: DynamoDB, S3, ECR, IAM with Pod Identity
+- [x] Standalone `deploy-eks.sh` script (no Terraform required)
+- [x] Dockerfile for containerized deployment
+- [x] 73 unit tests (k8s_client, admin_eks router, routing)
+- [x] Deployed to dev-cluster (us-west-2)
 
 ### Agent Orchestration
 - [ ] Agent-to-agent invocation via AgentCore session

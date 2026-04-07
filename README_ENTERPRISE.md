@@ -24,7 +24,7 @@ Most enterprise AI deployments either charge per seat or run dedicated compute p
 
 ---
 
-## Two Deployment Modes: Serverless + Always-on
+## Three Deployment Modes: Serverless + ECS + EKS
 
 Every agent uses the same Docker image. Admin chooses the deployment mode per agent based on the use case — no code changes, no separate builds.
 
@@ -49,7 +49,19 @@ Every agent uses the same Docker image. Admin chooses the deployment mode per ag
 | **Persistence** | EFS-backed workspace — durable across container restarts |
 | **Best for** | Customer service bots, executive assistants with frequent cron tasks, high-traffic Digital Twins |
 
-Admin selects deployment mode when creating an agent in **Agent Factory**. Any agent can be always-on — whether it serves one employee or multiple. An always-on agent gets a dedicated ECS Fargate container with auto-restart.
+### EKS (Kubernetes) — For Container-Native Infrastructure
+
+| | Behavior |
+|-|---------|
+| **Cold start** | None — pod is always running |
+| **Operator-managed** | OpenClaw Operator watches `OpenClawInstance` CRDs → StatefulSet + Service + PVC |
+| **Persistence** | EFS/EBS-backed PVC — durable across pod restarts |
+| **Cluster management** | Discover and associate EKS clusters from the Admin Console (Settings → EKS) |
+| **Best for** | Teams already running on Kubernetes, multi-cluster deployments, Graviton/GPU workloads |
+
+Admin selects deployment mode when creating an agent in **Agent Factory**. The Agent Factory shows all three runtime tabs (Serverless, ECS, EKS) with live instance status.
+
+**[→ EKS Deployment Guide](docs/DEPLOYMENT_EKS.md)**
 
 ---
 
