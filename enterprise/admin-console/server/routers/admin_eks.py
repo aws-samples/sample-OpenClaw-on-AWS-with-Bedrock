@@ -666,6 +666,120 @@ async def unassign_eks_from_employee(agent_id: str, emp_id: str, authorization: 
 
 
 # =========================================================================
+# IM Bot Tokens (EKS) — stored in K8s Secret, injected via CRD env
+# =========================================================================
+
+_TOKEN_CHANNELS = [
+    ("telegram", "TELEGRAM_BOT_TOKEN"),
+    ("discord", "DISCORD_BOT_TOKEN"),
+    ("slack", "SLACK_BOT_TOKEN"),
+    ("feishu", "LARK_APP_SECRET"),
+]
+
+
+def _token_secret_name(agent_id: str) -> str:
+    from services.k8s_client import _sanitize_k8s_name
+    return f"{_sanitize_k8s_name(agent_id)}-im-tokens"
+
+
+@router.put("/api/v1/admin/eks/{agent_id}/tokens")
+async def set_eks_tokens(agent_id: str, body: dict, authorization: str = Header(default="")):
+    """Store IM bot tokens for an EKS agent.
+
+    Tokens are stored in a K8s Secret and injected into the pod via
+    CRD spec.env[].valueFrom.secretKeyRef. A config-version bump
+    triggers the operator to restart the pod with the new tokens.
+
+    Body: { telegramBotToken?, discordBotToken?, slackBotToken?, feishuBotToken?,
+            clearTelegramToken?, clearDiscordToken?, clearSlackToken?, clearFeishuToken? }
+    """
+    require_role(authorization, roles=["admin"])
+
+    secret_name = _token_secret_name(agent_id)
+    from services.k8s_client import _sanitize_k8s_name
+    safe_name = _sanitize_k8s_name(agent_id)
+
+    # Build secret data from request
+    secret_data = {}
+    cleared = []
+    for channel, env_key in _TOKEN_CHANNELS:
+        token = body.get(f"{channel}BotToken", "").strip()
+        if token:
+            secret_data[env_key] = token
+        elif body.get(f"clear{channel.capitalize()}Token"):
+            await k8s_client.delete_secret_key(OPENCLAW_NAMESPACE, secret_name, env_key)
+            cleared.append(channel)
+
+    # Create/update secret with new tokens
+    if secret_data:
+        await k8s_client.upsert_secret(
+            namespace=OPENCLAW_NAMESPACE,
+            name=secret_name,
+            data=secret_data,
+            labels={"app.kubernetes.io/managed-by": "admin-console",
+                    "openclaw.rocks/agent": safe_name},
+        )
+
+    # Read current secret keys to build env patch
+    existing_keys = await k8s_client.get_secret_keys(OPENCLAW_NAMESPACE, secret_name)
+
+    # Build CRD env patch: add valueFrom.secretKeyRef for each token key
+    # Preserve existing non-token env vars from the CRD
+    crd = await k8s_client.get_openclaw_instance(OPENCLAW_NAMESPACE, agent_id)
+    current_env = crd.get("spec", {}).get("env", []) if crd else []
+    # Filter out old token env vars (we'll re-add from secret)
+    token_env_names = {ek for _, ek in _TOKEN_CHANNELS}
+    base_env = [e for e in current_env if e.get("name") not in token_env_names]
+    # Add secretKeyRef entries for each key in the secret
+    for env_key in existing_keys:
+        base_env.append({
+            "name": env_key,
+            "valueFrom": {"secretKeyRef": {"name": secret_name, "key": env_key}},
+        })
+
+    # Patch CRD: update env + bump config-version to trigger pod restart
+    config_version = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    patch = {
+        "metadata": {"annotations": {"openclaw.rocks/config-version": config_version}},
+        "spec": {"env": base_env},
+    }
+    try:
+        await k8s_client.patch_openclaw_instance(OPENCLAW_NAMESPACE, agent_id, patch)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+    saved = {ch: (ek in existing_keys or ek in secret_data)
+             for ch, ek in _TOKEN_CHANNELS}
+    for ch in cleared:
+        saved[ch] = False
+
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change", "actorId": "admin", "actorName": "Admin",
+        "targetType": "agent", "targetId": agent_id,
+        "detail": f"Updated IM bot tokens for EKS agent (secret={secret_name})",
+        "status": "success",
+    })
+
+    return {"saved": saved, "agentId": agent_id, "secretName": secret_name,
+            "note": "Tokens stored in K8s Secret. Pod restarting to activate direct IM."}
+
+
+@router.get("/api/v1/admin/eks/{agent_id}/tokens")
+async def get_eks_tokens(agent_id: str, authorization: str = Header(default="")):
+    """Check which IM tokens are configured for an EKS agent (masked)."""
+    require_role(authorization, roles=["admin"])
+
+    secret_name = _token_secret_name(agent_id)
+    existing_keys = await k8s_client.get_secret_keys(OPENCLAW_NAMESPACE, secret_name)
+
+    result = {}
+    for channel, env_key in _TOKEN_CHANNELS:
+        result[channel] = "configured" if env_key in existing_keys else "not_configured"
+    return result
+
+
+# =========================================================================
 # Gateway Proxy — reverse proxy to EKS agent's OpenClaw Gateway UI
 # =========================================================================
 

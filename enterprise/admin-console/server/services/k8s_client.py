@@ -115,6 +115,65 @@ class K8sClient:
             except Exception as e:
                 return ("", str(e), 1)
 
+    # ─── Secrets ───
+
+    async def upsert_secret(
+        self,
+        namespace: str,
+        name: str,
+        data: dict,
+        labels: Optional[dict] = None,
+    ) -> str:
+        """Create or update an Opaque Secret. Values are plain strings (base64 handled by API).
+        Returns 'created' or 'updated'."""
+        await self.initialize()
+        import base64
+        encoded = {k: base64.b64encode(v.encode()).decode() for k, v in data.items() if v}
+        body = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": name, "namespace": namespace, "labels": labels or {}},
+            "type": "Opaque",
+            "data": encoded,
+        }
+        try:
+            await self._core_v1.read_namespaced_secret(name=name, namespace=namespace)
+            await self._core_v1.patch_namespaced_secret(name=name, namespace=namespace, body=body)
+            return "updated"
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                await self._core_v1.create_namespaced_secret(namespace=namespace, body=body)
+                return "created"
+            raise
+
+    async def delete_secret_key(self, namespace: str, name: str, key: str) -> bool:
+        """Remove a single key from a Secret. Returns True if deleted, False if not found."""
+        await self.initialize()
+        try:
+            secret = await self._core_v1.read_namespaced_secret(name=name, namespace=namespace)
+            if secret.data and key in secret.data:
+                del secret.data[key]
+                # replace (not patch) to actually remove the key
+                await self._core_v1.replace_namespaced_secret(
+                    name=name, namespace=namespace, body=secret)
+                return True
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                return False
+            raise
+        return False
+
+    async def get_secret_keys(self, namespace: str, name: str) -> list:
+        """Return the list of keys in a Secret (no values). Empty list if not found."""
+        await self.initialize()
+        try:
+            secret = await self._core_v1.read_namespaced_secret(name=name, namespace=namespace)
+            return list(secret.data.keys()) if secret.data else []
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                return []
+            raise
+
     # ─── OpenClawInstance CRD ───
 
     async def create_openclaw_instance(
