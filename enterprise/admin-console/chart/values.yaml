@@ -67,6 +67,23 @@ livenessProbe:
   initialDelaySeconds: 10
   periodSeconds: 30
 
+# --- Ingress ---
+ingress:
+  enabled: false
+  className: "alb"  # AWS ALB Ingress Controller
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    # alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:REGION:ACCOUNT:certificate/CERT_ID"
+    # alb.ingress.kubernetes.io/wafv2-acl-arn: "arn:aws:wafv2:REGION:ACCOUNT:regional/webacl/NAME/ID"
+  host: ""          # e.g. admin.openclaw.example.com (empty = ALB DNS name)
+  tls: []
+  #  - secretName: admin-console-tls
+  #    hosts:
+  #      - admin.openclaw.example.com
+
 # --- Node scheduling ---
 nodeSelector: {}
 tolerations: []
