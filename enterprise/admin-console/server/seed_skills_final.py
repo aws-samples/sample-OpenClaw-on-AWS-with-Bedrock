@@ -4,6 +4,9 @@ import json, boto3, os
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-2")
 
 def get_bucket():
+    bucket = os.environ.get("S3_BUCKET", "")
+    if bucket:
+        return bucket
     account = boto3.client("sts", region_name=AWS_REGION).get_caller_identity()["Account"]
     return f"openclaw-tenants-{account}"
 

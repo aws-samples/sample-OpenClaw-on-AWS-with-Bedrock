@@ -450,6 +450,11 @@ else
   $SEED_PYTHON seed_ssm_tenants.py \
     --region "$REGION" --stack "$STACK_NAME" && \
     success "  SSM tenant→position mappings created"
+
+  # Seed skill catalog to S3
+  AWS_REGION="$REGION" S3_BUCKET="$S3_BUCKET" \
+    $SEED_PYTHON seed_skills_final.py && \
+    success "  Skill catalog seeded to S3" || warn "  seed_skills_final.py skipped"
 fi
 
 # ── Step 7: Store secrets + write /etc/openclaw/env ──────────────────────────
