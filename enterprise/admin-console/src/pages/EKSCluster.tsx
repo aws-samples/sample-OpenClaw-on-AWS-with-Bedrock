@@ -72,6 +72,7 @@ export function EksClusterTab() {
   }
 
   const configured = cluster?.configured;
+  const inCluster = cluster?.in_cluster;
   const operator = cluster?.operator;
 
   return (
@@ -80,8 +81,10 @@ export function EksClusterTab() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <StatCard
           title="Cluster"
-          value={configured ? cluster.cluster_name : 'Not configured'}
-          subtitle={configured ? `${cluster.cluster_region} - K8s ${cluster.cluster_version}` : 'Associate an EKS cluster to enable'}
+          value={configured ? (cluster.cluster_name || 'In-cluster') : 'Not configured'}
+          subtitle={configured
+            ? (inCluster ? 'Running inside EKS (auto-detected)' : `${cluster.cluster_region} - K8s ${cluster.cluster_version}`)
+            : 'Associate an EKS cluster to enable'}
           icon={<Cloud size={20} />}
           color={configured ? 'success' : 'warning'}
         />

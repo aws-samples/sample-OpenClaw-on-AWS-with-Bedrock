@@ -39,9 +39,18 @@ def _agent_svc_endpoint(agent_name: str) -> str:
 
 @router.get("/api/v1/admin/eks/cluster")
 async def get_cluster_config(authorization: str = Header(default="")):
-    """Get the currently associated EKS cluster configuration."""
+    """Get the currently associated EKS cluster configuration.
+
+    Returns:
+      - configured: True if a cluster is associated (SSM) or running in-cluster
+      - in_cluster: True if admin console is running inside K8s (auto-detected)
+      - operator: operator status (when K8s API is reachable)
+    """
     require_role(authorization, roles=["admin"])
 
+    from services.k8s_client import K8S_IN_CLUSTER
+
+    # Check SSM for explicitly associated cluster
     ssm = ssm_client()
     cluster = {}
     for key in ["cluster-name", "cluster-endpoint", "cluster-region", "cluster-version"]:
@@ -51,10 +60,12 @@ async def get_cluster_config(authorization: str = Header(default="")):
         except Exception:
             pass
 
-    if not cluster.get("cluster_name"):
-        return {"configured": False}
+    configured = bool(cluster.get("cluster_name")) or K8S_IN_CLUSTER
 
-    # Get operator status if cluster is configured
+    if not configured:
+        return {"configured": False, "in_cluster": False}
+
+    # Get operator status if cluster is reachable
     operator = {}
     try:
         operator = await k8s_client.get_operator_status()
@@ -62,7 +73,8 @@ async def get_cluster_config(authorization: str = Header(default="")):
         operator = {"installed": False, "error": "Cannot reach K8s API"}
 
     return {
-        "configured": True,
+        "configured": configured,
+        "in_cluster": K8S_IN_CLUSTER,
         **cluster,
         "operator": operator,
     }

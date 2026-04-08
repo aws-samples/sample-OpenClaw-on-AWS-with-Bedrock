@@ -29,7 +29,13 @@ OPERATOR_ECR_MIRROR = "public.ecr.aws/t6v6o5d5/kube-prometheus"
 
 # Env-based config
 OPENCLAW_NAMESPACE = os.environ.get("OPENCLAW_NAMESPACE", "openclaw")
-K8S_IN_CLUSTER = os.environ.get("K8S_IN_CLUSTER", "").lower() in ("true", "1", "yes")
+
+# Auto-detect in-cluster: K8S_IN_CLUSTER env var OR Kubernetes service account token exists
+_k8s_env = os.environ.get("K8S_IN_CLUSTER", "").lower()
+K8S_IN_CLUSTER = (
+    _k8s_env in ("true", "1", "yes")
+    or os.path.isfile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+)
 
 
 class K8sClient:

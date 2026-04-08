@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Bot, Plus, Users, Star, Zap, Edit3, Play, Settings, Eye, Search, Filter, Cpu, SlidersHorizontal, Trash2, RefreshCw, Check, Cloud } from 'lucide-react';
 import { Card, StatCard, Badge, Button, PageHeader, Table as DataTable, Modal, Input, Select, StatusDot, Tabs } from '../../components/ui';
-import { useAgents, usePositions, useEmployees, useCreateAgent, useModelConfig, useUpdateModelConfig, useUpdateFallbackModel, useSetPositionModel, useRemovePositionModel, useSetEmployeeModel, useRemoveEmployeeModel, useAgentConfig, useSetPositionAgentConfig, useSetEmployeeAgentConfig, useEksInstances } from '../../hooks/useApi';
+import { useAgents, usePositions, useEmployees, useCreateAgent, useModelConfig, useUpdateModelConfig, useUpdateFallbackModel, useSetPositionModel, useRemovePositionModel, useSetEmployeeModel, useRemoveEmployeeModel, useAgentConfig, useSetPositionAgentConfig, useSetEmployeeAgentConfig, useEksCluster, useEksInstances } from '../../hooks/useApi';
 import { EksInstancesTab } from '../EKSCluster';
 import { CHANNEL_LABELS } from '../../types';
 import type { Agent, ChannelType } from '../../types';
@@ -44,6 +44,8 @@ export default function AgentList() {
     setCfgSaved(true); setTimeout(() => { setCfgSaved(false); setCfgTarget(null); }, 1500);
   };
   const { data: EMPLOYEES = [] } = useEmployees();
+  const { data: eksCluster } = useEksCluster();
+  const eksAvailable = !!(eksCluster?.configured && eksCluster?.operator?.installed);
   const createAgent = useCreateAgent();
   const [showCreate, setShowCreate] = useState(false);
   const [createStep, setCreateStep] = useState(0);
@@ -98,7 +100,7 @@ export default function AgentList() {
         <StatCard title="Total Agents" value={AGENTS.length} icon={<Bot size={22} />} color="primary" />
         <StatCard title="Serverless" value={serverlessAgents.length} icon={<Users size={22} />} color="info" />
         <StatCard title="ECS" value={ecsAgents.length} icon={<Zap size={22} />} color="cyan" />
-        <StatCard title="EKS" value={eksInstanceCount} icon={<Cloud size={22} />} color="success" />
+        <StatCard title="EKS" value={eksAvailable ? eksInstanceCount : 'Not connected'} icon={<Cloud size={22} />} color={eksAvailable ? 'success' : 'info'} />
         <StatCard title="Avg Quality" value={avgQuality !== null ? `⭐ ${avgQuality.toFixed(1)}` : '—'} icon={<Star size={22} />} color="warning" />
       </div>
 
@@ -411,11 +413,12 @@ export default function AgentList() {
                   <p className="text-xs text-text-muted mt-0.5">Persistent container. Scheduled tasks, direct IM.</p>
                 </button>
                 <button
-                  className={`rounded-xl border p-3 text-left transition-all ${newDeployMode === 'eks' ? 'border-primary bg-primary/5' : 'border-dark-border/40 bg-surface-dim hover:border-dark-border'}`}
-                  onClick={() => setNewDeployMode('eks')}
+                  className={`rounded-xl border p-3 text-left transition-all ${newDeployMode === 'eks' ? 'border-primary bg-primary/5' : eksAvailable ? 'border-dark-border/40 bg-surface-dim hover:border-dark-border' : 'border-dark-border/20 bg-surface-dim/50 opacity-50 cursor-not-allowed'}`}
+                  onClick={() => eksAvailable && setNewDeployMode('eks')}
+                  disabled={!eksAvailable}
                 >
                   <p className="text-sm font-medium text-text-primary">EKS (Kubernetes)</p>
-                  <p className="text-xs text-text-muted mt-0.5">Operator-managed pod. EFS, Helm, China support.</p>
+                  <p className="text-xs text-text-muted mt-0.5">{eksAvailable ? 'Operator-managed pod. EFS, Helm, China support.' : 'Configure EKS cluster in Settings → EKS first.'}</p>
                 </button>
               </div>
             </div>
