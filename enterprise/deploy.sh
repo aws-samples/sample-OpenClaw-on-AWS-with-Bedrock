@@ -422,31 +422,32 @@ else
   fi
 
   cd "$SEED_DIR"
-  if ! command -v pip3 &>/dev/null; then
-    info "  Installing pip3..."
-    sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip 2>/dev/null \
-      || sudo yum install -y python3-pip 2>/dev/null \
-      || { error "Failed to install pip3. Please install it manually."; exit 1; }
+  # Use a temporary venv for seed scripts (avoids PEP 668 / macOS Homebrew conflicts)
+  SEED_VENV="/tmp/openclaw-seed-venv"
+  if [ ! -d "$SEED_VENV" ]; then
+    python3 -m venv "$SEED_VENV"
   fi
-  pip3 install -q -r requirements.txt
-  AWS_REGION="$DYNAMODB_REGION" python3 seed_dynamodb.py --table "$DYNAMODB_TABLE" --region "$DYNAMODB_REGION" && \
+  "$SEED_VENV/bin/pip" install -q -r requirements.txt
+  # Use the venv's python for all seed commands
+  SEED_PYTHON="$SEED_VENV/bin/python"
+  AWS_REGION="$DYNAMODB_REGION" $SEED_PYTHON seed_dynamodb.py --table "$DYNAMODB_TABLE" --region "$DYNAMODB_REGION" && \
     success "  Org data seeded (employees, positions, departments)"
 
-  AWS_REGION="$DYNAMODB_REGION" python3 seed_roles.py --table "$DYNAMODB_TABLE" --region "$DYNAMODB_REGION" && \
+  AWS_REGION="$DYNAMODB_REGION" $SEED_PYTHON seed_roles.py --table "$DYNAMODB_TABLE" --region "$DYNAMODB_REGION" && \
     success "  Roles seeded (admin/manager/employee)"
 
-  AWS_REGION="$DYNAMODB_REGION" python3 seed_settings.py --table "$DYNAMODB_TABLE" --region "$DYNAMODB_REGION" 2>/dev/null && \
+  AWS_REGION="$DYNAMODB_REGION" $SEED_PYTHON seed_settings.py --table "$DYNAMODB_TABLE" --region "$DYNAMODB_REGION" 2>/dev/null && \
     success "  Settings seeded" || warn "  seed_settings.py skipped (not found)"
 
   AWS_REGION="$REGION" S3_BUCKET="$S3_BUCKET" \
-    python3 seed_knowledge_docs.py --bucket "$S3_BUCKET" --region "$REGION" && \
+    $SEED_PYTHON seed_knowledge_docs.py --bucket "$S3_BUCKET" --region "$REGION" && \
     success "  Knowledge docs uploaded"
 
   AWS_REGION="$REGION" S3_BUCKET="$S3_BUCKET" \
-    python3 seed_workspaces.py --bucket "$S3_BUCKET" --region "$REGION" 2>/dev/null && \
+    $SEED_PYTHON seed_workspaces.py --bucket "$S3_BUCKET" --region "$REGION" 2>/dev/null && \
     success "  Employee workspaces created" || warn "  seed_workspaces.py skipped"
 
-  python3 seed_ssm_tenants.py \
+  $SEED_PYTHON seed_ssm_tenants.py \
     --region "$REGION" --stack "$STACK_NAME" && \
     success "  SSM tenant→position mappings created"
 fi
