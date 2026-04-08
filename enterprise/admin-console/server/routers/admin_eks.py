@@ -37,6 +37,46 @@ def _agent_svc_endpoint(agent_name: str) -> str:
     return f"http://{agent_name}.{OPENCLAW_NAMESPACE}.svc:18789"
 
 
+# Cache gateway tokens per agent (TTL 5 min)
+_gw_token_cache: dict = {}  # agent_name -> (token, timestamp)
+
+async def _get_gateway_token(agent_name: str) -> str:
+    """Fetch the gateway token from the running pod's openclaw.json.
+    Cached for 5 minutes to avoid repeated exec calls."""
+    import time, json as _json
+    from services.k8s_client import _sanitize_k8s_name
+    safe = _sanitize_k8s_name(agent_name)
+    cached = _gw_token_cache.get(safe)
+    if cached and time.time() - cached[1] < 300:
+        return cached[0]
+    try:
+        # Read config from the pod via HTTP — the gateway exposes /api/health
+        resp = _requests.get(
+            f"http://{safe}.{OPENCLAW_NAMESPACE}.svc:18789/api/health",
+            timeout=3,
+        )
+        # If health works without token, try fetching the token from pod exec
+    except Exception:
+        pass
+    # Fallback: exec into pod to read the config
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "kubectl", "exec", "-n", OPENCLAW_NAMESPACE,
+            f"{safe}-0", "-c", "openclaw", "--",
+            "cat", "/home/openclaw/.openclaw/openclaw.json",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        cfg = _json.loads(stdout)
+        token = cfg.get("gateway", {}).get("auth", {}).get("token", "")
+        if token:
+            _gw_token_cache[safe] = (token, time.time())
+            return token
+    except Exception as e:
+        logger.warning("Failed to read gateway token for %s: %s", safe, e)
+    return ""
+
+
 # =========================================================================
 # Cluster Discovery & Association (fixed-path routes — before {agent_id})
 # =========================================================================
@@ -726,6 +766,11 @@ async def proxy_eks_gateway(agent_id: str, path: str, request: Request,
     target_base = f"http://{safe_name}.{OPENCLAW_NAMESPACE}.svc:18789"
     target = f"{target_base}/{path}"
 
+    # Inject gateway token for upstream auth
+    gw_token = await _get_gateway_token(agent_id)
+    if gw_token:
+        target += ("&" if "?" in target else "?") + f"token={gw_token}"
+
     # Forward query params (strip auth_token)
     filtered = {k: v for k, v in request.query_params.items() if k != "auth_token"}
     if filtered:
@@ -801,10 +846,15 @@ async def _proxy_eks_ws(websocket: WebSocket, agent_id: str, path: str = ""):
     safe_name = _sanitize_k8s_name(agent_id)
     ws_target = f"ws://{safe_name}.{OPENCLAW_NAMESPACE}.svc:18789/{path}"
 
-    # Forward query params
-    qs = str(websocket.query_params)
-    if qs:
-        ws_target += "?" + qs
+    # Inject gateway token for upstream auth
+    gw_token = await _get_gateway_token(agent_id)
+    if gw_token:
+        ws_target += ("&" if "?" in ws_target else "?") + f"token={gw_token}"
+
+    # Forward query params (strip auth_token — internal only)
+    for k, v in websocket.query_params.items():
+        if k != "auth_token":
+            ws_target += ("&" if "?" in ws_target else "?") + f"{k}={v}"
 
     await websocket.accept()
     try:
