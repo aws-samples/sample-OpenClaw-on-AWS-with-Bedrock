@@ -83,6 +83,18 @@ cp enterprise/gateway/tenant_router.py    /home/ubuntu/tenant_router.py
 cp enterprise/gateway/bedrock_proxy_h2.js /home/ubuntu/bedrock_proxy_h2.js
 chown ubuntu:ubuntu /home/ubuntu/tenant_router.py /home/ubuntu/bedrock_proxy_h2.js
 
+# OpenClaw workspace templates → /home/ubuntu/docs/
+# OpenClaw expects template files (AGENTS.md, TOOLS.md, etc.) in $HOME/docs/reference/templates/
+# These ship inside the npm package but must be copied to $HOME for the gateway to find them.
+OPENCLAW_PKG_DIR=$(su - ubuntu -c 'source ~/.nvm/nvm.sh && node -e "console.log(require.resolve(\"openclaw/package.json\").replace(\"/package.json\",\"\"))"' 2>/dev/null || true)
+if [ -n "$OPENCLAW_PKG_DIR" ] && [ -d "$OPENCLAW_PKG_DIR/docs" ]; then
+  cp -r "$OPENCLAW_PKG_DIR/docs" /home/ubuntu/docs
+  chown -R ubuntu:ubuntu /home/ubuntu/docs
+  echo "  Copied workspace templates from $OPENCLAW_PKG_DIR/docs"
+else
+  echo "  WARN: Could not locate openclaw package docs — openclaw tui may fail"
+fi
+
 # ── Phase 5: Install and start systemd services ─────────────────────────────
 
 echo ">>> Phase 5: Installing systemd services..."
