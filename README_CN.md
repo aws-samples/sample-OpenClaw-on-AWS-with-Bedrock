@@ -261,7 +261,45 @@ WhatsApp 和 Telegram 支持语音消息 — OpenClaw 会转录并回复。
 
 **本地 Demo**：`python3 demo/console.py` → 打开 http://localhost:8099 查看管理控制台
 
-**[→ 多租户完整文档](README_ENTERPRISE.md)** · **[→ 路线图](ROADMAP.md)**
+**[→ 多租户完整文档 (EN)](README_ENTERPRISE.md)** · **[→ 多租户完整文档 (中文)](README_ENTERPRISE_CN.md)** · **[→ 路线图](ROADMAP.md)**
+
+### EKS (Kubernetes) — 容器原生部署
+
+> 在 Amazon EKS 上运行企业管理控制台和 OpenClaw 智能体。支持 **AWS 全球区域** 和 **AWS 中国区域**。使用 OpenClaw Operator（Helm）通过 `OpenClawInstance` CRD 管理智能体 Pod。
+
+**快速开始（Terraform — 全栈部署）：**
+
+```bash
+# 1. 构建镜像（如果是 cn- 区域，会自动镜像到中国 ECR）
+bash eks/scripts/build-and-mirror.sh --region us-west-2 --name openclaw-prod
+
+# 2. 部署 VPC + EKS + Operator + 管理控制台 + Ingress
+cd eks/terraform && terraform apply \
+  -var="name=openclaw-prod" \
+  -var="enable_admin_console=true" \
+  -var="enable_alb_controller=true" \
+  -var="admin_password=YOUR_PASSWORD"
+```
+
+**快速开始（已有集群）：**
+
+```bash
+cd enterprise/admin-console
+bash deploy-eks.sh --cluster YOUR_CLUSTER --region us-west-2 --password YOUR_PASSWORD
+```
+
+| 功能 | 详情 |
+|------|------|
+| **完整 Terraform 栈** | VPC、EKS、EFS、ALB Controller、Operator、管理控制台 — 一条 `terraform apply` 搞定 |
+| **Helm Chart 打包** | ServiceAccount、RBAC、Deployment、Service、Ingress — `enterprise/admin-console/chart/` |
+| **互联网访问** | ALB Ingress（Terraform 中默认启用），支持自定义域名 + 通过 ACM 配置 HTTPS |
+| **三种运行时** | Serverless（AgentCore）+ ECS（Fargate）+ **EKS（CRD 托管 Pod）** |
+| **Operator 托管** | OpenClaw Operator 监听 CRD → StatefulSet + Service + PVC + ConfigMap |
+| **部署界面** | Agent Factory → EKS → 部署智能体弹窗（模型、资源、存储、Sidecar） |
+| **中国区支持** | `build-and-mirror.sh` 将镜像同步到中国 ECR，`globalRegistry` CRD 覆盖 |
+| **集成测试** | `eks/scripts/integration-test.sh` — 验证完整的部署/重载/停止流程 |
+
+**[→ EKS 部署指南 (EN)](docs/DEPLOYMENT_EKS.md)** · **[→ EKS 部署指南 (中文)](docs/DEPLOYMENT_EKS_CN.md)**
 
 ### macOS（Apple Silicon）— iOS/macOS 开发
 
