@@ -756,7 +756,7 @@ async def proxy_eks_gateway(agent_id: str, path: str, request: Request,
             response.set_cookie(
                 key="eks_gw_session", value=qt,
                 max_age=3600, httponly=True, samesite="lax",
-                path=f"/api/v1/admin/eks/{agent_id}/gateway/",
+                path=f"/api/v1/admin/eks/{agent_id}/gateway",
             )
         return response
 
@@ -770,13 +770,14 @@ async def proxy_eks_gateway(agent_id: str, path: str, request: Request,
 
 async def _proxy_eks_ws(websocket: WebSocket, agent_id: str, path: str = ""):
     """Shared WebSocket proxy logic for EKS gateway.
-    Authenticates via eks_gw_session cookie set by the HTTP proxy."""
-    cookie_token = websocket.cookies.get("eks_gw_session", "")
-    if not cookie_token:
-        await websocket.close(code=4001, reason="Missing auth cookie")
+    Authenticates via eks_gw_session cookie or auth_token query param."""
+    token = (websocket.cookies.get("eks_gw_session", "")
+             or websocket.query_params.get("auth_token", ""))
+    if not token:
+        await websocket.close(code=4001, reason="Missing auth")
         return
     try:
-        require_role(f"Bearer {cookie_token}", roles=["admin"])
+        require_role(f"Bearer {token}", roles=["admin"])
     except Exception:
         await websocket.close(code=4001, reason="Invalid auth")
         return
