@@ -11,6 +11,26 @@
 #   # China region (builds admin console + mirrors ALL operator images to China ECR)
 #   bash build-and-mirror.sh --region cn-northwest-1 --name openclaw-cn --profile china
 #
+#   # Repeat run (skip images already in ECR)
+#   bash build-and-mirror.sh --region cn-northwest-1 --name openclaw-cn --profile china --skip-build
+#
+#   # Force re-mirror all images (even if they exist in ECR)
+#   bash build-and-mirror.sh --region cn-northwest-1 --name openclaw-cn --profile china --mirror
+#
+#   # Global region with forced mirror (e.g. private ECR for air-gapped clusters)
+#   bash build-and-mirror.sh --region us-west-2 --name openclaw-prod --mirror
+#
+#   # Build only, no mirror
+#   bash build-and-mirror.sh --region us-west-2 --name openclaw-prod --no-mirror
+#
+# Flags:
+#   --region      AWS region (default: us-west-2)
+#   --name        Resource name prefix (default: openclaw-eks)
+#   --profile     AWS CLI profile (required for China)
+#   --skip-build  Skip Docker image build
+#   --mirror      Force mirror all images (even in global regions or if already in ECR)
+#   --no-mirror   Never mirror (even in China)
+#
 # Prerequisites:
 #   - Docker running locally
 #   - AWS CLI configured (with --profile for China)
@@ -31,7 +51,7 @@ REGION="us-west-2"
 NAME="openclaw-eks"
 AWS_PROFILE_ARG=""
 SKIP_BUILD=false
-SKIP_MIRROR=false
+MIRROR_MODE="auto"  # auto | always | never
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -39,7 +59,9 @@ while [[ $# -gt 0 ]]; do
     --name)        NAME="$2"; shift 2 ;;
     --profile)     AWS_PROFILE_ARG="--profile $2"; export AWS_PROFILE="$2"; shift 2 ;;
     --skip-build)  SKIP_BUILD=true; shift ;;
-    --skip-mirror) SKIP_MIRROR=true; shift ;;
+    --mirror)      MIRROR_MODE="always"; shift ;;
+    --no-mirror)   MIRROR_MODE="never"; shift ;;
+    --skip-mirror) MIRROR_MODE="never"; shift ;;  # backward compat
     *) error "Unknown flag: $1" ;;
   esac
 done
@@ -127,23 +149,50 @@ MIRROR_IMAGES=(
   "ghcr.io/openclaw-rocks/openclaw-operator:v0.25.2|openclaw-rocks/openclaw-operator:v0.25.2"
 )
 
-if $IS_CHINA && ! $SKIP_MIRROR; then
-  info "Mirroring ${#MIRROR_IMAGES[@]} images to China ECR..."
+# Decide whether to mirror
+DO_MIRROR=false
+if [[ "$MIRROR_MODE" == "always" ]]; then
+  DO_MIRROR=true
+elif [[ "$MIRROR_MODE" == "never" ]]; then
+  DO_MIRROR=false
+else
+  # auto: mirror for China, skip for global
+  $IS_CHINA && DO_MIRROR=true
+fi
+
+if $DO_MIRROR; then
+  info "Mirroring ${#MIRROR_IMAGES[@]} images to ECR ($ECR_HOST)..."
   echo ""
 
   MIRROR_FAIL=0
+  MIRROR_SKIP=0
+  MIRROR_PUSH=0
   for entry in "${MIRROR_IMAGES[@]}"; do
     SRC="${entry%%|*}"
     DST_PATH="${entry##*|}"
     DST="${ECR_HOST}/${DST_PATH}"
     DST_REPO="${DST_PATH%%:*}"
+    DST_TAG="${DST_PATH##*:}"
 
     printf "  %-55s → " "$SRC"
 
-    # Create repo
+    # Create repo (idempotent)
     aws ecr create-repository $AWS_PROFILE_ARG \
       --repository-name "$DST_REPO" \
       --region "$REGION" 2>/dev/null || true
+
+    # Check if image already exists in ECR (skip if present, unless --mirror forces re-push)
+    if [[ "$MIRROR_MODE" != "always" ]]; then
+      EXISTING=$(aws ecr describe-images $AWS_PROFILE_ARG \
+        --repository-name "$DST_REPO" \
+        --image-ids imageTag="$DST_TAG" \
+        --region "$REGION" --query 'imageDetails[0].imagePushedAt' --output text 2>/dev/null || echo "")
+      if [[ -n "$EXISTING" && "$EXISTING" != "None" ]]; then
+        echo -e "${CYAN}EXISTS${NC} (pushed ${EXISTING})"
+        MIRROR_SKIP=$((MIRROR_SKIP + 1))
+        continue
+      fi
+    fi
 
     # Pull
     if ! docker pull "$SRC" > /dev/null 2>&1; then
@@ -155,7 +204,8 @@ if $IS_CHINA && ! $SKIP_MIRROR; then
     # Tag + push
     docker tag "$SRC" "$DST"
     if docker push "$DST" > /dev/null 2>&1; then
-      echo -e "${GREEN}OK${NC}"
+      echo -e "${GREEN}PUSHED${NC}"
+      MIRROR_PUSH=$((MIRROR_PUSH + 1))
     else
       echo -e "${RED}PUSH FAILED${NC}"
       MIRROR_FAIL=$((MIRROR_FAIL + 1))
@@ -164,14 +214,16 @@ if $IS_CHINA && ! $SKIP_MIRROR; then
 
   echo ""
   if [[ $MIRROR_FAIL -eq 0 ]]; then
-    success "All ${#MIRROR_IMAGES[@]} images mirrored to China ECR"
+    success "Mirror done: ${MIRROR_PUSH} pushed, ${MIRROR_SKIP} skipped (already exist), ${MIRROR_FAIL} failed"
   else
-    warn "${MIRROR_FAIL} image(s) failed to mirror"
+    warn "Mirror done: ${MIRROR_PUSH} pushed, ${MIRROR_SKIP} skipped, ${MIRROR_FAIL} FAILED"
   fi
-elif $IS_CHINA; then
-  warn "Skipping mirror (--skip-mirror)"
 else
-  info "Global region — image mirror not needed (ghcr.io accessible)"
+  if [[ "$MIRROR_MODE" == "never" ]]; then
+    info "Image mirror skipped (--no-mirror)"
+  else
+    info "Global region — image mirror not needed (use --mirror to force)"
+  fi
 fi
 
 # ── Summary ────────────────────────────────────────────────────
