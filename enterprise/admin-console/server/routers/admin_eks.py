@@ -11,6 +11,7 @@ Endpoints:
 """
 
 import asyncio
+import copy
 import logging
 import os
 from datetime import datetime, timezone
@@ -30,6 +31,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["admin-eks"])
 
 IS_CHINA_REGION = os.environ.get("AWS_REGION", "").startswith("cn-")
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge *override* into a copy of *base*.
+
+    - dict values are merged recursively
+    - list values in *override* replace the base (no append)
+    - scalar values in *override* replace the base
+    """
+    result = copy.deepcopy(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = copy.deepcopy(val)
+    return result
 
 
 def _agent_svc_endpoint(agent_name: str) -> str:
@@ -290,6 +307,29 @@ async def get_operator_status(authorization: str = Header(default="")):
 
 
 # =========================================================================
+# Agent Config (read current CRD spec.config.raw for UI editing)
+# =========================================================================
+
+@router.get("/api/v1/admin/eks/{agent_id}/config")
+async def get_eks_agent_config(agent_id: str, authorization: str = Header(default="")):
+    """Return the current spec.config.raw from the OpenClawInstance CRD.
+
+    Used by the UI config editor so admins can view and override the full
+    openclaw.json config — custom model providers, tool settings, agent
+    defaults, etc. — without us building specific UI for each field.
+    """
+    require_role(authorization, roles=["admin"])
+
+    crd = await k8s_client.get_openclaw_instance(OPENCLAW_NAMESPACE, agent_id)
+    if not crd:
+        raise HTTPException(404, f"Agent {agent_id} not found in EKS")
+
+    raw = crd.get("spec", {}).get("config", {}).get("raw", {})
+    merge_mode = crd.get("spec", {}).get("config", {}).get("mergeMode", "merge")
+    return {"agentId": agent_id, "config": raw, "mergeMode": merge_mode}
+
+
+# =========================================================================
 # Agent Lifecycle (EKS)
 # =========================================================================
 
@@ -358,6 +398,8 @@ async def deploy_eks_agent(agent_id: str, body: dict = {}, authorization: str = 
       - chromium: bool, enable headless browser sidecar
       - backupSchedule: cron expression for S3 backups (e.g. "0 2 * * *")
       - serviceType: K8s Service type (ClusterIP, LoadBalancer, NodePort)
+      - configOverride: dict — deep-merged into spec.config.raw to override
+            any openclaw.json config (custom model providers, tool settings, etc.)
     """
     require_role(authorization, roles=["admin"])
 
@@ -395,6 +437,11 @@ async def deploy_eks_agent(agent_id: str, body: dict = {}, authorization: str = 
     chromium = body.get("chromium", False)
     backup_schedule = body.get("backupSchedule", "")
     service_type = body.get("serviceType", "")
+    config_override = body.get("configOverride")
+
+    # Validate configOverride is a dict if provided
+    if config_override is not None and not isinstance(config_override, dict):
+        raise HTTPException(400, "configOverride must be a JSON object")
 
     # Fetch SOUL layers from S3 and assemble workspace files
     workspace_files = _build_workspace_files(pos_id, emp_id)
@@ -423,6 +470,7 @@ async def deploy_eks_agent(agent_id: str, body: dict = {}, authorization: str = 
             chromium=chromium,
             backup_schedule=backup_schedule,
             service_type=service_type,
+            config_override=config_override,
         )
     except ValueError as e:
         raise HTTPException(409, str(e))
@@ -520,7 +568,13 @@ async def stop_eks_agent(agent_id: str, authorization: str = Header(default=""))
 @router.post("/api/v1/admin/eks/{agent_id}/reload")
 async def reload_eks_agent(agent_id: str, body: dict = {}, authorization: str = Header(default="")):
     """Reload an EKS agent by patching the CRD config version.
-    The operator detects the change and restarts the pod with new config."""
+    The operator detects the change and restarts the pod with new config.
+
+    Body (all optional):
+      - model: update the Bedrock model
+      - imageTag / image: update the container image
+      - configOverride: dict — deep-merged into current spec.config.raw
+    """
     require_role(authorization, roles=["admin"])
 
     agent = db.get_agent(agent_id)
@@ -585,6 +639,22 @@ async def reload_eks_agent(agent_id: str, body: dict = {}, authorization: str = 
             },
         }
 
+    # Apply custom config override — deep-merge user overrides into existing
+    # CRD config.raw so admins can inject custom model providers, tool settings, etc.
+    config_override = body.get("configOverride")
+    if config_override:
+        if not isinstance(config_override, dict):
+            raise HTTPException(400, "configOverride must be a JSON object")
+        # Read current config from CRD, merge override on top, then set as patch
+        crd = await k8s_client.get_openclaw_instance(OPENCLAW_NAMESPACE, agent_id)
+        current_raw = crd.get("spec", {}).get("config", {}).get("raw", {}) if crd else {}
+        merged_raw = _deep_merge(current_raw, config_override)
+        # If model patch already set spec.config.raw, merge that too
+        existing_raw = patch.get("spec", {}).get("config", {}).get("raw", {})
+        if existing_raw:
+            merged_raw = _deep_merge(merged_raw, existing_raw)
+        patch.setdefault("spec", {}).setdefault("config", {})["raw"] = merged_raw
+
     try:
         await k8s_client.patch_openclaw_instance(OPENCLAW_NAMESPACE, agent_id, patch)
     except ValueError as e:
@@ -597,12 +667,14 @@ async def reload_eks_agent(agent_id: str, body: dict = {}, authorization: str = 
         "eventType": "config_change", "actorId": "admin", "actorName": "Admin",
         "targetType": "agent", "targetId": agent_id,
         "detail": f"Reloaded EKS agent (config-version={config_version}"
-                  f"{', image=' + image_updated if image_updated else ''})",
+                  f"{', image=' + image_updated if image_updated else ''}"
+                  f"{', configOverride=yes' if config_override else ''})",
         "status": "success",
     })
 
     return {"reloaded": True, "agentId": agent_id, "configVersion": config_version,
             "imageUpdated": image_updated or None,
+            "configOverrideApplied": bool(config_override),
             "note": "CRD patched. Operator will restart pod with new config (~30s)."}
 
 

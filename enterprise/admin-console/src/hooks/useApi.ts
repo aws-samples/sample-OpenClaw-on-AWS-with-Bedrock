@@ -1075,6 +1075,7 @@ export interface EksDeployParams {
   chromium?: boolean;
   backupSchedule?: string;
   serviceType?: string;
+  configOverride?: Record<string, unknown>;
 }
 
 export function useDeployEksAgent() {
@@ -1097,9 +1098,17 @@ export function useStopEksAgent() {
 export function useReloadEksAgent() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ agentId, ...body }: { agentId: string; model?: string }) =>
+    mutationFn: ({ agentId, ...body }: { agentId: string; model?: string; configOverride?: Record<string, unknown> }) =>
       api.post<any>(`/admin/eks/${agentId}/reload`, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['eks-instances'] }),
+  });
+}
+
+export function useEksAgentConfig(agentId: string) {
+  return useQuery<any>({
+    queryKey: ['eks-agent-config', agentId],
+    queryFn: () => api.get(`/admin/eks/${agentId}/config`),
+    enabled: !!agentId,
   });
 }
 

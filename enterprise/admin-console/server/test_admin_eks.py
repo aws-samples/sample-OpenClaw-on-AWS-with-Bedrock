@@ -243,6 +243,103 @@ class TestReload(unittest.TestCase):
         resp = client.post("/api/v1/admin/eks/agt-gone/reload", headers=AUTH_HEADER, json={})
         self.assertEqual(resp.status_code, 404)
 
+    def test_reload_with_config_override(self):
+        """configOverride deep-merges into existing CRD config.raw and patches the CRD."""
+        _mock_k8s.patch_openclaw_instance = AsyncMock(return_value={"status": "patched"})
+        _mock_k8s.get_openclaw_instance = AsyncMock(return_value={
+            "metadata": {"name": "agt-carol"},
+            "spec": {"config": {"raw": {
+                "models": {"providers": {"amazon-bedrock": {"baseUrl": "https://bedrock.us-west-2.amazonaws.com"}}},
+                "agents": {"defaults": {"model": {"primary": "amazon-bedrock/claude"}}},
+            }}},
+        })
+        override = {
+            "models": {"providers": {"openai": {"baseUrl": "https://api.openai.com/v1", "apiKey": "sk-test"}}},
+        }
+        resp = client.post("/api/v1/admin/eks/agt-carol/reload", headers=AUTH_HEADER,
+                           json={"configOverride": override})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["configOverrideApplied"])
+        # Verify the patch contains merged config
+        patch_body = _mock_k8s.patch_openclaw_instance.call_args[0][2]
+        raw = patch_body["spec"]["config"]["raw"]
+        # Original bedrock provider should be preserved
+        self.assertIn("amazon-bedrock", raw["models"]["providers"])
+        # New openai provider should be added
+        self.assertIn("openai", raw["models"]["providers"])
+        self.assertEqual(raw["models"]["providers"]["openai"]["baseUrl"], "https://api.openai.com/v1")
+
+    def test_reload_config_override_invalid_type(self):
+        """configOverride must be a dict, not a string."""
+        resp = client.post("/api/v1/admin/eks/agt-carol/reload", headers=AUTH_HEADER,
+                           json={"configOverride": "not-a-dict"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("JSON object", resp.json()["detail"])
+
+
+# ---------------------------------------------------------------------------
+# 4b. Config Read
+# ---------------------------------------------------------------------------
+
+class TestConfigRead(unittest.TestCase):
+
+    def test_get_config_success(self):
+        _mock_k8s.get_openclaw_instance = AsyncMock(return_value={
+            "metadata": {"name": "agt-carol"},
+            "spec": {"config": {"mergeMode": "merge", "raw": {
+                "agents": {"defaults": {"model": {"primary": "amazon-bedrock/claude"}}},
+            }}},
+        })
+        resp = client.get("/api/v1/admin/eks/agt-carol/config", headers=AUTH_HEADER)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["agentId"], "agt-carol")
+        self.assertEqual(body["mergeMode"], "merge")
+        self.assertIn("agents", body["config"])
+
+    def test_get_config_not_found(self):
+        _mock_k8s.get_openclaw_instance = AsyncMock(return_value=None)
+        resp = client.get("/api/v1/admin/eks/agt-missing/config", headers=AUTH_HEADER)
+        self.assertEqual(resp.status_code, 404)
+
+
+# ---------------------------------------------------------------------------
+# 4c. Deploy with Config Override
+# ---------------------------------------------------------------------------
+
+class TestDeployWithConfigOverride(unittest.TestCase):
+
+    def setUp(self):
+        _mock_k8s.get_operator_status = AsyncMock(return_value={
+            "installed": True, "crd_exists": True, "deployment_ready": True,
+            "namespace": "openclaw-operator-system", "version": "0.22.2", "pods": [],
+        })
+        _mock_k8s.create_openclaw_instance = AsyncMock(return_value={"status": "created", "name": "agt-carol"})
+        _mock_db.get_agent = MagicMock(return_value={
+            "id": "agt-carol", "employeeId": "emp-carol", "positionId": "pos-sde",
+            "name": "Carol's Agent", "status": "active", "deployMode": "serverless",
+        })
+
+    def test_deploy_with_config_override(self):
+        override = {"models": {"providers": {"openai": {"baseUrl": "https://api.openai.com/v1"}}}}
+        resp = client.post("/api/v1/admin/eks/agt-carol/deploy", headers=AUTH_HEADER,
+                           json={"configOverride": override})
+        self.assertEqual(resp.status_code, 200)
+        call_kwargs = _mock_k8s.create_openclaw_instance.call_args[1]
+        self.assertEqual(call_kwargs["config_override"], override)
+
+    def test_deploy_config_override_invalid_type(self):
+        resp = client.post("/api/v1/admin/eks/agt-carol/deploy", headers=AUTH_HEADER,
+                           json={"configOverride": "not-a-dict"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("JSON object", resp.json()["detail"])
+
+    def test_deploy_without_config_override_passes_none(self):
+        resp = client.post("/api/v1/admin/eks/agt-carol/deploy", headers=AUTH_HEADER, json={})
+        self.assertEqual(resp.status_code, 200)
+        call_kwargs = _mock_k8s.create_openclaw_instance.call_args[1]
+        self.assertIsNone(call_kwargs["config_override"])
+
 
 # ---------------------------------------------------------------------------
 # 5. Status

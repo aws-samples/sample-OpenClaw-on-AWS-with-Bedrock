@@ -26,7 +26,9 @@ const mockInstallOp = vi.fn();
 const mockDeploy = vi.fn();
 const mockStop = vi.fn();
 const mockReload = vi.fn();
+const mockReloadMutateAsync = vi.fn();
 const mockLogs = vi.fn();
+const mockConfig = vi.fn();
 
 vi.mock('../../hooks/useApi', () => ({
   useEksCluster: () => ({ data: mockCluster(), isLoading: false, refetch: vi.fn() }),
@@ -37,8 +39,9 @@ vi.mock('../../hooks/useApi', () => ({
   useEksInstances: () => ({ data: mockInstances(), isLoading: false, refetch: vi.fn() }),
   useDeployEksAgent: () => ({ mutateAsync: mockDeploy, isPending: false, error: null }),
   useStopEksAgent: () => ({ mutate: mockStop }),
-  useReloadEksAgent: () => ({ mutate: mockReload }),
+  useReloadEksAgent: () => ({ mutate: mockReload, mutateAsync: mockReloadMutateAsync, isPending: false }),
   useEksAgentLogs: (id: string) => ({ data: mockLogs(), isLoading: false, refetch: vi.fn() }),
+  useEksAgentConfig: (id: string) => ({ data: mockConfig(), isLoading: false, refetch: vi.fn().mockResolvedValue(undefined) }),
 }));
 
 beforeEach(() => {
@@ -46,6 +49,7 @@ beforeEach(() => {
   mockCluster.mockReturnValue(undefined);
   mockInstances.mockReturnValue(undefined);
   mockLogs.mockReturnValue(undefined);
+  mockConfig.mockReturnValue(undefined);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -287,5 +291,75 @@ describe('DeployEksModal', () => {
   it('shows China registry description', async () => {
     await openDeployModal();
     expect(screen.getByText(/required for China regions/)).toBeInTheDocument();
+  });
+
+  it('shows config override textarea in advanced section', async () => {
+    const user = await openDeployModal();
+
+    // Not visible before expanding
+    expect(screen.queryByText('Config Override (JSON)')).toBeNull();
+
+    await user.click(screen.getByText(/show advanced/i));
+    expect(screen.getByText('Config Override (JSON)')).toBeInTheDocument();
+    expect(screen.getByText(/Deep-merged into openclaw.json/)).toBeInTheDocument();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 4. Config Editor (via EksInstancesTab)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('ConfigEditorModal', () => {
+  it('shows config button per running instance', () => {
+    mockCluster.mockReturnValue(makeEksCluster());
+    mockInstances.mockReturnValue({
+      instances: [makeEksInstance()],
+      namespace: 'openclaw',
+    });
+    renderWithProviders(<EksInstancesTab />);
+
+    expect(screen.getByTitle('Config')).toBeInTheDocument();
+  });
+
+  it('opens config editor modal on click', async () => {
+    const user = userEvent.setup();
+    mockCluster.mockReturnValue(makeEksCluster());
+    mockInstances.mockReturnValue({
+      instances: [makeEksInstance()],
+      namespace: 'openclaw',
+    });
+    mockConfig.mockReturnValue({
+      agentId: 'agt-carol',
+      mergeMode: 'merge',
+      config: { agents: { defaults: { model: { primary: 'amazon-bedrock/claude' } } } },
+    });
+    renderWithProviders(<EksInstancesTab />);
+
+    await user.click(screen.getByTitle('Config'));
+    expect(screen.getByText('Config: agt-carol')).toBeInTheDocument();
+    expect(screen.getByText(/spec.config.raw/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /save & restart/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /format/i })).toBeInTheDocument();
+  });
+
+  it('populates textarea with current config JSON', async () => {
+    const user = userEvent.setup();
+    mockCluster.mockReturnValue(makeEksCluster());
+    mockInstances.mockReturnValue({
+      instances: [makeEksInstance()],
+      namespace: 'openclaw',
+    });
+    const configData = {
+      agentId: 'agt-carol',
+      mergeMode: 'merge',
+      config: { models: { providers: { 'amazon-bedrock': { baseUrl: 'https://bedrock.us-west-2.amazonaws.com' } } } },
+    };
+    mockConfig.mockReturnValue(configData);
+    renderWithProviders(<EksInstancesTab />);
+
+    await user.click(screen.getByTitle('Config'));
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    const parsed = JSON.parse(textarea.value);
+    expect(parsed.models.providers['amazon-bedrock'].baseUrl).toBe('https://bedrock.us-west-2.amazonaws.com');
   });
 });

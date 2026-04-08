@@ -7,6 +7,7 @@ for the enterprise admin console. Operates on a single namespace
 """
 
 import asyncio
+import copy
 import os
 import re
 from typing import Optional
@@ -176,6 +177,17 @@ class K8sClient:
 
     # ─── OpenClawInstance CRD ───
 
+    @staticmethod
+    def _deep_merge(base: dict, override: dict) -> dict:
+        """Recursively merge *override* into a copy of *base*."""
+        result = copy.deepcopy(base)
+        for key, val in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+                result[key] = K8sClient._deep_merge(result[key], val)
+            else:
+                result[key] = copy.deepcopy(val)
+        return result
+
     async def create_openclaw_instance(
         self,
         namespace: str,
@@ -200,6 +212,7 @@ class K8sClient:
         chromium: bool = False,
         backup_schedule: str = "",
         service_type: str = "",
+        config_override: Optional[dict] = None,
     ) -> dict:
         """Create an OpenClawInstance CRD for an enterprise agent.
 
@@ -283,6 +296,10 @@ class K8sClient:
             },
             "tools": {"exec": {"security": "full", "ask": "off"}},
         }
+
+        # Apply custom config override (deep-merge user overrides on top)
+        if config_override:
+            raw_config = self._deep_merge(raw_config, config_override)
 
         # Environment variables — same as entrypoint.sh expects so the shared
         # agent-container code (workspace_assembler, server.py, skill_loader) works.

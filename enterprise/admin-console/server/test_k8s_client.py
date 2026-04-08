@@ -274,6 +274,89 @@ class TestCreateOpenClawInstance(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("workspace", body["spec"])
         self.assertNotIn("skills", body["spec"])
 
+    async def test_create_with_config_override(self):
+        """config_override should deep-merge into the generated raw_config."""
+        self.client._custom_objects.create_namespaced_custom_object = AsyncMock(
+            return_value={"metadata": {"name": "agt-1"}})
+
+        override = {
+            "models": {
+                "providers": {
+                    "openai": {"baseUrl": "https://api.openai.com/v1", "apiKey": "sk-test"},
+                },
+            },
+            "agents": {"defaults": {"model": {"primary": "openai/gpt-4o"}}},
+        }
+        await self.client.create_openclaw_instance(
+            namespace="openclaw", agent_name="agt-1", employee_id="emp-1",
+            position_id="pos-sde", model="bedrock/claude-sonnet",
+            config_override=override,
+        )
+        body = self.client._custom_objects.create_namespaced_custom_object.call_args[1]["body"]
+        raw = body["spec"]["config"]["raw"]
+        # Override should replace the model primary
+        self.assertEqual(raw["agents"]["defaults"]["model"]["primary"], "openai/gpt-4o")
+        # Override should add the openai provider
+        self.assertIn("openai", raw["models"]["providers"])
+        self.assertEqual(raw["models"]["providers"]["openai"]["apiKey"], "sk-test")
+        # Original bedrock provider should be preserved (deep merge)
+        self.assertIn("amazon-bedrock", raw["models"]["providers"])
+
+    async def test_create_without_config_override(self):
+        """Without config_override, raw_config should be the default Bedrock config."""
+        self.client._custom_objects.create_namespaced_custom_object = AsyncMock(
+            return_value={"metadata": {"name": "agt-1"}})
+
+        await self.client.create_openclaw_instance(
+            namespace="openclaw", agent_name="agt-1", employee_id="emp-1",
+            position_id="pos-sde", model="bedrock/claude-sonnet",
+        )
+        body = self.client._custom_objects.create_namespaced_custom_object.call_args[1]["body"]
+        raw = body["spec"]["config"]["raw"]
+        # Only bedrock provider
+        self.assertEqual(list(raw["models"]["providers"].keys()), ["amazon-bedrock"])
+        self.assertEqual(raw["agents"]["defaults"]["model"]["primary"], "amazon-bedrock/claude-sonnet")
+
+
+class TestDeepMerge(unittest.TestCase):
+    """Tests for K8sClient._deep_merge static method."""
+
+    def test_simple_merge(self):
+        base = {"a": 1, "b": 2}
+        override = {"b": 3, "c": 4}
+        result = K8sClient._deep_merge(base, override)
+        self.assertEqual(result, {"a": 1, "b": 3, "c": 4})
+
+    def test_nested_merge(self):
+        base = {"models": {"providers": {"bedrock": {"url": "https://bedrock.aws"}}}}
+        override = {"models": {"providers": {"openai": {"url": "https://api.openai.com"}}}}
+        result = K8sClient._deep_merge(base, override)
+        self.assertIn("bedrock", result["models"]["providers"])
+        self.assertIn("openai", result["models"]["providers"])
+
+    def test_override_replaces_scalar(self):
+        base = {"agents": {"defaults": {"model": {"primary": "bedrock/claude"}}}}
+        override = {"agents": {"defaults": {"model": {"primary": "openai/gpt-4o"}}}}
+        result = K8sClient._deep_merge(base, override)
+        self.assertEqual(result["agents"]["defaults"]["model"]["primary"], "openai/gpt-4o")
+
+    def test_override_replaces_list(self):
+        base = {"models": [{"id": "a"}]}
+        override = {"models": [{"id": "b"}, {"id": "c"}]}
+        result = K8sClient._deep_merge(base, override)
+        self.assertEqual(result["models"], [{"id": "b"}, {"id": "c"}])
+
+    def test_does_not_mutate_base(self):
+        base = {"a": {"b": 1}}
+        override = {"a": {"b": 2}}
+        K8sClient._deep_merge(base, override)
+        self.assertEqual(base["a"]["b"], 1)
+
+    def test_empty_override(self):
+        base = {"a": 1}
+        result = K8sClient._deep_merge(base, {})
+        self.assertEqual(result, {"a": 1})
+
 
 class TestDeleteOpenClawInstance(_BaseK8sTest):
 

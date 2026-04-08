@@ -5,7 +5,7 @@
 import { useState } from 'react';
 import {
   Cloud, Server, RefreshCw, Link2, Unlink, Download, Plus,
-  Square, RotateCw, Terminal, ExternalLink,
+  Square, RotateCw, Terminal, ExternalLink, Settings,
   Loader2, AlertTriangle, Box,
 } from 'lucide-react';
 import { Card, StatCard, Badge, Button, Table, Modal, Input, Select, Toggle } from '../components/ui';
@@ -13,6 +13,7 @@ import {
   useEksCluster, useDiscoverClusters, useAssociateCluster, useDisassociateCluster,
   useEksInstances,
   useDeployEksAgent, useStopEksAgent, useReloadEksAgent, useEksAgentLogs,
+  useEksAgentConfig,
 } from '../hooks/useApi';
 import type { EksDeployParams } from '../hooks/useApi';
 import type { Agent } from '../types';
@@ -207,6 +208,7 @@ export function EksInstancesTab({ agents }: { agents?: Agent[] }) {
   const stopAgent = useStopEksAgent();
   const reloadAgent = useReloadEksAgent();
   const [logsAgent, setLogsAgent] = useState('');
+  const [configAgent, setConfigAgent] = useState('');
   const [showDeploy, setShowDeploy] = useState(false);
 
   const instances = instancesData?.instances || [];
@@ -286,6 +288,10 @@ export function EksInstancesTab({ agents }: { agents?: Agent[] }) {
                     <ExternalLink size={14} />
                   </button>
                 )}
+                <button onClick={() => setConfigAgent(i.name)} title="Config"
+                  className="p-1.5 rounded-lg hover:bg-dark-hover text-text-muted hover:text-warning transition-colors">
+                  <Settings size={14} />
+                </button>
                 <button onClick={() => reloadAgent.mutate({ agentId: i.name })} title="Reload"
                   className="p-1.5 rounded-lg hover:bg-dark-hover text-text-muted hover:text-primary transition-colors">
                   <RotateCw size={14} />
@@ -303,6 +309,15 @@ export function EksInstancesTab({ agents }: { agents?: Agent[] }) {
           ]}
           data={instances}
           emptyText="No OpenClaw instances deployed. Create an agent with EKS deploy mode to get started."
+        />
+      )}
+
+      {/* Config editor modal */}
+      {configAgent && (
+        <ConfigEditorModal
+          agentId={configAgent}
+          onClose={() => setConfigAgent('')}
+          onSaved={() => { setConfigAgent(''); refetch(); }}
         />
       )}
 
@@ -381,6 +396,10 @@ function DeployEksModal({ agents, onDeploy, isPending, error, onClose }: {
   // Backup
   const [backupSchedule, setBackupSchedule] = useState('');
 
+  // Config override (raw JSON)
+  const [configOverrideStr, setConfigOverrideStr] = useState('');
+  const [configError, setConfigError] = useState('');
+
   const handleDeploy = async () => {
     if (!agentId) return;
     const params: EksDeployParams = { agentId, model };
@@ -410,6 +429,16 @@ function DeployEksModal({ agents, onDeploy, isPending, error, onClose }: {
     if (tolerationsStr.trim()) {
       try { params.tolerations = JSON.parse(tolerationsStr); }
       catch { /* ignore invalid JSON */ }
+    }
+    // Parse config override JSON
+    if (configOverrideStr.trim()) {
+      try {
+        params.configOverride = JSON.parse(configOverrideStr);
+        setConfigError('');
+      } catch (e) {
+        setConfigError('Invalid JSON in config override');
+        return;
+      }
     }
 
     await onDeploy(params);
@@ -543,6 +572,21 @@ function DeployEksModal({ agents, onDeploy, isPending, error, onClose }: {
               placeholder='[{"key": "kata", "value": "true", "effect": "NoSchedule"}]'
               description="K8s tolerations for tainted nodes (GPU, Kata, spot instances)"
             />
+
+            {/* Config override */}
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1">Config Override (JSON)</label>
+              <textarea
+                className="w-full h-32 bg-dark-bg border border-dark-border rounded-xl px-3 py-2 text-sm font-mono text-text-primary placeholder:text-text-muted focus:outline-none focus:border-primary resize-y"
+                value={configOverrideStr}
+                onChange={e => { setConfigOverrideStr(e.target.value); setConfigError(''); }}
+                placeholder={'{\n  "models": {\n    "providers": {\n      "openai": {\n        "baseUrl": "https://api.openai.com/v1",\n        "apiKey": "sk-...",\n        "models": [{ "id": "gpt-4o" }]\n      }\n    }\n  }\n}'}
+              />
+              <p className="text-xs text-text-muted mt-1">
+                Deep-merged into openclaw.json config. Use to add custom model providers, tool settings, or agent defaults.
+              </p>
+              {configError && <p className="text-xs text-danger mt-1">{configError}</p>}
+            </div>
           </div>
         )}
 
@@ -572,6 +616,95 @@ function LogsModal({ agentId, onClose }: { agentId: string; onClose: () => void 
         </pre>
       ) : (
         <p className="text-sm text-text-muted text-center py-4">No logs available.</p>
+      )}
+    </Modal>
+  );
+}
+
+// ─── Config Editor Modal ──────────────────────────────────────────────────────
+
+function ConfigEditorModal({ agentId, onClose, onSaved }: {
+  agentId: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { data, isLoading, refetch } = useEksAgentConfig(agentId);
+  const reloadAgent = useReloadEksAgent();
+  const [editText, setEditText] = useState('');
+  const [initialized, setInitialized] = useState(false);
+  const [parseError, setParseError] = useState('');
+  const [saveError, setSaveError] = useState('');
+
+  // Initialize editor text when data loads
+  if (data?.config && !initialized) {
+    setEditText(JSON.stringify(data.config, null, 2));
+    setInitialized(true);
+  }
+
+  const handleSave = async () => {
+    setSaveError('');
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(editText);
+    } catch {
+      setParseError('Invalid JSON');
+      return;
+    }
+    setParseError('');
+    try {
+      await reloadAgent.mutateAsync({ agentId, configOverride: parsed });
+      onSaved();
+    } catch (e: any) {
+      setSaveError(e?.message || 'Failed to save config');
+    }
+  };
+
+  const handleFormat = () => {
+    try {
+      const parsed = JSON.parse(editText);
+      setEditText(JSON.stringify(parsed, null, 2));
+      setParseError('');
+    } catch {
+      setParseError('Invalid JSON — cannot format');
+    }
+  };
+
+  return (
+    <Modal open={true} onClose={onClose} title={`Config: ${agentId}`} size="lg" footer={
+      <div className="flex justify-between w-full">
+        <div className="flex gap-2">
+          <Button size="sm" onClick={handleFormat}>Format</Button>
+          <Button size="sm" onClick={() => refetch().then(() => setInitialized(false))}>
+            <RefreshCw size={14} /> Reload from CRD
+          </Button>
+        </div>
+        <div className="flex gap-2">
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={handleSave} disabled={reloadAgent.isPending}>
+            {reloadAgent.isPending ? <Loader2 size={14} className="animate-spin" /> : <Settings size={14} />}
+            Save &amp; Restart
+          </Button>
+        </div>
+      </div>
+    }>
+      {isLoading ? (
+        <div className="flex justify-center py-8"><Loader2 size={20} className="animate-spin text-text-muted" /></div>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-xs text-text-muted">
+            Edit the full <code className="bg-dark-bg px-1 py-0.5 rounded">spec.config.raw</code> (openclaw.json).
+            Changes are deep-merged and the pod restarts automatically.
+            Use this to add custom model providers (OpenAI-compatible, LiteLLM, etc.), tool settings, or agent defaults.
+          </p>
+          <textarea
+            className="w-full h-80 bg-dark-bg border border-dark-border rounded-xl px-3 py-2 text-sm font-mono text-text-primary placeholder:text-text-muted focus:outline-none focus:border-primary resize-y"
+            value={editText}
+            onChange={e => { setEditText(e.target.value); setParseError(''); }}
+            spellCheck={false}
+          />
+          {parseError && <p className="text-xs text-danger">{parseError}</p>}
+          {saveError && <div className="p-3 rounded-xl bg-danger/10 border border-danger/20 text-sm text-danger">{saveError}</div>}
+        </div>
       )}
     </Modal>
   );
