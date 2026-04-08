@@ -277,11 +277,26 @@ resource "helm_release" "admin_console" {
       value = var.ingress_host
     }
   }
+  # When a certificate is provided, switch to HTTPS; otherwise default HTTP is fine
   dynamic "set" {
     for_each = var.ingress_certificate_arn != "" ? [1] : []
     content {
       name  = "ingress.annotations.alb\\.ingress\\.kubernetes\\.io/certificate-arn"
       value = var.ingress_certificate_arn
+    }
+  }
+  dynamic "set" {
+    for_each = var.ingress_certificate_arn != "" ? [1] : []
+    content {
+      name  = "ingress.annotations.alb\\.ingress\\.kubernetes\\.io/listen-ports"
+      value = "[{\"HTTPS\":443}]"
+    }
+  }
+  dynamic "set" {
+    for_each = var.ingress_certificate_arn != "" ? [1] : []
+    content {
+      name  = "ingress.annotations.alb\\.ingress\\.kubernetes\\.io/ssl-redirect"
+      value = "443"
     }
   }
 
@@ -318,11 +333,13 @@ resource "null_resource" "bootstrap_admin" {
       AWS_REGION = var.region
     }
     command = <<-EOT
-      echo "[bootstrap] Creating admin user in ${aws_dynamodb_table.enterprise.name}"
+      echo "[bootstrap] Ensuring admin user in ${aws_dynamodb_table.enterprise.name}"
       python3 -c "
 import boto3
 ddb = boto3.resource('dynamodb', region_name='${var.region}')
 table = ddb.Table('${aws_dynamodb_table.enterprise.name}')
+
+# Create admin user if not exists
 try:
     table.put_item(
         Item={
@@ -338,7 +355,14 @@ try:
     )
     print('[bootstrap] Admin user created: emp-admin')
 except table.meta.client.exceptions.ConditionalCheckFailedException:
-    print('[bootstrap] Admin user already exists, skipped')
+    # User exists (maybe from demo seed) — ensure role=admin
+    table.update_item(
+        Key={'PK': 'ORG#acme', 'SK': 'EMP#emp-admin'},
+        UpdateExpression='SET #r = :role',
+        ExpressionAttributeNames={'#r': 'role'},
+        ExpressionAttributeValues={':role': 'admin'},
+    )
+    print('[bootstrap] Admin user exists, ensured role=admin')
 
 # Ensure department exists
 try:
