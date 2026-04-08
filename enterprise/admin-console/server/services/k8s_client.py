@@ -28,12 +28,8 @@ CRD_VERSION = "v1alpha1"
 CRD_PLURAL = "openclawinstances"
 CRD_FULL_NAME = f"{CRD_PLURAL}.{CRD_GROUP}"
 
-# Operator defaults
-OPERATOR_CHART = "oci://ghcr.io/openclaw-rocks/charts/openclaw-operator"
-OPERATOR_VERSION = os.environ.get("OPERATOR_VERSION", "0.22.2")
+# Operator namespace (for status checks)
 OPERATOR_NAMESPACE = os.environ.get("OPERATOR_NAMESPACE", "openclaw-operator-system")
-# China ECR mirror for operator image
-OPERATOR_ECR_MIRROR = "public.ecr.aws/t6v6o5d5/kube-prometheus"
 
 # Env-based config
 OPENCLAW_NAMESPACE = os.environ.get("OPENCLAW_NAMESPACE", "openclaw")
@@ -75,6 +71,49 @@ class K8sClient:
         if self._api_client:
             await self._api_client.close()
             self._initialized = False
+
+    # ─── Pod exec ───
+
+    async def exec_in_pod(
+        self,
+        namespace: str,
+        pod_name: str,
+        command: list,
+        container: str = "openclaw",
+        timeout: int = 10,
+    ) -> tuple:
+        """Execute a command inside a pod via the Kubernetes API.
+
+        Returns (stdout: str, stderr: str, exit_code: int).
+        Uses kubernetes_asyncio's WebSocket-based exec stream.
+        """
+        await self.initialize()
+        from kubernetes_asyncio.stream import WsApiClient
+
+        async with WsApiClient() as ws_client:
+            core_ws = client.CoreV1Api(ws_client)
+            try:
+                resp = await asyncio.wait_for(
+                    core_ws.connect_get_namespaced_pod_exec(
+                        name=pod_name,
+                        namespace=namespace,
+                        command=command,
+                        container=container,
+                        stderr=True,
+                        stdin=False,
+                        stdout=True,
+                        tty=False,
+                    ),
+                    timeout=timeout,
+                )
+                # resp is the raw output string when using connect_get
+                return (resp or "", "", 0)
+            except asyncio.TimeoutError:
+                return ("", "exec timed out", 1)
+            except client.exceptions.ApiException as e:
+                return ("", f"K8s API error: {e.reason}", e.status or 1)
+            except Exception as e:
+                return ("", str(e), 1)
 
     # ─── OpenClawInstance CRD ───
 
@@ -564,96 +603,8 @@ class K8sClient:
             "pods": operator_pods,
         }
 
-    async def install_operator(
-        self,
-        version: str = "",
-        china_region: bool = False,
-    ) -> dict:
-        """Install the OpenClaw operator via Helm.
-
-        Args:
-            version: Helm chart version (default: OPERATOR_VERSION env var)
-            china_region: If True, use ECR mirror image for China regions
-        """
-        ver = version or OPERATOR_VERSION
-        cmd = [
-            "helm", "install", "openclaw-operator",
-            OPERATOR_CHART,
-            "--version", ver,
-            "--namespace", OPERATOR_NAMESPACE,
-            "--create-namespace",
-            "--set", "crds.install=true",
-            "--set", "crds.keep=true",
-            "--wait",
-            "--timeout", "10m",
-        ]
-        if china_region:
-            cmd += [
-                "--set", f"image.repository={OPERATOR_ECR_MIRROR}",
-                "--set", f"image.tag=openclaw-operator-v{ver}",
-            ]
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-
-        if proc.returncode != 0:
-            err = stderr.decode().strip()
-            # If already installed, treat as success
-            if "cannot re-use a name that is still in use" in err:
-                return {"status": "already_installed", "version": ver}
-            raise RuntimeError(f"helm install failed (exit {proc.returncode}): {err}")
-
-        return {
-            "status": "installed",
-            "version": ver,
-            "namespace": OPERATOR_NAMESPACE,
-            "output": stdout.decode().strip()[:500],
-        }
-
-    async def upgrade_operator(
-        self,
-        version: str = "",
-        china_region: bool = False,
-    ) -> dict:
-        """Upgrade the OpenClaw operator via Helm."""
-        ver = version or OPERATOR_VERSION
-        cmd = [
-            "helm", "upgrade", "openclaw-operator",
-            OPERATOR_CHART,
-            "--version", ver,
-            "--namespace", OPERATOR_NAMESPACE,
-            "--set", "crds.install=true",
-            "--set", "crds.keep=true",
-            "--wait",
-            "--timeout", "10m",
-        ]
-        if china_region:
-            cmd += [
-                "--set", f"image.repository={OPERATOR_ECR_MIRROR}",
-                "--set", f"image.tag=openclaw-operator-v{ver}",
-            ]
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"helm upgrade failed (exit {proc.returncode}): {stderr.decode().strip()}")
-
-        return {
-            "status": "upgraded",
-            "version": ver,
-            "namespace": OPERATOR_NAMESPACE,
-            "output": stdout.decode().strip()[:500],
-        }
+    # Operator install/upgrade removed — use install.sh or Terraform instead.
+    # The get_operator_status() method above is kept for read-only health checks.
 
 
 # Global singleton

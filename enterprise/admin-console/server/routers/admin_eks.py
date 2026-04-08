@@ -284,79 +284,9 @@ async def get_operator_status(authorization: str = Header(default="")):
     return status
 
 
-@router.post("/api/v1/admin/eks/operator/install")
-async def install_operator(body: dict = {}, authorization: str = Header(default="")):
-    """Install the OpenClaw operator on the EKS cluster via Helm.
-
-    Requires `helm` CLI available on the server. Uses the official
-    OCI chart from ghcr.io/openclaw-rocks/charts. For China regions,
-    automatically uses the ECR mirror image.
-
-    Body (all optional):
-      - version: Helm chart version (default: env OPERATOR_VERSION or 0.22.2)
-      - chinaRegion: bool, use ECR mirror (auto-detected from AWS_REGION)
-    """
-    require_role(authorization, roles=["admin"])
-
-    version = body.get("version", "")
-    china = body.get("chinaRegion", IS_CHINA_REGION)
-
-    # Check if already installed
-    try:
-        status = await k8s_client.get_operator_status()
-        if status["installed"]:
-            return {
-                "status": "already_installed",
-                "version": status["version"],
-                "namespace": status["namespace"],
-                "note": "Operator is already running. Use POST .../operator/upgrade to update.",
-            }
-    except Exception:
-        pass  # K8s API might be unreachable; proceed with install attempt
-
-    try:
-        result = await k8s_client.install_operator(version=version, china_region=china)
-    except RuntimeError as e:
-        raise HTTPException(500, str(e))
-
-    db.create_audit_entry({
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "eventType": "config_change", "actorId": "admin", "actorName": "Admin",
-        "targetType": "eks-operator", "targetId": "openclaw-operator",
-        "detail": f"Installed OpenClaw operator v{result.get('version', '?')} to {result.get('namespace', '')}",
-        "status": "success",
-    })
-
-    return result
-
-
-@router.post("/api/v1/admin/eks/operator/upgrade")
-async def upgrade_operator(body: dict = {}, authorization: str = Header(default="")):
-    """Upgrade the OpenClaw operator to a new version via Helm.
-
-    Body (all optional):
-      - version: Target Helm chart version
-      - chinaRegion: bool, use ECR mirror
-    """
-    require_role(authorization, roles=["admin"])
-
-    version = body.get("version", "")
-    china = body.get("chinaRegion", IS_CHINA_REGION)
-
-    try:
-        result = await k8s_client.upgrade_operator(version=version, china_region=china)
-    except RuntimeError as e:
-        raise HTTPException(500, str(e))
-
-    db.create_audit_entry({
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "eventType": "config_change", "actorId": "admin", "actorName": "Admin",
-        "targetType": "eks-operator", "targetId": "openclaw-operator",
-        "detail": f"Upgraded OpenClaw operator to v{result.get('version', '?')}",
-        "status": "success",
-    })
-
-    return result
+    # Operator install/upgrade removed — use install.sh or Terraform to deploy
+    # the operator before deploying agents. The status endpoint above is kept
+    # so the admin UI can display whether the operator is healthy.
 
 
 # =========================================================================

@@ -291,9 +291,14 @@ function GatewayConsoleButton() {
       });
       const data = await resp.json();
       if (data.available && data.gatewayToken) {
-        // Open via EC2 direct (port 8098) — bypasses CloudFront for WebSocket support
-        const gwUrl = data.directUrl || `/api/v1/portal/gateway/ui/`;
-        const url = `${gwUrl}?token=${data.gatewayToken}${data.dashboardToken ? '#token=' + data.dashboardToken : ''}`;
+        const isEks = data.deployMode === 'eks';
+        // EKS: always use proxy (in-cluster DNS, no direct URL).
+        // ECS: prefer direct URL (EC2 public IP:8098) for WebSocket support.
+        const gwUrl = isEks
+          ? `/api/v1/portal/gateway/ui/`
+          : (data.directUrl || `/api/v1/portal/gateway/ui/`);
+        const authParam = isEks ? `auth_token=${jwt}` : `token=${data.gatewayToken}`;
+        const url = `${gwUrl}?${authParam}${data.dashboardToken ? '#token=' + data.dashboardToken : ''}`;
         window.open(url, '_blank');
         // Auto-approve device pairing: the browser creates a pending pairing
         // request when it connects to the Gateway Console. Poll to approve it.
@@ -329,7 +334,7 @@ function GatewayConsoleButton() {
         {loading ? (
           <>
             <Loader2 size={14} className="animate-spin" />
-            Generating access token... {countdown > 0 && `(${countdown}s)`}
+            Connecting to Gateway... {countdown > 0 && `(${countdown}s)`}
           </>
         ) : (
           <>

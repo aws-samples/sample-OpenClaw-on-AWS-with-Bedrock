@@ -540,6 +540,17 @@ def portal_profile(authorization: str = Header(default="")):
     except Exception:
         pass
 
+    # Check for EKS deployment (eks-endpoint SSM param)
+    if deploy_mode == "serverless":
+        try:
+            ssm_eks = boto3.client("ssm", region_name=GATEWAY_REGION)
+            ssm_eks.get_parameter(
+                Name=f"/openclaw/{stack}/tenants/{user.employee_id}/eks-endpoint")
+            deploy_mode = "eks"
+            is_always_on = True
+        except Exception:
+            pass
+
     return {
         "employee": emp,
         "agent": agent,
@@ -548,7 +559,7 @@ def portal_profile(authorization: str = Header(default="")):
         "dailyMemoryCount": len(s3ops.list_files(f"{user.employee_id}/workspace/memory/")),
         "memoryPreview": memory_preview,
         "isAlwaysOn": is_always_on,
-        "deployMode": deploy_mode,            # "serverless" | "always-on-ecs"
+        "deployMode": deploy_mode,            # "serverless" | "always-on-ecs" | "eks"
         "alwaysOnAgentId": always_on_agent_id,
         "dedicatedBots": dedicated_bot_info,  # which channels have dedicated bot tokens
         "imConnectionMode": (
@@ -718,6 +729,8 @@ def portal_channels(authorization: str = Header(default="")):
 
     # Determine deploy mode
     is_always_on = False
+    is_eks = False
+    eks_endpoint = None
     always_on_agent_id = None
     dedicated_bots = {}
     try:
@@ -735,6 +748,17 @@ def portal_channels(authorization: str = Header(default="")):
                 dedicated_bots[ch] = False
     except Exception:
         pass
+
+    # Check for EKS deployment
+    if not is_always_on:
+        try:
+            ssm_eks = boto3.client("ssm", region_name=GATEWAY_REGION)
+            ep = ssm_eks.get_parameter(
+                Name=f"/openclaw/{stack}/tenants/{user.employee_id}/eks-endpoint")
+            eks_endpoint = ep["Parameter"]["Value"]
+            is_eks = True
+        except Exception:
+            pass
 
     # Get connected channels
     connected = []
@@ -771,7 +795,12 @@ def portal_channels(authorization: str = Header(default="")):
                 ch_instructions[ch] = f"Your agent has a dedicated {ch.title()} bot. Messages go directly to your ECS agent — no pairing needed."
 
     # Mode banner text
-    if is_always_on and has_dedicated:
+    if is_eks:
+        ch_instructions["mode_note"] = (
+            "Your agent runs on EKS (instant response, no cold start). "
+            "Open the Gateway Console below to manage your IM connections directly."
+        )
+    elif is_always_on and has_dedicated:
         ch_instructions["mode_note"] = (
             "Your agent runs on ECS Fargate with a dedicated IM bot. "
             "Messages go directly to your persistent agent — instant response, no cold start."
@@ -819,13 +848,16 @@ def portal_channels(authorization: str = Header(default="")):
         except Exception:
             pass
 
+    deploy_mode = "eks" if is_eks else ("always-on-ecs" if is_always_on else "serverless")
+
     return {
         "connected": connected,
-        "deployMode": "always-on-ecs" if is_always_on else "serverless",
+        "deployMode": deploy_mode,
         "pairingMode": pairing_mode,
         "pairingInstructions": instructions,
         "dedicatedBots": dedicated_bots,
         "alwaysOnAgentId": always_on_agent_id,
+        "eksEndpoint": eks_endpoint,
         "agentIp": agent_ip,
         "instanceId": instance_id,
         "gatewayToken": gw_token,

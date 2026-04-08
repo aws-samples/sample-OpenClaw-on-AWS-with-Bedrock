@@ -11,7 +11,7 @@ import {
 import { Card, StatCard, Badge, Button, Table, Modal, Input, Select, Toggle } from '../components/ui';
 import {
   useEksCluster, useDiscoverClusters, useAssociateCluster, useDisassociateCluster,
-  useEksInstances, useInstallOperator,
+  useEksInstances,
   useDeployEksAgent, useStopEksAgent, useReloadEksAgent, useEksAgentLogs,
 } from '../hooks/useApi';
 import type { EksDeployParams } from '../hooks/useApi';
@@ -24,7 +24,6 @@ export function EksClusterTab() {
   const discover = useDiscoverClusters();
   const associate = useAssociateCluster();
   const disassociate = useDisassociateCluster();
-  const installOp = useInstallOperator();
   const [discovered, setDiscovered] = useState<any[]>([]);
   const [showDiscover, setShowDiscover] = useState(false);
   const [error, setError] = useState('');
@@ -55,16 +54,6 @@ export function EksClusterTab() {
     if (!confirm('Remove cluster association? EKS agents will become unreachable.')) return;
     await disassociate.mutateAsync();
     refetch();
-  };
-
-  const handleInstallOperator = async () => {
-    setError('');
-    try {
-      await installOp.mutateAsync({});
-      refetch();
-    } catch (e: any) {
-      setError(e?.message || 'Failed to install operator');
-    }
   };
 
   if (isLoading) {
@@ -149,12 +138,10 @@ export function EksClusterTab() {
                 <AlertTriangle size={18} className="text-warning" />
                 <div className="flex-1">
                   <p className="text-sm font-medium text-text-primary">OpenClaw Operator not installed</p>
-                  <p className="text-xs text-text-muted mt-0.5">Install the operator to enable agent deployment on this cluster.</p>
+                  <p className="text-xs text-text-muted mt-0.5">
+                    Run <code className="bg-dark-bg px-1.5 py-0.5 rounded text-primary-light">install.sh</code> or <code className="bg-dark-bg px-1.5 py-0.5 rounded text-primary-light">terraform apply</code> to deploy the operator before deploying agents.
+                  </p>
                 </div>
-                <Button size="sm" variant="primary" onClick={handleInstallOperator} disabled={installOp.isPending}>
-                  {installOp.isPending ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-                  Install Operator
-                </Button>
               </div>
             </div>
           )}

@@ -1056,18 +1056,6 @@ export function useEksOperatorStatus() {
   });
 }
 
-export function useInstallOperator() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (data?: { version?: string; chinaRegion?: boolean }) =>
-      api.post<any>('/admin/eks/operator/install', data || {}),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['eks-operator'] });
-      qc.invalidateQueries({ queryKey: ['eks-cluster'] });
-    },
-  });
-}
-
 export interface EksDeployParams {
   agentId: string;
   model?: string;

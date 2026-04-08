@@ -95,7 +95,8 @@ describe('EksClusterTab', () => {
 
     expect(screen.getByText('Not installed')).toBeInTheDocument();
     expect(screen.getByText(/OpenClaw Operator not installed/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /install operator/i })).toBeInTheDocument();
+    // No install button — operator is deployed via install.sh / Terraform
+    expect(screen.getByText('install.sh')).toBeInTheDocument();
   });
 
   it('has refresh and disassociate buttons when configured', () => {

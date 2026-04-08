@@ -23,9 +23,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     apt-get purge -y unzip && apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
-# Install helm (for operator install)
-RUN curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-
 # Python deps
 COPY server/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt

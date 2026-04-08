@@ -11,10 +11,10 @@ rules:
   - apiGroups: ["openclaw.rocks"]
     resources: ["openclawinstances", "openclawselfconfigs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Pod status + logs
+  # Pod status, logs, and exec (for gateway proxy approve-pairing)
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "services", "serviceaccounts", "namespaces"]
-    verbs: ["get", "list", "watch"]
+    resources: ["pods", "pods/log", "pods/exec", "services", "serviceaccounts", "namespaces"]
+    verbs: ["get", "list", "watch", "create"]
   # Operator deployment status
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
