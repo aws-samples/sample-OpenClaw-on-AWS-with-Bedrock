@@ -202,7 +202,9 @@ Go to **Skill Market** (sidebar):
 
 ### 4.5 Set Up IM Bots
 
-This connects the platform to Telegram, Discord, Slack, etc. so employees can chat with their agents via IM. The setup is the same as a standard OpenClaw EC2 deployment — you SSM into the EC2 and use the Gateway Web UI.
+This connects the platform to Telegram, Discord, Slack, etc. so employees can chat with their agents via IM. There are two ways to configure IM channels:
+
+#### Option A: Gateway Web UI (recommended for first-time setup)
 
 ```bash
 # From your local machine — port-forward to Gateway UI:
@@ -211,20 +213,42 @@ aws ssm start-session --target <INSTANCE_ID> --region <REGION> \
   --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 ```
 
-**Get the gateway token:**
+Get the gateway token:
 ```bash
 aws ssm get-parameter \
   --name "/openclaw/<STACK_NAME>/gateway-token" \
   --with-decryption --query Parameter.Value --output text --region <REGION>
 ```
 
-**Open browser:** `http://localhost:18789/?token=<TOKEN>`
+Open browser: `http://localhost:18789/?token=<TOKEN>`
 
-Go to **Channels** → select platform → follow the setup wizard. Each platform (Telegram, Discord, Slack, WhatsApp, Feishu/Lark, Microsoft Teams, Google Chat) has its own setup flow.
+Go to **Channels** → select platform → follow the setup wizard. The Web UI provides a guided flow for each platform with credential validation.
 
-**Full channel documentation:** https://docs.openclaw.ai/channels
+#### Option B: CLI on EC2 (for experienced users)
 
-**Verify after setup:**
+SSM directly into the EC2 and use the OpenClaw CLI:
+
+```bash
+aws ssm start-session --target <INSTANCE_ID> --region <REGION>
+sudo su - ubuntu
+
+# Interactive TUI — navigate to Channels to add/configure bots
+openclaw tui
+
+# Or use openclaw CLI commands directly
+openclaw channels list                    # View configured channels
+openclaw channels add telegram            # Interactive setup for Telegram
+openclaw channels add discord             # Interactive setup for Discord
+```
+
+The CLI provides the same configuration options as the Web UI. Use whichever you prefer.
+
+#### Channel documentation
+
+Each platform (Telegram, Discord, Slack, WhatsApp, Feishu/Lark, Microsoft Teams, Google Chat) has its own setup process. Refer to the official guides: https://docs.openclaw.ai/channels
+
+#### Verify after setup
+
 ```bash
 # SSM into EC2
 aws ssm start-session --target <INSTANCE_ID> --region <REGION>
