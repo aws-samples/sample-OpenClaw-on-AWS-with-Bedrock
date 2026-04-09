@@ -296,7 +296,7 @@ export default function AgentList() {
           <Badge color="info">{filtered.length} agents</Badge>
         </div>
 
-        {activeTab !== 'config' && activeTab !== 'shared' && <DataTable
+        {activeTab !== 'config' && activeTab !== 'shared' && activeTab !== 'eks' && <DataTable
           columns={[
             { key: 'name', label: 'Agent', render: (a: Agent) => (
               <div className="flex items-center gap-3">
@@ -305,7 +305,7 @@ export default function AgentList() {
                 </div>
                 <div>
                   <button onClick={() => navigate(`/agents/${a.id}`)} className="text-sm font-medium text-primary-light hover:underline">{a.name}</button>
-                  <p className="text-xs text-text-muted">{a.deployMode === 'always-on-ecs' ? '⚡ Always-on' : 'Serverless'}{a.employeeName ? ` · ${a.employeeName}` : ''}</p>
+                  <p className="text-xs text-text-muted">{a.deployMode === 'always-on-ecs' ? '⚡ ECS' : a.deployMode === 'eks' ? '☸ EKS' : 'Serverless'}{a.employeeName ? ` · ${a.employeeName}` : ''}</p>
                 </div>
               </div>
             )},
