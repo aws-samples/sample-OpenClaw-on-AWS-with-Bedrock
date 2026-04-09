@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenClaw Enterprise — UI Guide</title>
+<style>
+:root{--bg:#0f1117;--surface:#1a1d27;--card:#222536;--border:#2d3148;--primary:#6366f1;--primary-light:#818cf8;--success:#10b981;--warning:#f59e0b;--danger:#ef4444;--cyan:#06b6d4;--text:#e2e8f0;--text-sec:#94a3b8;--text-muted:#64748b;--radius:12px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+.container{max-width:1100px;margin:0 auto;padding:20px}
+
+/* Header */
+.header{text-align:center;padding:40px 20px 30px;border-bottom:1px solid var(--border)}
+.header h1{font-size:28px;margin-bottom:8px}
+.header p{color:var(--text-sec);font-size:14px}
+.lang-toggle{display:flex;gap:4px;justify-content:center;margin-top:16px}
+.lang-btn{padding:6px 16px;border-radius:20px;border:1px solid var(--border);background:transparent;color:var(--text-muted);cursor:pointer;font-size:13px;transition:all .2s}
+.lang-btn.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+
+/* Role tabs */
+.role-tabs{display:flex;gap:4px;justify-content:center;margin:24px 0;background:var(--surface);border-radius:10px;padding:4px;width:fit-content;margin-left:auto;margin-right:auto}
+.role-tab{padding:8px 24px;border-radius:8px;border:none;background:transparent;color:var(--text-muted);cursor:pointer;font-size:14px;font-weight:500;transition:all .2s}
+.role-tab.active{background:var(--primary);color:#fff}
+
+/* Progress */
+.progress-bar{display:flex;gap:2px;margin:20px 0 30px;overflow-x:auto;padding:4px 0}
+.progress-step{flex:1;min-width:80px;text-align:center;padding:8px 4px;border-radius:8px;cursor:pointer;transition:all .2s;border:1px solid transparent}
+.progress-step:hover{background:var(--surface)}
+.progress-step.active{background:var(--primary);border-color:var(--primary)}
+.progress-step.done{border-color:var(--success)}
+.step-num{display:block;font-size:11px;color:var(--text-muted);margin-bottom:2px}
+.progress-step.active .step-num{color:rgba(255,255,255,.7)}
+.step-label{font-size:11px;font-weight:500}
+.progress-step.active .step-label{color:#fff}
+.progress-step.done .step-num{color:var(--success)}
+
+/* Step content */
+.step-content{display:none}
+.step-content.active{display:block}
+.step-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:28px;margin-bottom:24px}
+.step-title{font-size:20px;font-weight:600;margin-bottom:6px}
+.step-desc{color:var(--text-sec);font-size:14px;margin-bottom:20px}
+
+/* Mockup */
+.mockup{background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:16px 0}
+.mockup-header{background:var(--surface);padding:10px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;font-size:13px;font-weight:600}
+.mockup-body{padding:16px}
+.mockup-sidebar{display:flex;gap:0}
+.mock-sidebar{width:180px;background:var(--bg);padding:12px;border-right:1px solid var(--border);min-height:300px}
+.mock-sidebar-item{padding:7px 10px;border-radius:6px;font-size:12px;color:var(--text-muted);margin-bottom:2px;cursor:default}
+.mock-sidebar-item.active{background:var(--primary);color:#fff}
+.mock-sidebar-item.sub{padding-left:24px;font-size:11px}
+.mock-main{flex:1;padding:16px;min-height:300px}
+
+/* UI Elements */
+.mock-input{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;width:100%;display:block;margin-bottom:8px}
+.mock-btn{display:inline-block;padding:6px 16px;border-radius:8px;font-size:12px;font-weight:500;cursor:default}
+.mock-btn.primary{background:var(--primary);color:#fff}
+.mock-btn.success{background:var(--success);color:#fff}
+.mock-btn.ghost{background:transparent;border:1px solid var(--border);color:var(--text-sec)}
+.mock-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600}
+.mock-badge.green{background:rgba(16,185,129,.15);color:var(--success)}
+.mock-badge.yellow{background:rgba(245,158,11,.15);color:var(--warning)}
+.mock-badge.blue{background:rgba(99,102,241,.15);color:var(--primary-light)}
+.mock-badge.cyan{background:rgba(6,182,212,.15);color:var(--cyan)}
+
+.mock-table{width:100%;border-collapse:collapse;font-size:12px}
+.mock-table th{text-align:left;padding:6px 10px;color:var(--text-muted);font-size:10px;text-transform:uppercase;border-bottom:1px solid var(--border);font-weight:500}
+.mock-table td{padding:8px 10px;border-bottom:1px solid rgba(45,49,72,.5)}
+
+.mock-stat{text-align:center;padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)}
+.mock-stat .val{font-size:22px;font-weight:700}
+.mock-stat .lbl{font-size:10px;color:var(--text-muted);margin-top:2px}
+
+.mock-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px}
+
+/* Annotation */
+.annotation{display:flex;align-items:flex-start;gap:10px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.2);border-radius:8px;padding:12px 16px;margin:12px 0;font-size:13px}
+.annotation.success{background:rgba(16,185,129,.08);border-color:rgba(16,185,129,.2)}
+.annotation.warning{background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.2)}
+.ann-icon{font-size:16px;flex-shrink:0;margin-top:1px}
+.ann-text{flex:1}
+.ann-text strong{color:var(--text)}
+
+/* Tabs inside mockup */
+.mock-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:12px}
+.mock-tab{padding:6px 14px;font-size:12px;color:var(--text-muted);border-bottom:2px solid transparent;cursor:default}
+.mock-tab.active{color:var(--primary-light);border-bottom-color:var(--primary)}
+
+/* Nav buttons */
+.nav-btns{display:flex;justify-content:space-between;margin-top:30px;padding-top:20px;border-top:1px solid var(--border)}
+.nav-btn{padding:10px 24px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-size:14px;transition:all .2s}
+.nav-btn:hover{border-color:var(--primary);color:var(--primary-light)}
+.nav-btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+.nav-btn.primary:hover{background:var(--primary-light)}
+.nav-btn:disabled{opacity:.4;cursor:not-allowed}
+
+/* Chain */
+.chain{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:10px 0}
+.chain-node{padding:4px 10px;border-radius:6px;font-size:11px;font-weight:500;border:1px solid var(--border);background:var(--bg)}
+.chain-arrow{color:var(--text-muted);font-size:12px}
+.chain-node.primary{background:rgba(99,102,241,.1);border-color:rgba(99,102,241,.3);color:var(--primary-light)}
+.chain-node.success{background:rgba(16,185,129,.1);border-color:rgba(16,185,129,.3);color:var(--success)}
+.chain-node.cyan{background:rgba(6,182,212,.1);border-color:rgba(6,182,212,.3);color:var(--cyan)}
+
+/* Hotspot */
+.hotspot{position:relative;display:inline-block}
+.hotspot::after{content:"";position:absolute;inset:-3px;border:2px solid var(--warning);border-radius:8px;animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+.code-block{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'SF Mono',Monaco,monospace;font-size:12px;color:var(--text-sec);white-space:pre-wrap;margin:8px 0;overflow-x:auto}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1 id="h-title">OpenClaw Enterprise — UI Guide</h1>
+  <p id="h-desc">Step-by-step walkthrough for IT Administrators and Employees</p>
+  <div class="lang-toggle">
+    <button class="lang-btn active" onclick="setLang('en')">English</button>
+    <button class="lang-btn" onclick="setLang('zh')">中文</button>
+  </div>
+</div>
+
+<div class="container">
+  <div class="role-tabs">
+    <button class="role-tab active" onclick="setRole('admin')" id="tab-admin">IT Admin</button>
+    <button class="role-tab" onclick="setRole('employee')" id="tab-employee">Employee</button>
+  </div>
+
+  <div class="progress-bar" id="progress-bar"></div>
+
+  <div id="steps-container"></div>
+
+  <div class="nav-btns">
+    <button class="nav-btn" id="btn-prev" onclick="prevStep()">← <span data-en="Previous" data-zh="上一步">Previous</span></button>
+    <button class="nav-btn primary" id="btn-next" onclick="nextStep()"><span data-en="Next" data-zh="下一步">Next</span> →</button>
+  </div>
+</div>
+
+<script>
+const STEPS = {
+  admin: [
+    {
+      id: 'login',
+      en: { title: 'Login to Admin Console', desc: 'Access the platform via SSM port forwarding and sign in.' },
+      zh: { title: '登录管理控制台', desc: '通过 SSM 端口转发访问平台并登录。' },
+      html: () => `
+        <div class="annotation"><span class="ann-icon">💻</span><div class="ann-text">
+          <strong data-en="First: Start port forwarding" data-zh="第一步：启动端口转发">First: Start port forwarding</strong><br>
+          <div class="code-block">aws ssm start-session --target &lt;INSTANCE_ID&gt; --region &lt;REGION&gt; \\
+  --document-name AWS-StartPortForwardingSession \\
+  --parameters '{"portNumber":["8099"],"localPortNumber":["8099"]}'</div>
+          <span data-en="Then open" data-zh="然后打开">Then open</span> <strong>http://localhost:8099</strong>
+        </div></div>
+        <div class="mockup">
+          <div class="mockup-header">OpenClaw Enterprise</div>
+          <div class="mockup-body" style="text-align:center;padding:40px">
+            <div style="max-width:320px;margin:0 auto">
+              <div style="font-size:18px;font-weight:600;margin-bottom:20px" data-en="Sign In" data-zh="登录">Sign In</div>
+              <input class="mock-input" placeholder="Employee ID (e.g. emp-jiade)" readonly>
+              <input class="mock-input" type="password" placeholder="Password" readonly>
+              <div class="hotspot"><div class="mock-btn primary" style="width:100%;text-align:center;padding:10px" data-en="Sign In" data-zh="登录">Sign In</div></div>
+              <div style="margin-top:16px;font-size:11px;color:var(--text-muted)" data-en="Or click a demo account below to auto-fill" data-zh="或点击下方演示账号自动填充">Or click a demo account below to auto-fill</div>
+              <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px;justify-content:center">
+                <span class="mock-badge blue">Jiade Wu (Admin)</span>
+                <span class="mock-badge green">Carol (Finance)</span>
+                <span class="mock-badge cyan">Ryan (SDE)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation success"><span class="ann-icon">✅</span><div class="ann-text">
+          <strong data-en="Default admin account:" data-zh="默认管理员账号：">Default admin account:</strong> emp-jiade / &lt;your ADMIN_PASSWORD from .env&gt;
+        </div></div>`
+    },
+    {
+      id: 'dashboard',
+      en: { title: 'Dashboard Overview', desc: 'After login, you see the dashboard with platform health and setup checklist.' },
+      zh: { title: '仪表盘概览', desc: '登录后看到仪表盘，显示平台健康状态和配置清单。' },
+      html: () => `
+        <div class="mockup">
+          <div class="mockup-sidebar">
+            <div class="mock-sidebar">
+              <div class="mock-sidebar-item active">Dashboard</div>
+              <div class="mock-sidebar-item">Organization ▾</div>
+              <div class="mock-sidebar-item">Agent Factory</div>
+              <div class="mock-sidebar-item">Workspace</div>
+              <div class="mock-sidebar-item">Skill Market</div>
+              <div class="mock-sidebar-item">IM Channels</div>
+              <div class="mock-sidebar-item">Security Center</div>
+              <div class="mock-sidebar-item">Monitor</div>
+              <div class="mock-sidebar-item">Playground</div>
+              <div class="mock-sidebar-item" style="margin-top:auto">Settings</div>
+            </div>
+            <div class="mock-main">
+              <div style="font-size:16px;font-weight:600;margin-bottom:12px" data-en="Setup Checklist" data-zh="配置清单">Setup Checklist</div>
+              <div style="font-size:12px;color:var(--text-sec);margin-bottom:12px" data-en="Complete these steps to get your platform running:" data-zh="完成以下步骤以启动平台：">Complete these steps to get your platform running:</div>
+              <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:20px">
+                <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;background:rgba(16,185,129,.08);font-size:12px"><span style="color:var(--success)">✓</span> <span data-en="Deploy infrastructure" data-zh="部署基础设施">Deploy infrastructure</span></div>
+                <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;background:rgba(16,185,129,.08);font-size:12px"><span style="color:var(--success)">✓</span> <span data-en="Seed org data" data-zh="导入组织数据">Seed org data</span></div>
+                <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;background:rgba(245,158,11,.08);font-size:12px"><span style="color:var(--warning)">○</span> <span data-en="Configure SOUL templates" data-zh="配置 SOUL 模板">Configure SOUL templates</span></div>
+                <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;background:rgba(245,158,11,.08);font-size:12px"><span style="color:var(--warning)">○</span> <span data-en="Connect IM channels" data-zh="连接 IM 通道">Connect IM channels</span></div>
+                <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;background:rgba(245,158,11,.08);font-size:12px"><span style="color:var(--warning)">○</span> <span data-en="Test in Playground" data-zh="在 Playground 测试">Test in Playground</span></div>
+              </div>
+              <div class="mock-stats">
+                <div class="mock-stat"><div class="val">5</div><div class="lbl">Departments</div></div>
+                <div class="mock-stat"><div class="val">10</div><div class="lbl">Positions</div></div>
+                <div class="mock-stat"><div class="val">27</div><div class="lbl">Employees</div></div>
+                <div class="mock-stat"><div class="val">20</div><div class="lbl">Agents</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation"><span class="ann-icon">👆</span><div class="ann-text" data-en="Follow the setup checklist from top to bottom. Green checkmarks mean the step is done. Yellow circles need your attention." data-zh="从上到下按清单操作。绿色勾号表示已完成，黄色圆圈需要处理。">Follow the setup checklist from top to bottom. Green checkmarks mean the step is done. Yellow circles need your attention.</div></div>`
+    },
+    {
+      id: 'org',
+      en: { title: 'Review Organization', desc: 'Check departments, positions, and employees. The platform comes pre-seeded with demo data.' },
+      zh: { title: '查看组织架构', desc: '检查部门、职能和员工。平台已预置演示数据。' },
+      html: () => `
+        <div class="annotation"><span class="ann-icon">📍</span><div class="ann-text" data-en="Navigate to: Sidebar → Organization → Positions" data-zh="导航到：侧边栏 → Organization → Positions">Navigate to: Sidebar → Organization → Positions</div></div>
+        <div class="mockup">
+          <div class="mockup-header" data-en="Position Management" data-zh="职能管理">Position Management</div>
+          <div class="mockup-body">
+            <div class="mock-stats">
+              <div class="mock-stat"><div class="val">10</div><div class="lbl">Positions</div></div>
+              <div class="mock-stat"><div class="val">27</div><div class="lbl">Members</div></div>
+              <div class="mock-stat"><div class="val">20</div><div class="lbl">Agents</div></div>
+              <div class="mock-stat"><div class="val" style="color:var(--warning)">3</div><div class="lbl">SOUL Configured</div></div>
+            </div>
+            <table class="mock-table">
+              <tr><th>Position</th><th>Department</th><th>SOUL</th><th>Skills</th><th>Provision</th></tr>
+              <tr><td style="color:var(--primary-light)">Solutions Architect</td><td>Technology</td><td><span class="mock-badge green">286 words</span></td><td>3</td><td><span class="mock-badge green">5/5</span></td></tr>
+              <tr><td style="color:var(--primary-light)">Software Engineer</td><td>Technology</td><td><span class="mock-badge green">312 words</span></td><td>4</td><td><span class="mock-badge green">4/4</span></td></tr>
+              <tr><td style="color:var(--primary-light)">Finance Analyst</td><td>Finance</td><td><span class="mock-badge yellow">Empty</span></td><td>2</td><td><span class="mock-badge yellow">2/3</span></td></tr>
+            </table>
+          </div>
+        </div>
+        <div class="annotation warning"><span class="ann-icon">⚠️</span><div class="ann-text" data-en="Positions with 'Empty' SOUL badge need attention — agents won't know their professional identity without a SOUL template." data-zh="标记为 'Empty' 的职能需要配置 — 没有 SOUL 模板的 Agent 不知道自己的职业身份。">Positions with 'Empty' SOUL badge need attention — agents won't know their professional identity without a SOUL template.</div></div>`
+    },
+    {
+      id: 'soul',
+      en: { title: 'Configure SOUL Templates', desc: 'SOUL defines who each agent IS. Three layers: Global → Position → Personal.' },
+      zh: { title: '配置 SOUL 模板', desc: 'SOUL 定义了每个 Agent 的身份。三层继承：Global → Position → Personal。' },
+      html: () => `
+        <div style="margin-bottom:16px">
+          <div style="font-size:14px;font-weight:600;margin-bottom:8px" data-en="SOUL Inheritance Chain" data-zh="SOUL 继承链">SOUL Inheritance Chain</div>
+          <div class="chain">
+            <span class="chain-node">🔒 Global</span><span class="chain-arrow">→</span>
+            <span class="chain-node primary">✏️ Position</span><span class="chain-arrow">→</span>
+            <span class="chain-node success">✏️ Personal</span><span class="chain-arrow">=</span>
+            <span class="chain-node cyan">Merged SOUL</span>
+          </div>
+        </div>
+        <div class="annotation"><span class="ann-icon">📍</span><div class="ann-text" data-en="Step A: Edit Global SOUL → Security Center → Policies → 'Edit Global SOUL'" data-zh="步骤 A：编辑 Global SOUL → Security Center → Policies → 'Edit Global SOUL'">Step A: Edit Global SOUL → Security Center → Policies → "Edit Global SOUL"</div></div>
+        <div class="mockup">
+          <div class="mockup-header">Global SOUL.md — All Agents</div>
+          <div class="mockup-body">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">_shared/soul/global/SOUL.md</div>
+            <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:monospace;font-size:12px;color:var(--text-sec);min-height:100px"># ACME Corp — Digital Employee Policy<br><br>You are a digital employee of ACME Corp.<br>Never share credentials or internal documents externally.</div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+              <div class="mock-btn ghost">Cancel</div>
+              <div class="hotspot"><div class="mock-btn primary" data-en="Save to S3" data-zh="保存到 S3">Save to S3</div></div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation"><span class="ann-icon">📍</span><div class="ann-text" data-en="Step B: Edit Position SOUL → Organization → Positions → click position → SOUL tab" data-zh="步骤 B：编辑 Position SOUL → Organization → Positions → 点击职能 → SOUL 标签">Step B: Edit Position SOUL → Organization → Positions → click position → SOUL tab</div></div>
+        <div class="mockup">
+          <div class="mockup-header">Solutions Architect — Detail</div>
+          <div class="mockup-body">
+            <div class="mock-tabs">
+              <div class="mock-tab active">SOUL</div>
+              <div class="mock-tab">Skills & Tools</div>
+              <div class="mock-tab">Employees (5)</div>
+            </div>
+            <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:monospace;font-size:12px;color:var(--text-sec);min-height:80px">You are a Solutions Architect specializing in AWS.<br>Always reference the Well-Architected Framework.<br>Provide cost estimates when possible.</div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+              <span style="font-size:11px;color:var(--text-muted);margin-right:auto">286 words</span>
+              <div class="hotspot"><div class="mock-btn primary" data-en="Save to S3" data-zh="保存到 S3">Save to S3</div></div>
+            </div>
+          </div>
+        </div>`
+    },
+    {
+      id: 'skills',
+      en: { title: 'Assign Skills to Positions', desc: 'Skills are tools agents can use. Assign them to positions — all agents in that position get the skill.' },
+      zh: { title: '分配技能给职能', desc: 'Skills 是 Agent 可以使用的工具。分配给职能后，该职能下所有 Agent 自动获得该技能。' },
+      html: () => `
+        <div class="annotation"><span class="ann-icon">📍</span><div class="ann-text" data-en="Navigate to: Sidebar → Skill Market → click any skill" data-zh="导航到：侧边栏 → Skill Market → 点击任一技能">Navigate to: Sidebar → Skill Market → click any skill</div></div>
+        <div class="mockup">
+          <div class="mockup-header">aws-bedrock-kb-search</div>
+          <div class="mockup-body">
+            <div style="display:flex;gap:6px;margin-bottom:12px">
+              <span class="mock-badge blue">Layer 2</span>
+              <span class="mock-badge green">information</span>
+              <span class="mock-badge cyan">department</span>
+            </div>
+            <div style="font-size:12px;color:var(--text-sec);margin-bottom:16px" data-en="Search enterprise knowledge bases via Amazon Bedrock Knowledge Bases (RAG). Semantic search with source attribution." data-zh="通过 Amazon Bedrock Knowledge Bases 搜索企业知识库 (RAG)。支持语义搜索和来源标注。">Search enterprise knowledge bases via Amazon Bedrock Knowledge Bases (RAG).</div>
+            <div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:12px">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+                <span style="background:var(--primary);color:#fff;font-size:10px;font-weight:700;width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center">1</span>
+                <span style="font-size:13px;font-weight:500" data-en="Prerequisites" data-zh="前置条件">Prerequisites</span>
+                <span class="mock-badge green" data-en="Ready" data-zh="就绪">Ready</span>
+              </div>
+              <div style="font-size:11px;color:var(--text-muted);margin-left:24px">BEDROCK_KB_ID — <span class="mock-badge green">IAM Role</span></div>
+            </div>
+            <div style="background:var(--bg);border-radius:8px;padding:12px">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+                <span style="background:var(--primary);color:#fff;font-size:10px;font-weight:700;width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center">2</span>
+                <span style="font-size:13px;font-weight:500" data-en="Assign to Position" data-zh="分配给职能">Assign to Position</span>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;margin-left:24px">
+                <select class="mock-input" style="width:auto;flex:1;margin:0"><option data-en="Select position..." data-zh="选择职能...">Select position...</option></select>
+                <div class="hotspot"><div class="mock-btn primary" data-en="Assign" data-zh="分配">Assign</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation success"><span class="ann-icon">💡</span><div class="ann-text" data-en="AWS-native skills (Bedrock, SES, S3) show 'IAM Role' = zero config needed. Third-party skills (GitHub, Jira) need an API key configured first in the API Key Vault tab." data-zh="AWS 原生技能 (Bedrock, SES, S3) 显示 'IAM Role' = 无需配置。第三方技能 (GitHub, Jira) 需要先在 API Key Vault 标签页配置 API 密钥。">AWS-native skills show "IAM Role" = zero config needed. Third-party skills need an API key first.</div></div>`
+    },
+    {
+      id: 'im',
+      en: { title: 'Set Up IM Channels', desc: 'Connect Telegram, Discord, Slack, etc. so employees can chat with agents via IM.' },
+      zh: { title: '配置 IM 通道', desc: '连接 Telegram、Discord、Slack 等，让员工通过即时通讯工具与 Agent 对话。' },
+      html: () => `
+        <div style="font-size:14px;font-weight:600;margin-bottom:8px" data-en="Two ways to configure:" data-zh="两种配置方式：">Two ways to configure:</div>
+        <div class="annotation"><span class="ann-icon">🌐</span><div class="ann-text">
+          <strong data-en="Option A: Gateway Web UI (recommended)" data-zh="方式 A：Gateway Web UI（推荐）">Option A: Gateway Web UI (recommended)</strong><br>
+          <div class="code-block">aws ssm start-session --target &lt;INSTANCE_ID&gt; --region &lt;REGION&gt; \\
+  --document-name AWS-StartPortForwardingSession \\
+  --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'</div>
+          <span data-en="Open" data-zh="打开">Open</span> <strong>http://localhost:18789/?token=&lt;TOKEN&gt;</strong> → Channels → Add
+        </div></div>
+        <div class="annotation"><span class="ann-icon">💻</span><div class="ann-text">
+          <strong data-en="Option B: CLI on EC2" data-zh="方式 B：EC2 命令行">Option B: CLI on EC2</strong><br>
+          <div class="code-block">aws ssm start-session --target &lt;INSTANCE_ID&gt; --region &lt;REGION&gt;
+sudo su - ubuntu
+openclaw tui          # Interactive UI — navigate to Channels
+openclaw channels list  # Verify configured channels</div>
+        </div></div>
+        <div class="mockup">
+          <div class="mockup-header" data-en="IM Channels — Admin Console" data-zh="IM 通道 — 管理控制台">IM Channels — Admin Console</div>
+          <div class="mockup-body">
+            <div class="mock-tabs">
+              <div class="mock-tab active">Telegram</div>
+              <div class="mock-tab">Discord</div>
+              <div class="mock-tab">Feishu</div>
+              <div class="mock-tab">Slack</div>
+              <div class="mock-tab">WhatsApp</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px;padding:10px;background:var(--bg);border-radius:8px;margin-bottom:12px">
+              <span style="font-size:24px">📱</span>
+              <div style="flex:1"><span style="font-weight:600;font-size:13px">Telegram Bot</span> <span class="mock-badge green">Bot Active</span></div>
+              <div class="mock-btn ghost" data-en="Test Connection" data-zh="测试连接">Test Connection</div>
+              <div style="text-align:right"><span style="font-size:20px;font-weight:700">5</span><br><span style="font-size:10px;color:var(--text-muted)" data-en="employees connected" data-zh="已连接员工">employees connected</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation success"><span class="ann-icon">📚</span><div class="ann-text" data-en="Full channel documentation: https://docs.openclaw.ai/channels — each platform (Telegram, Discord, Slack, WhatsApp, Feishu, Teams) has its own setup guide." data-zh="完整通道文档：https://docs.openclaw.ai/channels — 每个平台都有独立的配置指南。">Full channel documentation: https://docs.openclaw.ai/channels</div></div>`
+    },
+    {
+      id: 'playground',
+      en: { title: 'Test in Playground', desc: 'Send test messages as different employees to verify SOUL, permissions, and Bedrock connectivity.' },
+      zh: { title: '在 Playground 测试', desc: '以不同员工身份发送测试消息，验证 SOUL、权限和 Bedrock 连通性。' },
+      html: () => `
+        <div class="annotation"><span class="ann-icon">📍</span><div class="ann-text" data-en="Navigate to: Sidebar → Playground" data-zh="导航到：侧边栏 → Playground">Navigate to: Sidebar → Playground</div></div>
+        <div class="mockup">
+          <div class="mockup-header">Agent Playground</div>
+          <div class="mockup-body">
+            <div style="display:flex;gap:16px">
+              <div style="flex:1">
+                <div style="font-size:12px;font-weight:600;margin-bottom:8px" data-en="Tenant Context" data-zh="租户上下文">Tenant Context</div>
+                <select class="mock-input"><option>Carol Chen — Finance Analyst</option></select>
+                <div style="font-size:10px;color:var(--success);margin-bottom:12px">● Live · AgentCore</div>
+                <div style="background:var(--bg);border-radius:8px;padding:12px;min-height:150px;font-size:12px">
+                  <div style="background:rgba(99,102,241,.1);border-radius:8px;padding:8px;margin-bottom:8px"><strong>You:</strong> who are you?</div>
+                  <div style="background:var(--card);border-radius:8px;padding:8px"><strong>Agent:</strong> <span data-en="I'm Carol's AI assistant, a Finance Analyst at ACME Corp. I specialize in financial analysis, budgeting, and reporting..." data-zh="我是 Carol 的 AI 助手，ACME Corp 的财务分析师。我专注于财务分析、预算和报告...">I'm Carol's AI assistant, a Finance Analyst at ACME Corp...</span></div>
+                </div>
+                <div style="display:flex;gap:8px;margin-top:8px">
+                  <input class="mock-input" style="margin:0;flex:1" placeholder="Send a message...">
+                  <div class="mock-btn primary">Send</div>
+                </div>
+              </div>
+              <div style="width:220px">
+                <div class="mock-tabs"><div class="mock-tab active">Pipeline</div><div class="mock-tab">Files</div></div>
+                <div style="font-size:11px;color:var(--text-muted)">
+                  <div style="margin-bottom:6px"><strong>Profile:</strong> basic</div>
+                  <div style="margin-bottom:6px"><strong data-en="Tools:" data-zh="工具：">Tools:</strong> web_search, file</div>
+                  <div><strong data-en="Blocked:" data-zh="已拦截：">Blocked:</strong> shell, code_execution</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation"><span class="ann-icon">🧪</span><div class="ann-text" data-en="Test scenarios: 1) 'who are you?' — verify SOUL identity. 2) 'run git status' as Carol — should be refused (Finance, no shell). 3) Switch to Ryan (SDE) — should execute (has shell access)." data-zh="测试场景：1）'who are you?' — 验证 SOUL 身份。2）以 Carol 身份 'run git status' — 应被拒绝（Finance 无 shell 权限）。3）切换到 Ryan (SDE) — 应可执行。">Test: 1) "who are you?" → verify identity. 2) "run git status" as Finance → refused. 3) Switch to SDE → executes.</div></div>`
+    },
+  ],
+  employee: [
+    {
+      id: 'emp-login',
+      en: { title: 'Login to Employee Portal', desc: 'Access the portal and sign in with your employee credentials.' },
+      zh: { title: '登录员工门户', desc: '访问门户并使用员工凭据登录。' },
+      html: () => `
+        <div class="annotation"><span class="ann-icon">💻</span><div class="ann-text" data-en="Your IT admin will provide you with: Portal URL, Employee ID, Password" data-zh="IT 管理员会提供：门户 URL、员工 ID、密码">Your IT admin will provide you with: Portal URL, Employee ID, Password</div></div>
+        <div class="mockup">
+          <div class="mockup-header">OpenClaw Portal</div>
+          <div class="mockup-body" style="text-align:center;padding:40px">
+            <div style="max-width:300px;margin:0 auto">
+              <div style="font-size:18px;font-weight:600;margin-bottom:20px" data-en="Employee Login" data-zh="员工登录">Employee Login</div>
+              <input class="mock-input" placeholder="Employee ID (e.g. emp-carol)" readonly>
+              <input class="mock-input" type="password" placeholder="Password" readonly>
+              <div class="mock-btn primary" style="width:100%;text-align:center;padding:10px" data-en="Sign In" data-zh="登录">Sign In</div>
+            </div>
+          </div>
+        </div>`
+    },
+    {
+      id: 'emp-chat',
+      en: { title: 'Chat with Your Agent', desc: 'Your AI agent knows your role and has access to tools assigned by your admin.' },
+      zh: { title: '与你的 Agent 对话', desc: '你的 AI Agent 了解你的角色，并拥有管理员分配的工具权限。' },
+      html: () => `
+        <div class="annotation"><span class="ann-icon">📍</span><div class="ann-text" data-en="Click 'Chat' in the sidebar" data-zh="点击侧边栏的 'Chat'">Click "Chat" in the sidebar</div></div>
+        <div class="mockup">
+          <div class="mockup-header">
+            <span>💬</span>
+            <span data-en="Finance Agent — Carol Chen" data-zh="Finance Agent — Carol Chen">Finance Agent — Carol Chen</span>
+            <span class="mock-badge green">Connected</span>
+          </div>
+          <div class="mockup-body">
+            <div style="min-height:180px;font-size:13px">
+              <div style="background:rgba(99,102,241,.1);border-radius:12px;padding:10px;margin-bottom:8px;margin-left:60px;text-align:right" data-en="Help me analyze Q3 revenue trends" data-zh="帮我分析 Q3 的收入趋势">Help me analyze Q3 revenue trends</div>
+              <div style="background:var(--bg);border-radius:12px;padding:10px;margin-right:60px" data-en="I'll analyze the Q3 revenue data for you. Based on the financial reports, here are the key trends:
+1. Revenue grew 12% QoQ
+2. Subscription revenue up 18%
+3. Professional services flat..." data-zh="我来为你分析 Q3 收入数据。根据财务报告，主要趋势如下：
+1. 收入环比增长 12%
+2. 订阅收入增长 18%
+3. 专业服务持平...">I'll analyze the Q3 revenue data for you...</div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:12px">
+              <input class="mock-input" style="margin:0;flex:1" placeholder="Send a message to the agent...">
+              <div class="mock-btn primary">▶</div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation success"><span class="ann-icon">💡</span><div class="ann-text" data-en="The first message may take 6-10 seconds (cold start). Subsequent messages are faster. Your agent remembers context across the entire conversation." data-zh="第一条消息可能需要 6-10 秒（冷启动）。后续消息会更快。Agent 会记住整个对话的上下文。">The first message may take 6-10 seconds (cold start). Subsequent messages are faster.</div></div>`
+    },
+    {
+      id: 'emp-im',
+      en: { title: 'Connect IM', desc: 'Link your Telegram, Discord, or other IM account to chat with your agent directly.' },
+      zh: { title: '连接 IM', desc: '绑定你的 Telegram、Discord 或其他即时通讯账号，直接与 Agent 对话。' },
+      html: () => `
+        <div class="annotation"><span class="ann-icon">📍</span><div class="ann-text" data-en="Click 'Connect IM' in the sidebar" data-zh="点击侧边栏的 'Connect IM'">Click "Connect IM" in the sidebar</div></div>
+        <div class="mockup">
+          <div class="mockup-header" data-en="Connect IM" data-zh="连接 IM">Connect IM</div>
+          <div class="mockup-body">
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+              ${['Telegram', 'Discord', 'Slack', 'WhatsApp', 'Feishu', 'Teams'].map(ch => `
+                <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center">
+                  <div style="font-size:13px;font-weight:500;margin-bottom:6px">${ch}</div>
+                  <div class="mock-btn primary" style="font-size:11px" data-en="Connect" data-zh="连接">Connect</div>
+                </div>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div class="annotation"><span class="ann-icon">📱</span><div class="ann-text">
+          <strong data-en="How pairing works:" data-zh="配对流程：">How pairing works:</strong><br>
+          <span data-en="1. Click 'Connect' on your platform → get a pairing token" data-zh="1. 点击你的平台上的 'Connect' → 获取配对令牌">1. Click "Connect" → get a pairing token</span><br>
+          <span data-en="2. Send /start TOKEN to the company bot in that platform" data-zh="2. 在该平台上发送 /start TOKEN 给公司 Bot">2. Send /start TOKEN to the company bot</span><br>
+          <span data-en="3. Reply 'BIND' to confirm → done!" data-zh="3. 回复 'BIND' 确认 → 完成！">3. Reply "BIND" to confirm → done!</span>
+        </div></div>`
+    },
+    {
+      id: 'emp-profile',
+      en: { title: 'My Profile & Skills', desc: 'View your agent details, active skills, and request access to restricted skills.' },
+      zh: { title: '我的资料和技能', desc: '查看 Agent 详情、已激活技能，以及申请受限技能的访问权限。' },
+      html: () => `
+        <div class="annotation"><span class="ann-icon">📍</span><div class="ann-text" data-en="Click 'My Profile' or 'My Skills' in the sidebar" data-zh="点击侧边栏的 'My Profile' 或 'My Skills'">Click "My Profile" or "My Skills" in the sidebar</div></div>
+        <div class="mockup">
+          <div class="mockup-header" data-en="My Skills" data-zh="我的技能">My Skills</div>
+          <div class="mockup-body">
+            <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--success)">✓ <span data-en="Active Skills (8)" data-zh="已激活技能 (8)">Active Skills (8)</span></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:16px">
+              ${['Web Search', 'Summarize', 'S3 Files', 'Excel Gen', 'Deep Research', 'Self-Improving', 'SAP Connector', 'AWS S3 Docs'].map(s => `
+                <div style="display:flex;align-items:center;gap:6px;background:rgba(16,185,129,.05);border:1px solid rgba(16,185,129,.2);border-radius:6px;padding:6px 10px;font-size:11px"><span style="color:var(--success)">✓</span> ${s}</div>`).join('')}
+            </div>
+            <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--text-muted)">🔒 <span data-en="Restricted Skills (3)" data-zh="受限技能 (3)">Restricted Skills (3)</span></div>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              ${['GitHub', 'Firecrawl', 'Jira Query'].map(s => `
+                <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:12px"><span>🔒 ${s}</span><div class="mock-btn ghost" style="font-size:10px" data-en="Request Access" data-zh="申请访问">Request Access</div></div>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div class="annotation"><span class="ann-icon">📋</span><div class="ann-text" data-en="Restricted skills require admin approval. Click 'Request Access' to submit a request. Your admin will be notified in the Approvals page." data-zh="受限技能需要管理员审批。点击 '申请访问' 提交请求，管理员会在审批页面收到通知。">Restricted skills require admin approval. Click "Request Access" to submit a request.</div></div>`
+    },
+  ]
+};
+
+let currentRole = 'admin';
+let currentStep = 0;
+let currentLang = 'en';
+
+function setLang(lang) {
+  currentLang = lang;
+  document.querySelectorAll('.lang-btn').forEach(b => b.classList.toggle('active', b.textContent.includes(lang === 'en' ? 'English' : '中文')));
+  document.getElementById('h-title').textContent = lang === 'en' ? 'OpenClaw Enterprise — UI Guide' : 'OpenClaw Enterprise — 使用指南';
+  document.getElementById('h-desc').textContent = lang === 'en' ? 'Step-by-step walkthrough for IT Administrators and Employees' : 'IT 管理员和员工的分步操作指南';
+  document.getElementById('tab-admin').textContent = lang === 'en' ? 'IT Admin' : 'IT 管理员';
+  document.getElementById('tab-employee').textContent = lang === 'en' ? 'Employee' : '员工';
+  renderSteps();
+  applyLang();
+}
+
+function applyLang() {
+  document.querySelectorAll('[data-en]').forEach(el => {
+    el.textContent = currentLang === 'en' ? el.getAttribute('data-en') : el.getAttribute('data-zh');
+  });
+}
+
+function setRole(role) {
+  currentRole = role;
+  currentStep = 0;
+  document.querySelectorAll('.role-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById(`tab-${role}`).classList.add('active');
+  renderSteps();
+}
+
+function renderSteps() {
+  const steps = STEPS[currentRole];
+  const bar = document.getElementById('progress-bar');
+  bar.innerHTML = steps.map((s, i) => `
+    <div class="progress-step ${i === currentStep ? 'active' : ''} ${i < currentStep ? 'done' : ''}" onclick="goStep(${i})">
+      <span class="step-num">${i < currentStep ? '✓' : i + 1}</span>
+      <span class="step-label">${s[currentLang].title.split(' ').slice(0,2).join(' ')}</span>
+    </div>
+  `).join('');
+
+  const container = document.getElementById('steps-container');
+  container.innerHTML = steps.map((s, i) => `
+    <div class="step-content ${i === currentStep ? 'active' : ''}" id="step-${i}">
+      <div class="step-card">
+        <div class="step-title">${s[currentLang].title}</div>
+        <div class="step-desc">${s[currentLang].desc}</div>
+        ${s.html()}
+      </div>
+    </div>
+  `).join('');
+
+  updateNav();
+  applyLang();
+}
+
+function goStep(i) { currentStep = i; renderSteps(); window.scrollTo({top: 200, behavior: 'smooth'}); }
+function prevStep() { if (currentStep > 0) goStep(currentStep - 1); }
+function nextStep() { if (currentStep < STEPS[currentRole].length - 1) goStep(currentStep + 1); }
+
+function updateNav() {
+  const steps = STEPS[currentRole];
+  document.getElementById('btn-prev').disabled = currentStep === 0;
+  document.getElementById('btn-next').disabled = currentStep === steps.length - 1;
+}
+
+renderSteps();
+</script>
+</body>
+</html>
