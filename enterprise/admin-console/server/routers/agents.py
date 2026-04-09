@@ -257,7 +257,50 @@ def create_agent(body: dict):
         if deploy_mode == "always-on-ecs":
             agent["note"] = "Agent created with ECS mode. Go to Agent Factory -> ECS tab -> Start to launch the Fargate container."
         elif deploy_mode == "eks":
-            agent["note"] = "Agent created with EKS mode. Go to Agent Factory -> EKS tab -> Deploy to launch the K8s pod."
+            # Auto-deploy to EKS immediately
+            try:
+                import asyncio
+                from services.k8s_client import k8s_client, OPENCLAW_NAMESPACE
+                import s3ops as _s3ops
+
+                # Assemble workspace files from SOUL layers (same as admin_eks deploy)
+                soul = _s3ops.get_soul_layers(pos_id, emp_id)
+                workspace_files = {}
+                for layer_name in ("global", "position", "personal"):
+                    layer = soul.get(layer_name, {})
+                    for fname, content in layer.items():
+                        if content and content.strip():
+                            workspace_files[fname] = content
+
+                model = body.get("model", os.environ.get("DEFAULT_BEDROCK_MODEL", "bedrock/us.amazon.nova-2-lite-v1:0"))
+
+                loop = asyncio.get_event_loop()
+                result = loop.run_until_complete(k8s_client.create_openclaw_instance(
+                    namespace=OPENCLAW_NAMESPACE,
+                    agent_name=agent_id,
+                    employee_id=emp_id or "",
+                    position_id=pos_id,
+                    model=model,
+                    workspace_files=workspace_files if workspace_files else None,
+                ))
+
+                # Write SSM eks-endpoint
+                try:
+                    from routers.admin_eks import _agent_svc_endpoint
+                    ssm = ssm_client()
+                    ssm.put_parameter(
+                        Name=f"/openclaw/{stack}/tenants/{emp_id}/eks-endpoint",
+                        Value=_agent_svc_endpoint(agent_id),
+                        Type="String", Overwrite=True,
+                    )
+                except Exception:
+                    pass
+
+                agent["note"] = "Agent created and deployed to EKS. Pod starting (~60s)."
+                agent["containerStatus"] = "starting"
+            except Exception as e:
+                print(f"[create_agent] EKS auto-deploy failed for {agent_id}: {e}")
+                agent["note"] = f"Agent created but EKS deploy failed: {e}. Deploy manually from EKS tab."
 
     return agent
 
