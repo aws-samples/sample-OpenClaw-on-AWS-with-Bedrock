@@ -42,6 +42,31 @@ resource "aws_iam_policy" "bedrock_access" {
 }
 
 # -----------------------------------------------------------------------------
+# Secrets Manager Policy (namespace-scoped)
+# Allows OpenClaw pods to read secrets under their own namespace prefix.
+# Used by OpenClaw SecretRef (exec provider) to load API keys from SM.
+# -----------------------------------------------------------------------------
+resource "aws_iam_policy" "secrets_access" {
+  name        = "${var.name}-secrets-access"
+  description = "Allow OpenClaw pods to read namespace-scoped secrets from Secrets Manager"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = "arn:${var.partition}:secretsmanager:*:*:secret:openclaw/$${aws:PrincipalTag/kubernetes-namespace}/*"
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+# -----------------------------------------------------------------------------
 # IRSA Role for OpenClaw Bedrock Access
 # -----------------------------------------------------------------------------
 module "openclaw_bedrock_irsa" {
@@ -52,6 +77,7 @@ module "openclaw_bedrock_irsa" {
 
   role_policy_arns = {
     bedrock = aws_iam_policy.bedrock_access.arn
+    secrets = aws_iam_policy.secrets_access.arn
   }
 
   oidc_providers = {
