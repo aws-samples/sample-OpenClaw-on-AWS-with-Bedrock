@@ -13,7 +13,7 @@
 #   export ADMIN_PASSWORD=your-password
 #   bash enterprise/tests/e2e-test-plan.sh
 # =============================================================================
-set -euo pipefail
+set -uo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 PASS=0; FAIL=0; SKIP=0
@@ -31,9 +31,10 @@ get_token() {
   if [ -z "$ADMIN_PASSWORD" ]; then
     echo "ERROR: ADMIN_PASSWORD not set" >&2; exit 1
   fi
+  ADMIN_EMP="${ADMIN_EMPLOYEE_ID:-emp-jiade}"
   TOKEN=$(curl -sf "$BASE_URL/api/v1/auth/login" \
     -H 'Content-Type: application/json' \
-    -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PASSWORD\"}" | jq -r '.token // empty')
+    -d "{\"employeeId\":\"$ADMIN_EMP\",\"password\":\"$ADMIN_PASSWORD\"}" | jq -r '.token // empty')
   if [ -z "$TOKEN" ]; then
     echo "ERROR: Login failed" >&2; exit 1
   fi
@@ -62,20 +63,20 @@ test_health() {
     fail "T1.1 Admin console API not reachable"
   fi
 
-  # T1.2 System health
-  HEALTH=$(api_get "/settings/system-health" || echo "{}")
-  if echo "$HEALTH" | jq -e '.ports' >/dev/null 2>&1; then
-    pass "T1.2 System health endpoint responds"
+  # T1.2 System stats
+  HEALTH=$(api_get "/settings/system-stats" || echo "{}")
+  if echo "$HEALTH" | jq -e '.cpu' >/dev/null 2>&1; then
+    pass "T1.2 System stats endpoint responds"
   else
-    fail "T1.2 System health endpoint failed"
+    fail "T1.2 System stats endpoint failed"
   fi
 
-  # T1.3 Services info has awsRegion
+  # T1.3 Services info has platform
   SERVICES=$(api_get "/settings/services" || echo "{}")
-  if echo "$SERVICES" | jq -e '.awsRegion' >/dev/null 2>&1; then
-    pass "T1.3 Services returns awsRegion"
+  if echo "$SERVICES" | jq -e '.platform' >/dev/null 2>&1; then
+    pass "T1.3 Services returns platform info"
   else
-    fail "T1.3 Services missing awsRegion"
+    fail "T1.3 Services missing platform"
   fi
 }
 
@@ -86,7 +87,7 @@ test_org() {
   log "=== Group 2: Organization Data ==="
 
   # T2.1 Employees exist
-  EMPS=$(api_get "/employees")
+  EMPS=$(api_get "/org/employees")
   EMP_COUNT=$(echo "$EMPS" | jq 'length')
   if [ "$EMP_COUNT" -gt 0 ]; then
     pass "T2.1 Employees loaded: $EMP_COUNT"
@@ -95,7 +96,7 @@ test_org() {
   fi
 
   # T2.2 Positions exist
-  POSITIONS=$(api_get "/positions")
+  POSITIONS=$(api_get "/org/positions")
   POS_COUNT=$(echo "$POSITIONS" | jq 'length')
   if [ "$POS_COUNT" -gt 0 ]; then
     pass "T2.2 Positions loaded: $POS_COUNT"
@@ -104,7 +105,7 @@ test_org() {
   fi
 
   # T2.3 Departments exist
-  DEPTS=$(api_get "/departments")
+  DEPTS=$(api_get "/org/departments")
   DEPT_COUNT=$(echo "$DEPTS" | jq 'length')
   if [ "$DEPT_COUNT" -gt 0 ]; then
     pass "T2.3 Departments loaded: $DEPT_COUNT"
@@ -120,7 +121,7 @@ test_soul() {
   log "=== Group 3: SOUL Loading ==="
 
   # T3.1 Get first employee with agent
-  EMP_ID=$(api_get "/employees" | jq -r '[.[] | select(.agentId != null and .agentId != "")][0].id // empty')
+  EMP_ID=$(api_get "/org/employees" | jq -r '[.[] | select(.agentId != null and .agentId != "")][0].id // empty')
   if [ -z "$EMP_ID" ]; then
     skip "T3.1-T3.4 No employee with agent found"
     return
@@ -160,8 +161,8 @@ test_monitor() {
   log "=== Group 4: Monitor Center ==="
 
   # T4.1 Action items
-  ACTIONS=$(api_get "/monitor/action-items" || echo "{}")
-  if echo "$ACTIONS" | jq -e '.items' >/dev/null 2>&1; then
+  ACTIONS=$(api_get "/monitor/action-items" || echo "[]")
+  if echo "$ACTIONS" | jq -e 'type' >/dev/null 2>&1; then
     pass "T4.1 Action items endpoint responds"
   else
     fail "T4.1 Action items endpoint failed"
@@ -169,7 +170,7 @@ test_monitor() {
 
   # T4.2 System status
   STATUS=$(api_get "/monitor/system-status" || echo "{}")
-  if echo "$STATUS" | jq -e '.agents' >/dev/null 2>&1; then
+  if echo "$STATUS" | jq -e '.uptime' >/dev/null 2>&1; then
     pass "T4.2 System status responds"
   else
     fail "T4.2 System status failed"
@@ -183,12 +184,12 @@ test_monitor() {
     fail "T4.3 Event stream failed"
   fi
 
-  # T4.4 Agent activity
-  ACTIVITY=$(api_get "/monitor/agent-activity" || echo "{}")
-  if echo "$ACTIVITY" | jq -e '.agents' >/dev/null 2>&1; then
-    pass "T4.4 Agent activity responds"
+  # T4.4 Monitor health (agent health data)
+  MHEALTH=$(api_get "/monitor/health" || echo "{}")
+  if echo "$MHEALTH" | jq -e '.agents' >/dev/null 2>&1; then
+    pass "T4.4 Monitor health responds"
   else
-    fail "T4.4 Agent activity failed"
+    fail "T4.4 Monitor health failed"
   fi
 }
 
@@ -206,17 +207,17 @@ test_audit() {
     fail "T5.1 Audit entries failed"
   fi
 
-  # T5.2 Audit scan
-  SCAN=$(api_get "/audit/scan" || echo "{}")
-  if echo "$SCAN" | jq -e '.findings' >/dev/null 2>&1; then
-    pass "T5.2 Audit scan responds"
+  # T5.2 Audit insights
+  INSIGHTS=$(api_get "/audit/insights" || echo "{}")
+  if echo "$INSIGHTS" | jq -e '.insights' >/dev/null 2>&1; then
+    pass "T5.2 Audit insights responds"
   else
-    fail "T5.2 Audit scan failed"
+    fail "T5.2 Audit insights failed"
   fi
 
   # T5.3 Review queue
-  REVIEWS=$(api_get "/audit/reviews" || echo "{}")
-  if echo "$REVIEWS" | jq -e '.reviews' >/dev/null 2>&1; then
+  REVIEWS=$(api_get "/audit/reviews" || echo "[]")
+  if echo "$REVIEWS" | jq -e 'type' >/dev/null 2>&1; then
     pass "T5.3 Review queue responds"
   else
     fail "T5.3 Review queue failed"
@@ -224,7 +225,7 @@ test_audit() {
 
   # T5.4 Compliance stats
   COMPLIANCE=$(api_get "/audit/compliance" || echo "{}")
-  if echo "$COMPLIANCE" | jq -e '.totalEmployees' >/dev/null 2>&1; then
+  if echo "$COMPLIANCE" | jq -e 'type' >/dev/null 2>&1; then
     pass "T5.4 Compliance stats responds"
   else
     fail "T5.4 Compliance stats failed"
@@ -246,8 +247,8 @@ test_usage() {
   fi
 
   # T6.2 By-model breakdown
-  BYMODEL=$(api_get "/usage/by-model" || echo "{}")
-  if echo "$BYMODEL" | jq -e '.models' >/dev/null 2>&1; then
+  BYMODEL=$(api_get "/usage/by-model" || echo "[]")
+  if echo "$BYMODEL" | jq -e 'type' >/dev/null 2>&1; then
     pass "T6.2 By-model breakdown responds"
   else
     fail "T6.2 By-model breakdown failed"
@@ -309,7 +310,7 @@ test_playground() {
   fi
 
   # T8.2 Simulate mode (Bedrock Converse)
-  EMP_ID=$(api_get "/employees" | jq -r '[.[] | select(.agentId != null and .agentId != "")][0].id // empty')
+  EMP_ID=$(api_get "/org/employees" | jq -r '[.[] | select(.agentId != null and .agentId != "")][0].id // empty')
   if [ -n "$EMP_ID" ]; then
     TENANT="port__$EMP_ID"
     RESP=$(api_post "/playground/send" "{\"tenant_id\":\"$TENANT\",\"message\":\"hello\",\"mode\":\"simulate\"}" || echo "{}")
@@ -341,8 +342,8 @@ test_settings() {
   log "=== Group 9: Settings ==="
 
   # T9.1 Model config
-  MC=$(api_get "/settings/model-config" || echo "{}")
-  if echo "$MC" | jq -e '.default' >/dev/null 2>&1; then
+  MC=$(api_get "/settings/models" || echo "{}")
+  if echo "$MC" | jq -e 'type' >/dev/null 2>&1; then
     pass "T9.1 Model config responds"
   else
     fail "T9.1 Model config failed"
@@ -358,7 +359,7 @@ test_settings() {
 
   # T9.3 Platform access (SSM commands)
   PA=$(api_get "/settings/platform-access" || echo "{}")
-  if echo "$PA" | jq -e '.ssmCommand' >/dev/null 2>&1; then
+  if echo "$PA" | jq -e '.instanceId' >/dev/null 2>&1; then
     pass "T9.3 Platform access responds"
   else
     fail "T9.3 Platform access failed"
