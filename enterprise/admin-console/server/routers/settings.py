@@ -18,6 +18,7 @@ import db
 import s3ops
 from shared import (
     require_auth, require_role, ssm_client, bump_config_version,
+    stop_employee_session,
     GATEWAY_REGION, STACK_NAME, GATEWAY_INSTANCE_ID, GATEWAY_ACCOUNT_ID,
 )
 
@@ -186,23 +187,38 @@ def get_kb_assignments(authorization: str = Header(default="")):
 
 @router.put("/api/v1/settings/kb-assignments/position/{pos_id}")
 def set_position_kbs(pos_id: str, body: dict, authorization: str = Header(default="")):
-    """Assign knowledge bases to a position. kbIds: list of KB IDs."""
+    """Assign knowledge bases to a position. kbIds: list of KB IDs.
+    Triggers force refresh for all affected employees so they get new KB on next message."""
     require_role(authorization, roles=["admin"])
     cfg = _get_kb_assignments()
     cfg.setdefault("positionKBs", {})[pos_id] = body.get("kbIds", [])
     db.set_config("kb-assignments", cfg)
     bump_config_version()
-    return cfg["positionKBs"][pos_id]
+    # Force refresh: terminate running sessions for affected employees
+    import threading
+    refreshed = []
+    for emp in db.get_employees():
+        if emp.get("positionId") == pos_id and emp.get("agentId"):
+            threading.Thread(
+                target=stop_employee_session, args=(emp["id"],), daemon=True
+            ).start()
+            refreshed.append(emp["id"])
+    return {"kbIds": cfg["positionKBs"][pos_id], "refreshed": refreshed}
 
 
 @router.put("/api/v1/settings/kb-assignments/employee/{emp_id}")
 def set_employee_kbs(emp_id: str, body: dict, authorization: str = Header(default="")):
+    """Assign knowledge bases to an individual employee. Triggers force refresh."""
     require_role(authorization, roles=["admin"])
     cfg = _get_kb_assignments()
     cfg.setdefault("employeeKBs", {})[emp_id] = body.get("kbIds", [])
     db.set_config("kb-assignments", cfg)
     bump_config_version()
-    return cfg["employeeKBs"][emp_id]
+    import threading
+    threading.Thread(
+        target=stop_employee_session, args=(emp_id,), daemon=True
+    ).start()
+    return {"kbIds": cfg["employeeKBs"][emp_id], "refreshed": [emp_id]}
 
 
 @router.get("/api/v1/settings/security")

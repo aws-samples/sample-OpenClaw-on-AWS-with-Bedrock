@@ -417,53 +417,10 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
         else:
             logger.warning("workspace_assembler.py not found at %s", assembler)
 
-        # 3. Plan A: Prepend permission constraints to merged SOUL.md
-        # Skip for exec profile — SOUL.md already declares full tool access,
-        # and injecting restrictions would conflict with the executive tier design.
-        soul_path = os.path.join(WORKSPACE, "SOUL.md")
-        if os.path.isfile(soul_path):
-            try:
-                profile = read_permission_profile(tenant_id)
-                is_exec = profile.get("role") == "exec" or profile.get("profile") == "exec"
-                # Detect digital twin channel (twin__emp_id__...)
-                is_twin = tenant_id.startswith("twin__")
-                if not is_exec and not is_twin:
-                    constraint = _build_system_prompt(tenant_id)
-                    if constraint:
-                        with open(soul_path, "r") as f:
-                            existing = f.read()
-                        if "Allowed tools for this session" not in existing:
-                            with open(soul_path, "w") as f:
-                                f.write(f"<!-- PLAN A: PERMISSION ENFORCEMENT -->\n{constraint}\n\n---\n\n{existing}")
-                            logger.info("Plan A constraints injected into SOUL.md for %s", tenant_id)
-                elif is_twin:
-                    # Digital twin mode: inject representative persona context
-                    with open(soul_path, "r") as f:
-                        existing = f.read()
-                    if "DIGITAL TWIN MODE" not in existing:
-                        # Extract employee name from workspace files
-                        user_md_path = os.path.join(WORKSPACE, "USER.md")
-                        user_md = ""
-                        if os.path.isfile(user_md_path):
-                            with open(user_md_path) as f:
-                                user_md = f.read()[:500]
-                        twin_ctx = (
-                            "\n\n<!-- DIGITAL TWIN MODE -->\n"
-                            "You are this employee's AI digital representative. Someone is accessing your owner's digital twin link.\n"
-                            "- Introduce yourself as their AI assistant standing in for them\n"
-                            "- Answer based on their expertise, SOUL profile, and memory\n"
-                            "- If asked where they are: explain they are unavailable but you can help\n"
-                            "- Be warm, professional, and helpful — represent them well\n"
-                            "- Use `web_search` to look up current information when needed\n"
-                            "- Do NOT reveal private/sensitive internal data\n"
-                        )
-                        with open(soul_path, "a") as f:
-                            f.write(twin_ctx)
-                        logger.info("Digital twin context injected for %s", tenant_id)
-                else:
-                    logger.info("Plan A skipped for exec profile tenant %s", tenant_id)
-            except Exception as e:
-                logger.warning("Plan A injection failed for %s: %s", tenant_id, e)
+        # 3. Plan A + Twin + KB + Language context:
+        # ALL moved to workspace_assembler.py _build_context_block().
+        # server.py no longer modifies SOUL.md. The assembler writes a complete
+        # SOUL.md in a single pass (3-layer merge + context block).
 
         # 4. Re-source skill env vars (in case skills were loaded)
         skill_env = "/tmp/skill_env.sh"
@@ -606,106 +563,8 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
                             json.dump(oc, f, indent=2)
                         logger.info("Agent config applied for %s: %s", base_id, list(eff_cfg.keys()))
 
-                    # Language preference: inject at end of SOUL.md
-                    lang = eff_cfg.get("language", "")
-                    if lang:
-                        soul_path = os.path.join(WORKSPACE, "SOUL.md")
-                        if os.path.isfile(soul_path):
-                            lang_note = f"\n\n<!-- LANGUAGE PREFERENCE -->\nAlways respond in **{lang}** unless the user explicitly writes in a different language."
-                            with open(soul_path, "a") as f:
-                                f.write(lang_note)
-                            logger.info("Language preference injected: %s", lang)
-
-            # --- Knowledge Base injection ---
-            # Inject position/employee KB documents into workspace/knowledge/
-            kb_cfg_resp = table.get_item(Key={"PK": "ORG#acme", "SK": "CONFIG#kb-assignments"})
-            if "Item" in kb_cfg_resp:
-                kb_cfg = kb_cfg_resp["Item"]
-                kb_ids = set()
-                for pid in ([pos_id] if pos_id else []):
-                    kb_ids.update(kb_cfg.get("positionKBs", {}).get(pid, []))
-                kb_ids.update(kb_cfg.get("employeeKBs", {}).get(base_id, []))
-
-                if kb_ids:
-                    import boto3 as _b3kb
-                    s3_kb = _b3kb.client("s3")
-                    kb_dir = os.path.join(WORKSPACE, "knowledge")
-                    os.makedirs(kb_dir, exist_ok=True)
-                    kb_soul_lines = []
-                    for kb_id in kb_ids:
-                        try:
-                            kb_item = table.get_item(Key={"PK": "ORG#acme", "SK": f"KB#{kb_id}"}).get("Item")
-                            if not kb_item:
-                                continue
-                            # Build files list: use explicit files array if present,
-                            # otherwise fall back to listing the s3Prefix.
-                            # seed_knowledge.py creates KB items with s3Prefix only (no files array),
-                            # so the s3Prefix fallback is required for freshly seeded deployments.
-                            files_list = kb_item.get("files", [])
-                            if not files_list:
-                                s3_prefix = kb_item.get("s3Prefix", "")
-                                if s3_prefix:
-                                    try:
-                                        resp = s3_kb.list_objects_v2(Bucket=S3_BUCKET, Prefix=s3_prefix)
-                                        for obj in resp.get("Contents", []):
-                                            key = obj["Key"]
-                                            fname = key.split("/")[-1]
-                                            if fname and not fname.startswith("."):
-                                                files_list.append({"s3Key": key, "filename": fname})
-                                    except Exception as list_err:
-                                        logger.warning("KB prefix listing failed for %s: %s", kb_id, list_err)
-                            # Download KB files into workspace/knowledge/{kb_id}/
-                            kb_sub = os.path.join(kb_dir, kb_id)
-                            os.makedirs(kb_sub, exist_ok=True)
-                            for file_ref in files_list:
-                                s3_key = file_ref.get("s3Key", "")
-                                fname = file_ref.get("filename", s3_key.split("/")[-1])
-                                local_path = os.path.join(kb_sub, fname)
-                                if not os.path.isfile(local_path):
-                                    obj = s3_kb.get_object(Bucket=S3_BUCKET, Key=s3_key)
-                                    with open(local_path, "wb") as f:
-                                        f.write(obj["Body"].read())
-                            kb_soul_lines.append(f"- **{kb_item.get('name', kb_id)}**: {os.path.join(kb_sub, '')}")
-                            logger.info("KB injected: %s → %s", kb_id, kb_sub)
-                        except Exception as ke:
-                            logger.warning("KB injection failed for %s: %s", kb_id, ke)
-
-                    # Append KB paths to SOUL.md so agent knows where to look
-                    if kb_soul_lines:
-                        soul_path = os.path.join(WORKSPACE, "SOUL.md")
-                        if os.path.isfile(soul_path):
-                            # Build KB block with specific proactive instructions
-                            kb_lines_text = "\n".join(kb_soul_lines)
-                            # For org-directory KB: inline the content directly into SOUL.md
-                            # Read from S3 (reliable — no EFS path timing issues).
-                            org_dir_inline = ""
-                            if any("org-directory" in line or "Company Directory" in line
-                                   for line in kb_soul_lines):
-                                try:
-                                    org_obj = s3_kb.get_object(
-                                        Bucket=S3_BUCKET,
-                                        Key="_shared/knowledge/org-directory/company-directory.md"
-                                    )
-                                    dir_content = org_obj["Body"].read().decode("utf-8")
-                                    org_dir_inline = (
-                                        "\n\n<!-- COMPANY DIRECTORY (inline) -->\n"
-                                        "The following is the complete ACME Corp employee directory. "
-                                        "Use this to answer any question about colleagues, contacts, "
-                                        "departments, or who to reach for any topic:\n\n"
-                                        + dir_content
-                                    )
-                                    logger.info("Org directory inlined into SOUL.md (%d chars)", len(dir_content))
-                                except Exception as e:
-                                    logger.warning("Org directory inline failed: %s", e)
-                            kb_block = (
-                                "\n\n<!-- KNOWLEDGE BASES -->\n"
-                                "You have access to the following knowledge base documents:\n"
-                                + kb_lines_text
-                                + "\nUse the `file` tool to read these when relevant to the user's question."
-                                + org_dir_inline
-                            )
-                            with open(soul_path, "a") as f:
-                                f.write(kb_block)
+                    # Language + KB injection: ALL moved to workspace_assembler.py
+                    # _build_context_block(). server.py no longer modifies SOUL.md.
 
         except Exception as e:
             logger.warning("Dynamic agent config failed (non-fatal): %s", e)

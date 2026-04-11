@@ -95,10 +95,17 @@ def stop_employee_session(emp_id: str) -> dict:
 
 
 # ── Auth helpers ──────────────────────────────────────────────────────────
-# Direct implementation — no lazy proxy needed.
+# Two layers:
+#   1. Middleware (main.py) — enforces auth on all /api/ paths except whitelist.
+#      Attaches request.state.user for downstream use.
+#   2. These helpers — used by routers for role checks and dept scoping.
+#      require_auth() still works as a fallback for endpoints that need to
+#      extract the user when not using Depends.
 
 def require_auth(authorization: str):
-    """Validate JWT and return UserContext. Raises HTTPException on failure."""
+    """Validate JWT and return UserContext. Raises HTTPException on failure.
+    Note: with the auth middleware in place, this is redundant for /api/ paths
+    but kept for backward compatibility and non-middleware contexts."""
     from fastapi import HTTPException
     import auth as _authmod
     user = _authmod.get_user_from_request(authorization)
@@ -135,3 +142,38 @@ def get_dept_scope(user) -> Optional[set]:
                 ids.add(d["id"])
                 queue.append(d["id"])
     return ids
+
+
+# ── FastAPI Dependencies (Depends) ────────────────────────────────────────
+# Use these in router endpoints: def my_endpoint(user = Depends(get_current_user))
+
+def audit_soul_change(user, layer: str, target_id: str, content_len: int, action: str = "edit"):
+    """Create audit entry for any SOUL layer change.
+    Called by agents.py save_agent_soul, security.py put_global_soul/put_position_soul."""
+    import db as _db_audit
+    from datetime import datetime as _dt_audit, timezone as _tz_audit
+    _db_audit.create_audit_entry({
+        "timestamp": _dt_audit.now(_tz_audit.utc).isoformat(),
+        "eventType": "soul_change",
+        "actorId": user.employee_id,
+        "actorName": user.name,
+        "targetType": "soul",
+        "targetId": target_id,
+        "detail": f"SOUL {layer} layer {action}: {target_id} ({content_len} chars)",
+        "status": "success",
+    })
+
+
+def get_current_user(request):
+    """FastAPI Depends: extract user from request.state (set by auth middleware).
+    Returns UserContext or None. Does NOT raise — use for optional auth contexts."""
+    return getattr(request.state, "user", None)
+
+def get_dept_filter(request) -> Optional[set]:
+    """FastAPI Depends: return department ID set for the current user.
+    Admin → None (no filter). Manager → BFS sub-departments. Employee → empty set.
+    Usage: def endpoint(scope = Depends(get_dept_filter))"""
+    user = getattr(request.state, "user", None)
+    if not user:
+        return set()
+    return get_dept_scope(user)

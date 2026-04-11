@@ -15,7 +15,7 @@ from pydantic import BaseModel
 import db
 import s3ops
 from shared import (
-    require_role, ssm_client, bump_config_version,
+    require_role, ssm_client, bump_config_version, audit_soul_change,
     GATEWAY_REGION, STACK_NAME, DYNAMODB_REGION, DYNAMODB_TABLE,
 )
 
@@ -38,11 +38,13 @@ def get_global_soul(authorization: str = Header(default="")):
 
 @router.put("/api/v1/security/global-soul")
 def put_global_soul(body: dict, authorization: str = Header(default="")):
-    require_role(authorization, roles=["admin"])
+    user = require_role(authorization, roles=["admin"])
     bucket = s3ops.bucket()
+    content = body.get("content", "")
     s3ops._client().put_object(Bucket=bucket, Key="_shared/soul/global/SOUL.md",
-                               Body=body.get("content", "").encode(), ContentType="text/markdown")
+                               Body=content.encode(), ContentType="text/markdown")
     bump_config_version()
+    audit_soul_change(user, "global", "global", len(content))
     return {"saved": True}
 
 
@@ -60,11 +62,13 @@ def get_position_soul(pos_id: str, authorization: str = Header(default="")):
 
 @router.put("/api/v1/security/positions/{pos_id}/soul")
 def put_position_soul(pos_id: str, body: dict, authorization: str = Header(default="")):
-    require_role(authorization, roles=["admin"])
+    user = require_role(authorization, roles=["admin"])
     bucket = s3ops.bucket()
+    content = body.get("content", "")
     s3ops._client().put_object(Bucket=bucket, Key=f"_shared/soul/positions/{pos_id}/SOUL.md",
-                               Body=body.get("content", "").encode(), ContentType="text/markdown")
+                               Body=content.encode(), ContentType="text/markdown")
     bump_config_version()
+    audit_soul_change(user, "position", pos_id, len(content))
     return {"saved": True}
 
 

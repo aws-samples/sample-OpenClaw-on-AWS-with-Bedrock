@@ -833,3 +833,27 @@ def export_agent(agent_id: str):
         "format": "openclaw-workspace",
         "note": "This export can be imported into any OpenClaw instance",
     }
+
+
+# =========================================================================
+# Portal — Force Refresh My Agent
+# =========================================================================
+
+_portal_refresh_timestamps: dict = {}  # emp_id → last refresh time
+
+
+@router.post("/api/v1/portal/refresh-agent")
+def portal_refresh_agent(authorization: str = Header(default="")):
+    """Employee self-service: force refresh their own agent.
+    Terminates running session → next message triggers full cold start.
+    Rate limited: once per 5 minutes."""
+    user = require_auth(authorization)
+    last = _portal_refresh_timestamps.get(user.employee_id, 0)
+    if time.time() - last < 300:
+        remaining = int(300 - (time.time() - last))
+        from fastapi import HTTPException as _H
+        raise _H(429, f"Please wait {remaining}s before refreshing again")
+    _portal_refresh_timestamps[user.employee_id] = time.time()
+    from shared import stop_employee_session
+    result = stop_employee_session(user.employee_id)
+    return {"refreshed": True, "detail": result}

@@ -21,6 +21,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse as StarletteJSONResponse
+
 import db
 import s3ops
 import auth as authmod
@@ -32,6 +35,62 @@ import auth as authmod
 app = FastAPI(title="OpenClaw Admin API", version="0.5.0")
 _ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "https://openclaw.awspsa.com,http://localhost:5173,http://localhost:8099").split(",")
 app.add_middleware(CORSMiddleware, allow_origins=_ALLOWED_ORIGINS, allow_methods=["GET","POST","PUT","DELETE","OPTIONS"], allow_headers=["Content-Type","Authorization"])
+
+
+# =========================================================================
+# Auth Middleware — unified authentication for all API endpoints
+# =========================================================================
+# Endpoints NOT in this whitelist require a valid JWT in the Authorization
+# header. This is the single enforcement point — individual routers no
+# longer need to call require_auth() for basic authentication (though they
+# may still call require_role() for role-based access control).
+
+_AUTH_PUBLIC_PATHS = {
+    "/api/v1/auth/login",
+    "/api/v1/bindings/pair-pending",
+    "/api/v1/bindings/pair-complete",
+}
+
+_AUTH_PUBLIC_PREFIXES = (
+    "/api/v1/internal/",
+    "/api/v1/public/",
+)
+
+# Non-API paths (static files, gateway proxy HTML, /docs, /openapi.json)
+# are not subject to auth middleware.
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+
+    # Skip non-API paths (static files, frontend, gateway proxy HTML pages)
+    if not path.startswith("/api/"):
+        return await call_next(request)
+
+    # Skip OPTIONS (CORS preflight)
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    # Skip whitelisted public endpoints
+    if path in _AUTH_PUBLIC_PATHS:
+        return await call_next(request)
+    for prefix in _AUTH_PUBLIC_PREFIXES:
+        if path.startswith(prefix):
+            return await call_next(request)
+
+    # Require valid JWT
+    auth_header = request.headers.get("authorization", "")
+    user = authmod.get_user_from_request(auth_header)
+    if not user:
+        return StarletteJSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required"},
+        )
+
+    # Attach user to request state for downstream use
+    request.state.user = user
+    return await call_next(request)
 
 # =========================================================================
 # Modular routers — all endpoint logic lives in routers/

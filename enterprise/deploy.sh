@@ -338,6 +338,9 @@ aws ssm put-parameter \
   --region "$REGION" &>/dev/null
 
 # ── Step 5: Upload SOUL templates and knowledge docs ──────────────────────────
+# SOUL architecture: workspace_assembler.py merges Global + Position + PERSONAL_SOUL.md
+# into SOUL.md (single write). server.py does NOT modify SOUL.md.
+# Per-employee PERSONAL_SOUL.md is seeded by seed_workspaces.py (Step 6).
 info "[5/8] Uploading templates and knowledge to S3..."
 
 export AWS_REGION="$REGION"

@@ -1,7 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import Chart from 'react-apexcharts';
 import type { ApexOptions } from 'apexcharts';
-import { ArrowLeft, Edit3, MessageSquare, Eye, Loader, FolderOpen } from 'lucide-react';
+import { ArrowLeft, Edit3, MessageSquare, Eye, Loader, FolderOpen, RefreshCw } from 'lucide-react';
 import { Card, Badge, Button, PageHeader, StatusDot } from '../../components/ui';
 import { useAgent, useAgents, usePositions, useBindings, useSessions, useAgentDailyUsage } from '../../hooks/useApi';
 import { CHANNEL_LABELS } from '../../types';
@@ -69,6 +69,14 @@ export default function AgentDetail() {
             <Button variant="default" onClick={() => navigate(`/agents/${agent.id}/soul`)}><Edit3 size={16} /> Edit SOUL</Button>
             <Button variant="default" onClick={() => navigate(`/playground?agent=${agent.id}`)}><MessageSquare size={16} /> Playground</Button>
             <Button variant="default" onClick={() => navigate(`/workspace?agent=${agent.id}`)}><FolderOpen size={16} /> Workspace</Button>
+            <Button variant="default" onClick={async () => {
+              try {
+                await fetch(`/api/v1/admin/refresh-agent/${agent.employeeId}`, {
+                  method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('openclaw_token')}` }
+                });
+                alert('Agent session terminated. Next message will trigger fresh assembly.');
+              } catch { alert('Refresh failed'); }
+            }}><RefreshCw size={16} /> Refresh</Button>
           </div>
         }
       />

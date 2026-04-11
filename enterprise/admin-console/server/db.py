@@ -82,6 +82,80 @@ def _put_item(sk: str, data: dict, gsi1pk: str = "", gsi1sk: str = ""):
         return False
 
 
+def _make_put(sk: str, data: dict, gsi1pk: str = "", gsi1sk: str = "") -> dict:
+    """Build a TransactWriteItem Put dict (does NOT write — used by transact_write)."""
+    item = {"PK": ORG_PK, "SK": sk, **data}
+    if gsi1pk:
+        item["GSI1PK"] = gsi1pk
+    if gsi1sk:
+        item["GSI1SK"] = gsi1sk
+    # Convert floats to Decimal (required by DynamoDB)
+    item = _decimalize(item)
+    return {"Put": {"TableName": TABLE_NAME, "Item": item}}
+
+
+def _decimalize(obj):
+    """Recursively convert float → Decimal for DynamoDB compatibility."""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    if isinstance(obj, dict):
+        return {k: _decimalize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_decimalize(i) for i in obj]
+    return obj
+
+
+def transact_write(items: list[dict]) -> bool:
+    """Atomic write of multiple items using DynamoDB TransactWriteItems.
+    Each item in the list must be a TransactWriteItem dict (from _make_put).
+    All items succeed or all fail — no partial state.
+    Max 100 items per transaction (DynamoDB limit)."""
+    if not items:
+        return True
+    if len(items) > 100:
+        raise ValueError(f"TransactWriteItems supports max 100 items, got {len(items)}")
+    try:
+        client = boto3.client("dynamodb", region_name=AWS_REGION)
+        client.transact_write_items(TransactItems=items)
+        return True
+    except ClientError as e:
+        print(f"[db] transact_write failed: {e}")
+        return False
+
+
+def provision_employee_atomic(
+    agent_data: dict,
+    binding_data: dict,
+    emp_update: dict,
+    audit_data: dict,
+) -> bool:
+    """Atomic provisioning: create agent + binding + update employee + audit in one transaction.
+    If any write fails, ALL are rolled back — no orphaned agents or bindings.
+    S3 workspace seeding happens AFTER this succeeds (S3 has no transactional support)."""
+    agent_id = agent_data.get("id", f"agent-{int(__import__('time').time())}")
+    agent_data["id"] = agent_id
+    if "qualityScore" in agent_data and agent_data["qualityScore"] is not None:
+        agent_data["qualityScore"] = str(agent_data["qualityScore"])
+
+    bind_id = binding_data.get("id", f"bind-{int(__import__('time').time())}")
+    binding_data["id"] = bind_id
+    bind_agent = binding_data.get("agentId", agent_id)
+
+    audit_id = audit_data.get("id", f"aud-{int(__import__('time').time())}")
+    audit_data["id"] = audit_id
+
+    emp_id = emp_update.get("id", "")
+
+    items = [
+        _make_put(f"AGENT#{agent_id}", agent_data, "TYPE#agent", f"AGENT#{agent_id}"),
+        _make_put(f"BIND#{bind_id}", binding_data, f"AGENT#{bind_agent}", f"BIND#{bind_id}"),
+        _make_put(f"EMP#{emp_id}", emp_update, "TYPE#employee", f"EMP#{emp_id}"),
+        _make_put(f"AUDIT#{audit_id}", audit_data, "TYPE#audit", f"AUDIT#{audit_id}"),
+    ]
+
+    return transact_write(items)
+
+
 # === Public API ===
 
 def get_departments() -> list[dict]:
@@ -157,6 +231,10 @@ def update_agent(agent_id: str, updates: dict) -> Optional[dict]:
     item["id"] = agent_id
     _put_item(f"AGENT#{agent_id}", item, "TYPE#agent", f"AGENT#{agent_id}")
     return item
+
+def delete_agent(agent_id: str) -> bool:
+    return _delete_item(f"AGENT#{agent_id}")
+
 
 def get_bindings() -> list[dict]:
     return _query("BIND#")

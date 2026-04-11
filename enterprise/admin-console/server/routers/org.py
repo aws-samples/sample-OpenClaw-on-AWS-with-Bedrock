@@ -77,6 +77,15 @@ def delete_department(dept_id: str, authorization: str = Header(default="")):
             "names": [d["name"] for d in sub_depts],
             "message": f"{len(sub_depts)} sub-department(s) exist under this department. Delete them first.",
         })
+    positions = db.get_positions()
+    dept_positions = [p for p in positions if p.get("departmentId") == dept_id]
+    if dept_positions:
+        raise HTTPException(409, {
+            "error": "department_has_positions",
+            "count": len(dept_positions),
+            "names": [p["name"] for p in dept_positions[:5]],
+            "message": f"{len(dept_positions)} position(s) belong to this department. Reassign them first.",
+        })
     db.delete_department(dept_id)
     return {"ok": True, "deleted": dept_id}
 
@@ -181,21 +190,64 @@ def delete_employee(emp_id: str, force: bool = False, authorization: str = Heade
                 "Pass force=true to delete all associated bindings along with the employee."
             ),
         })
+    # Get agent info before deletion
+    emp = db.get_employee(emp_id)
+    agent_id = emp.get("agentId") if emp else None
+
     if force:
         for b in bindings:
             db.delete_binding(b["id"])
         for m in im_mappings:
             db.delete_user_mapping(m["channel"], m["channelUserId"])
+        # Cascade: delete agent + S3 workspace
+        if agent_id:
+            db.delete_agent(agent_id)
+            try:
+                import boto3 as _b3del
+                s3_bucket = os.environ.get("S3_BUCKET", "")
+                if s3_bucket:
+                    s3 = _b3del.client("s3")
+                    resp = s3.list_objects_v2(Bucket=s3_bucket, Prefix=f"{emp_id}/workspace/", MaxKeys=200)
+                    for obj in resp.get("Contents", []):
+                        s3.delete_object(Bucket=s3_bucket, Key=obj["Key"])
+            except Exception:
+                pass
     db.delete_employee(emp_id)
-    return {"ok": True, "deleted": emp_id, "bindingsDeleted": len(bindings), "imMappingsDeleted": len(im_mappings)}
+    # Audit
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "employee_deleted",
+        "actorId": user.employee_id,
+        "actorName": user.name,
+        "targetType": "employee",
+        "targetId": emp_id,
+        "detail": f"Deleted employee {emp_id} (bindings: {len(bindings)}, mappings: {len(im_mappings)}, agent: {agent_id or 'none'})",
+        "status": "success",
+    })
+    return {"ok": True, "deleted": emp_id, "bindingsDeleted": len(bindings), "imMappingsDeleted": len(im_mappings), "agentDeleted": agent_id}
 
 
 # ── Activity ─────────────────────────────────────────────────────────────
 
+import time as _time_act
+_activity_cache = {"data": None, "expires": 0}
+
 @router.get("/employees/activity")
 def get_employee_activities(authorization: str = Header(default="")):
-    """Get activity data for all employees — seed records + session-derived for gaps."""
+    """Get activity data for all employees — seed records + session-derived for gaps.
+    Cached for 30 seconds to avoid repeated full-table scans."""
     user = _get_current_user(authorization)
+
+    if _activity_cache["data"] and _time_act.time() < _activity_cache["expires"]:
+        activities = _activity_cache["data"]
+        if user and user.role == "manager":
+            scope = get_dept_scope(user)
+            if scope is not None:
+                employees = db.get_employees()
+                emp_ids = {e["id"] for e in employees if e.get("departmentId") in scope}
+                activities = [a for a in activities if a.get("employeeId") in emp_ids]
+        return activities
+
     activities = db.get_activities()
 
     activity_map: dict = {a["employeeId"]: a for a in activities if a.get("employeeId")}
@@ -235,6 +287,8 @@ def get_employee_activities(authorization: str = Header(default="")):
         pass
 
     activities = list(activity_map.values())
+    _activity_cache["data"] = activities
+    _activity_cache["expires"] = _time_act.time() + 30
 
     if user and user.role == "manager":
         scope = get_dept_scope(user)
@@ -282,7 +336,7 @@ def get_employee_activity(emp_id: str):
 
 def _auto_provision_employee(emp: dict) -> dict | None:
     """Auto-create 1:1 agent + binding for a single employee based on position.
-    Also binds to any shared agents marked as 'autoBindAll'.
+    Uses DynamoDB TransactWriteItems — all writes succeed or all fail.
     Returns dict with agentId if provisioned, None if skipped."""
     pos_id = emp.get("positionId", "")
     if not pos_id or emp.get("agentId"):
@@ -294,31 +348,32 @@ def _auto_provision_employee(emp: dict) -> dict | None:
         return None
 
     now = datetime.now(timezone.utc).isoformat()
-    default_channel = pos.get("defaultChannel", "slack")
+    default_channel = pos.get("defaultChannel", "portal")
 
     agent_id = f"agent-{pos_id.replace('pos-','')}-{emp['id'].replace('emp-','')}"
     agent_name = f"{pos.get('name','')} Agent - {emp['name']}"
 
     existing = db.get_agent(agent_id)
-    if not existing:
-        agent = {
-            "id": agent_id,
-            "name": agent_name,
-            "employeeId": emp["id"],
-            "employeeName": emp["name"],
-            "positionId": pos_id,
-            "positionName": pos.get("name", ""),
-            "status": "active",
-            "soulVersions": {"global": 3, "position": 1, "personal": 0},
-            "skills": pos.get("defaultSkills", []),
-            "channels": [default_channel],
-            "qualityScore": None,
-            "createdAt": now,
-            "updatedAt": now,
-        }
-        db.create_agent(agent)
+    if existing:
+        return None
 
-    binding = {
+    agent_data = {
+        "id": agent_id,
+        "name": agent_name,
+        "employeeId": emp["id"],
+        "employeeName": emp["name"],
+        "positionId": pos_id,
+        "positionName": pos.get("name", ""),
+        "status": "active",
+        "soulVersions": {"global": 3, "position": 1, "personal": 0},
+        "skills": pos.get("defaultSkills", []),
+        "channels": [default_channel],
+        "qualityScore": None,
+        "createdAt": now,
+        "updatedAt": now,
+    }
+
+    binding_data = {
         "employeeId": emp["id"],
         "employeeName": emp["name"],
         "agentId": agent_id,
@@ -329,29 +384,11 @@ def _auto_provision_employee(emp: dict) -> dict | None:
         "source": "auto-provision",
         "createdAt": now,
     }
-    db.create_binding(binding)
-
-    agents = db.get_agents()
-    shared_agents = [a for a in agents if not a.get("employeeId") and a.get("autoBindAll")]
-    for sa in shared_agents:
-        shared_binding = {
-            "employeeId": emp["id"],
-            "employeeName": emp["name"],
-            "agentId": sa["id"],
-            "agentName": sa["name"],
-            "mode": "N:1",
-            "channel": sa.get("channels", [default_channel])[0] if sa.get("channels") else default_channel,
-            "status": "active",
-            "source": "auto-provision-shared",
-            "createdAt": now,
-        }
-        db.create_binding(shared_binding)
 
     emp["agentId"] = agent_id
     emp["agentStatus"] = "active"
-    db.create_employee(emp)
 
-    db.create_audit_entry({
+    audit_data = {
         "timestamp": now,
         "eventType": "config_change",
         "actorId": "system",
@@ -360,9 +397,20 @@ def _auto_provision_employee(emp: dict) -> dict | None:
         "targetId": agent_id,
         "detail": f"Auto-provisioned {agent_name} for {emp['name']} ({pos.get('name','')})",
         "status": "success",
-    })
+    }
 
-    # Position and permissions are now read from DynamoDB (EMP#/POS# records).
-    # No SSM writes needed.
+    # Atomic write: AGENT# + BIND# + EMP# + AUDIT# + shared bindings
+    # All succeed or all fail — no orphaned agents or bindings.
+    ok = db.provision_employee_atomic(
+        agent_data=agent_data,
+        binding_data=binding_data,
+        emp_update=emp,
+        audit_data=audit_data,
+    )
+    if not ok:
+        # Transaction failed — nothing was written. Clean rollback.
+        emp.pop("agentId", None)
+        emp.pop("agentStatus", None)
+        return None
 
     return {"agentId": agent_id, "agentName": agent_name}

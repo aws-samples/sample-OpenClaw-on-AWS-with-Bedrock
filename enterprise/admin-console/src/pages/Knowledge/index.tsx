@@ -52,10 +52,20 @@ export default function KnowledgeBase_() {
     } catch { setShowFile({ name, content: 'Failed to load file' }); }
   };
 
+  const [uploadError, setUploadError] = useState('');
   const handleUpload = () => {
     if (uploadKbId && uploadFilename && uploadContent) {
+      setUploadError('');
       uploadMut.mutate({ kbId: uploadKbId, filename: uploadFilename, content: uploadContent }, {
-        onSuccess: () => { setShowUpload(false); setUploadKbId(''); setUploadFilename(''); setUploadContent(''); },
+        onSuccess: () => { setShowUpload(false); setUploadKbId(''); setUploadFilename(''); setUploadContent(''); setUploadError(''); },
+        onError: (err: any) => {
+          const status = err?.response?.status || err?.status;
+          if (status === 413) {
+            setUploadError('Document too large (max 1MB). For larger documents, use Bedrock Knowledge Base skill with RAG.');
+          } else {
+            setUploadError(err?.response?.data?.detail || err?.message || 'Upload failed');
+          }
+        },
       });
     }
   };
@@ -311,6 +321,11 @@ export default function KnowledgeBase_() {
             placeholder="e.g. api-guidelines.md" description="Must end with .md" />
           <Textarea label="Content (Markdown)" value={uploadContent} onChange={setUploadContent}
             rows={12} placeholder="# Document Title&#10;&#10;Write your knowledge document in Markdown format..." />
+          {uploadError && (
+            <div className="rounded-lg bg-danger/10 border border-danger/30 px-3 py-2.5 text-sm text-danger">
+              {uploadError}
+            </div>
+          )}
         </div>
       </Modal>
 
@@ -332,12 +347,12 @@ export default function KnowledgeBase_() {
                 <div key={i} className="rounded-lg bg-dark-bg border border-dark-border p-3">
                   <div className="flex items-center justify-between mb-1">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-text-primary">{r.doc}</span>
-                      <Badge>{r.kbName}</Badge>
+                      <span className="text-sm font-medium text-text-primary">{r.name || r.doc}</span>
+                      <Badge>{r.type === 'kb' ? 'Knowledge Base' : (r.kbName || r.kb)}</Badge>
                     </div>
-                    <Badge color={r.score > 0.9 ? 'success' : r.score > 0.8 ? 'info' : 'warning'}>Score: {r.score}</Badge>
+                    {r.score && <Badge color={r.score > 0.9 ? 'success' : r.score > 0.8 ? 'info' : 'warning'}>Score: {r.score}</Badge>}
                   </div>
-                  <p className="text-xs text-text-secondary mt-1">{r.snippet}</p>
+                  {r.snippet && <p className="text-xs text-text-secondary mt-1">{r.snippet}</p>}
                 </div>
               ))}
               {searchResults.length === 0 && <p className="text-sm text-text-muted text-center py-4">No matches found</p>}

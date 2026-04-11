@@ -132,6 +132,154 @@ def merge_agents_md(global_agents: str, position_agents: str) -> str:
     return "\n\n---\n\n".join(parts) if parts else ""
 
 
+def _build_context_block(
+    s3_client, bucket: str, stack_name: str,
+    tenant_id: str, base_id: str, pos_id: str, workspace: str,
+) -> str:
+    """Build runtime context block: Plan A permissions + KB refs + language + org-directory.
+    Returns a string appended after the 3-layer merge in SOUL.md.
+    All DynamoDB reads are done here — server.py no longer modifies SOUL.md."""
+
+    ddb_region = os.environ.get("DYNAMODB_REGION", os.environ.get("AWS_REGION", "us-east-1"))
+    ddb_table = os.environ.get("DYNAMODB_TABLE", os.environ.get("STACK_NAME", "openclaw"))
+
+    try:
+        ddb = boto3.resource("dynamodb", region_name=ddb_region)
+        table = ddb.Table(ddb_table)
+    except Exception as e:
+        logger.warning("Context block: DynamoDB unavailable: %s", e)
+        return ""
+
+    parts = []
+
+    # 1. Plan A — tool permissions from POS#.toolAllowlist
+    is_exec = False
+    is_twin = tenant_id.startswith("twin__")
+    if pos_id and not is_twin:
+        try:
+            pos_resp = table.get_item(Key={"PK": "ORG#acme", "SK": f"POS#{pos_id}"})
+            pos_item = pos_resp.get("Item", {})
+            tools = pos_item.get("toolAllowlist", [])
+            profile_name = pos_item.get("name", pos_id).lower()
+            is_exec = "exec" in profile_name
+            if tools and not is_exec:
+                all_tools = ["web_search", "shell", "browser", "file", "file_write", "code_execution"]
+                blocked = [t for t in all_tools if t not in tools]
+                constraint = (
+                    "<!-- PLAN A: PERMISSION ENFORCEMENT -->\n"
+                    f"Allowed tools for this session: {', '.join(tools)}.\n"
+                )
+                if blocked:
+                    constraint += (
+                        f"You MUST NOT use these tools: {', '.join(blocked)}.\n"
+                        "If the user requests an action requiring a blocked tool, "
+                        "explain that you don't have permission and suggest alternatives.\n"
+                    )
+                parts.append(constraint)
+        except Exception as e:
+            logger.warning("Plan A context failed: %s", e)
+
+    # 2. Digital Twin context
+    if is_twin:
+        parts.append(
+            "<!-- DIGITAL TWIN MODE -->\n"
+            "You are this employee's AI digital representative.\n"
+            "- Introduce yourself as their AI assistant standing in\n"
+            "- Answer based on their expertise, SOUL profile, and memory\n"
+            "- Be warm, professional, helpful -- represent them well\n"
+            "- Do NOT reveal private/sensitive internal data\n"
+        )
+
+    # 3. KB references + download files + org-directory inline
+    kb_ids = set()
+    try:
+        kb_cfg_resp = table.get_item(Key={"PK": "ORG#acme", "SK": "CONFIG#kb-assignments"})
+        if "Item" in kb_cfg_resp:
+            kb_cfg = kb_cfg_resp["Item"]
+            if pos_id:
+                kb_ids.update(kb_cfg.get("positionKBs", {}).get(pos_id, []))
+            kb_ids.update(kb_cfg.get("employeeKBs", {}).get(base_id, []))
+
+            if kb_ids:
+                kb_dir = os.path.join(workspace, "knowledge")
+                os.makedirs(kb_dir, exist_ok=True)
+                kb_lines = []
+                has_org_dir = False
+                for kb_id in kb_ids:
+                    try:
+                        kb_item = table.get_item(
+                            Key={"PK": "ORG#acme", "SK": f"KB#{kb_id}"}
+                        ).get("Item")
+                        if not kb_item:
+                            continue
+                        # Download KB files
+                        files_list = kb_item.get("files", [])
+                        if not files_list:
+                            s3_prefix = kb_item.get("s3Prefix", "")
+                            if s3_prefix:
+                                try:
+                                    resp = s3_client.list_objects_v2(Bucket=bucket, Prefix=s3_prefix)
+                                    for obj in resp.get("Contents", []):
+                                        key = obj["Key"]
+                                        fname = key.split("/")[-1]
+                                        if fname and not fname.startswith("."):
+                                            files_list.append({"s3Key": key, "filename": fname})
+                                except Exception:
+                                    pass
+                        kb_sub = os.path.join(kb_dir, kb_id)
+                        os.makedirs(kb_sub, exist_ok=True)
+                        for file_ref in files_list:
+                            s3_key = file_ref.get("s3Key", "")
+                            fname = file_ref.get("filename", s3_key.split("/")[-1])
+                            local_path = os.path.join(kb_sub, fname)
+                            if not os.path.isfile(local_path):
+                                try:
+                                    obj = s3_client.get_object(Bucket=bucket, Key=s3_key)
+                                    with open(local_path, "wb") as f:
+                                        f.write(obj["Body"].read())
+                                except Exception:
+                                    pass
+                        kb_lines.append(
+                            f"- **{kb_item.get('name', kb_id)}**: knowledge/{kb_id}/")
+                        if "org-directory" in kb_id:
+                            kb_lines.append(
+                                "  When asked about colleagues, departments, or contacts, "
+                                "read knowledge/kb-org-directory/company-directory.md")
+                        logger.info("KB injected: %s", kb_id)
+                    except Exception as ke:
+                        logger.warning("KB context failed for %s: %s", kb_id, ke)
+
+                if kb_lines:
+                    parts.append(
+                        "<!-- KNOWLEDGE BASES -->\n"
+                        "You have access to the following knowledge base documents:\n"
+                        + "\n".join(kb_lines)
+                        + "\nUse the `file` tool to read these when relevant.\n"
+                    )
+    except Exception as e:
+        logger.warning("KB context build failed: %s", e)
+
+    # 4. Language preference
+    try:
+        agent_cfg_resp = table.get_item(
+            Key={"PK": "ORG#acme", "SK": "CONFIG#agent-config"})
+        if "Item" in agent_cfg_resp:
+            cfg = agent_cfg_resp["Item"]
+            emp_cfg = cfg.get("employeeConfig", {}).get(base_id, {})
+            pos_cfg = cfg.get("positionConfig", {}).get(pos_id, {}) if pos_id else {}
+            lang = emp_cfg.get("language") or pos_cfg.get("language", "")
+            if lang:
+                parts.append(
+                    f"<!-- LANGUAGE PREFERENCE -->\n"
+                    f"Always respond in **{lang}** unless the user "
+                    f"explicitly writes in a different language.\n"
+                )
+    except Exception as e:
+        logger.warning("Language context failed: %s", e)
+
+    return "\n\n---\n\n".join(parts) if parts else ""
+
+
 def assemble_workspace(
     s3_client, ssm_client, bucket: str, stack_name: str,
     tenant_id: str, workspace: str, position_override: str = None
@@ -166,36 +314,56 @@ def assemble_workspace(
         logger.info("Position layer (%s): SOUL=%d AGENTS=%d chars",
                     pos_id, len(position_soul), len(position_agents))
 
-    # 4. Read personal layer (employee's own preferences only).
-    # Use .personal_soul_backup.md if it exists — this is the employee's raw personal
-    # layer, saved before the first assembly. Without this, subsequent assemblies would
-    # read the already-merged SOUL.md (which includes global + position + KB blocks)
-    # as the personal layer, causing a snowball: SOUL.md grows unboundedly across sessions.
-    personal_soul_path = os.path.join(workspace, "SOUL.md")
-    backup_path = os.path.join(workspace, ".personal_soul_backup.md")
+    # 4. Read personal layer from PERSONAL_SOUL.md (independent file, not SOUL.md).
+    # This eliminates the snowball problem: PERSONAL_SOUL.md is never overwritten
+    # by assembly output, so running assembler N times always produces identical SOUL.md.
+    personal_soul_path = os.path.join(workspace, "PERSONAL_SOUL.md")
     personal_soul = ""
 
-    if os.path.isfile(backup_path):
-        # Backup exists = workspace has been assembled before; use the original personal layer
-        with open(backup_path) as f:
-            personal_soul = f.read()
-        logger.info("Personal layer (from backup): SOUL=%d chars", len(personal_soul))
-    elif os.path.isfile(personal_soul_path):
+    if os.path.isfile(personal_soul_path):
         with open(personal_soul_path) as f:
             personal_soul = f.read()
-        # Save backup so future assemblies use the original personal preferences
-        with open(backup_path, "w") as f:
-            f.write(personal_soul)
-        logger.info("Personal layer: SOUL=%d chars (backup created)", len(personal_soul))
+        logger.info("Personal layer (PERSONAL_SOUL.md): %d chars", len(personal_soul))
+    else:
+        # Migration: support legacy formats from pre-purification deployments
+        backup_path = os.path.join(workspace, ".personal_soul_backup.md")
+        old_soul_path = os.path.join(workspace, "SOUL.md")
+        if os.path.isfile(backup_path):
+            with open(backup_path) as f:
+                personal_soul = f.read()
+            with open(personal_soul_path, "w") as f:
+                f.write(personal_soul)
+            logger.info("Migrated .personal_soul_backup.md -> PERSONAL_SOUL.md (%d chars)", len(personal_soul))
+        elif os.path.isfile(old_soul_path):
+            with open(old_soul_path) as f:
+                content = f.read()
+            if "<!-- LAYER: GLOBAL" not in content:
+                personal_soul = content
+                with open(personal_soul_path, "w") as f:
+                    f.write(personal_soul)
+                logger.info("Migrated SOUL.md -> PERSONAL_SOUL.md (%d chars)", len(personal_soul))
 
-    # 5. Merge and write
+    # 5. Merge 3 layers
     merged_soul = merge_soul(global_soul, position_soul, personal_soul)
     merged_agents = merge_agents_md(global_agents, position_agents)
 
-    # Write merged SOUL.md — this is what OpenClaw reads
+    # 5.5. Build context block (Plan A + KB refs + language + org-directory)
+    # This replaces server.py's multiple open("a") appends with a single assembler write.
+    base_id = tenant_id
+    _parts = tenant_id.split("__")
+    if len(_parts) >= 3:
+        base_id = _parts[1]
+    elif len(_parts) == 2:
+        base_id = _parts[1]
+    context_block = _build_context_block(
+        s3_client, bucket, stack_name, tenant_id, base_id, pos_id, workspace)
+    if context_block:
+        merged_soul += "\n\n---\n\n" + context_block
+
+    # Write merged SOUL.md — this is what OpenClaw reads (single write, complete)
     with open(os.path.join(workspace, "SOUL.md"), "w") as f:
         f.write(merged_soul)
-    logger.info("Merged SOUL.md: %d chars", len(merged_soul))
+    logger.info("Merged SOUL.md: %d chars (context block: %d chars)", len(merged_soul), len(context_block))
 
     # Write merged AGENTS.md
     if merged_agents:

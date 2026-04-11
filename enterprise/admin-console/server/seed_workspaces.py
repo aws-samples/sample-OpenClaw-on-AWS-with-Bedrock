@@ -88,6 +88,13 @@ def seed():
 - {e['style']}
 """)
 
+        # PERSONAL_SOUL.md — employee's personal SOUL layer (editable, persisted to S3)
+        put(s3, bucket, f"{prefix}/PERSONAL_SOUL.md", f"""# Personal Preferences — {e['name']}
+
+- **Communication style:** {e['style']}
+- **Current focus:** {e['focus']}
+""")
+
         # Daily memory
         put(s3, bucket, f"{prefix}/memory/2026-03-20.md", f"""# March 20, 2026
 
@@ -96,7 +103,7 @@ def seed():
 """)
 
         count += 1
-        print(f"  {emp_id} ({e['name']}): IDENTITY.md, USER.md, MEMORY.md, memory/2026-03-20.md")
+        print(f"  {emp_id} ({e['name']}): IDENTITY.md, USER.md, MEMORY.md, PERSONAL_SOUL.md, memory/2026-03-20.md")
 
     print(f"\nDone! {count} employee workspaces seeded.")
 

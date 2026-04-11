@@ -302,7 +302,8 @@ echo "[entrypoint] server.py PID=${SERVER_PID}"
                 aws s3 sync "$WORKSPACE/" "$SYNC_TARGET" \
                     --exclude "node_modules/*" --exclude "skills/_shared/*" --exclude "skills/*" \
                     --exclude "SOUL.md" --exclude "AGENTS.md" --exclude "TOOLS.md" \
-                    --exclude "IDENTITY.md" --exclude ".personal_soul_backup.md" \
+                    --exclude "IDENTITY.md" --exclude "SESSION_CONTEXT.md" --exclude "CHANNELS.md" \
+                    --exclude ".personal_soul_backup.md" \
                     --exclude "knowledge/*" \
                     --size-only --region "$AWS_REGION" \
                     --quiet 2>/dev/null && echo "[watchdog] Synced to ${SYNC_TARGET}" || true

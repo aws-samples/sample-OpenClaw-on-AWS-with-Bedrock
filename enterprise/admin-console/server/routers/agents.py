@@ -21,10 +21,12 @@ import s3ops
 import auth as authmod
 from shared import (
     require_auth, require_role,
-    ssm_client, bump_config_version,
+    ssm_client, bump_config_version, audit_soul_change,
     GATEWAY_REGION, STACK_NAME, GATEWAY_ACCOUNT_ID,
     stop_employee_session, get_dept_scope,
 )
+import re as _re_agents
+import time as _time_agents
 
 router = APIRouter(tags=["agents"])
 
@@ -41,53 +43,23 @@ def _get_current_user(authorization: str):
         return None
 
 
-def _get_all_agentcore_log_groups() -> list:
-    """Dynamically discover all AgentCore runtime log groups.
-    Caches for 5 minutes so new runtimes are picked up automatically."""
-    stack = os.environ.get("STACK_NAME", "openclaw")
+def _resolve_agent_status(agent: dict) -> str:
+    """Derive agent status from DynamoDB lastInvocationAt field.
+    Replaces CloudWatch-based status detection (was 20+ API calls per page load)."""
+    last = agent.get("lastInvocationAt", "")
+    if not last:
+        return agent.get("status", "idle")
     try:
-        cw = boto3.client("logs", region_name=GATEWAY_REGION)
-        resp = cw.describe_log_groups(logGroupNamePrefix="/aws/bedrock-agentcore/runtimes/")
-        groups = [g["logGroupName"] for g in resp.get("logGroups", [])]
-        extra = [f"/openclaw/{stack}/agents"]
-        return groups + [g for g in extra if g not in groups]
+        ts = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - ts).total_seconds()
+        if age < 900:
+            return "active"
+        elif age < 3600:
+            return "idle"
+        else:
+            return "offline"
     except Exception:
-        return [f"/openclaw/{stack}/agents"]
-
-
-def _get_active_agent_ids() -> set:
-    """Determine which agents are currently active (microVM running) from CloudWatch.
-    An agent is 'active' if it had an invocation in the last 15 minutes (AgentCore idle timeout).
-    Returns set of employee IDs that are active."""
-    try:
-        import time as _t
-        cw = boto3.client("logs", region_name=GATEWAY_REGION)
-        start_time = int((_t.time() - 900) * 1000)  # 15 min ago
-        active_ids = set()
-        for lg in _get_all_agentcore_log_groups():
-            try:
-                resp = cw.filter_log_events(
-                    logGroupName=lg, startTime=start_time,
-                    filterPattern="Invocation tenant_id=",
-                    limit=50, interleaved=True,
-                )
-                for event in resp.get("events", []):
-                    msg = event.get("message", "")
-                    if "tenant_id=" in msg:
-                        tid = msg.split("tenant_id=")[1].split(" ")[0]
-                        # Extract base employee ID
-                        parts = tid.split("__")
-                        if len(parts) >= 3:
-                            active_ids.add(parts[1])
-                        elif len(parts) == 2:
-                            active_ids.add(parts[1])
-                        else:
-                            active_ids.add(tid)
-            except Exception:
-                pass
-        return active_ids
-    except Exception:
-        return set()
+        return agent.get("status", "idle")
 
 
 # =========================================================================
@@ -105,14 +77,9 @@ def get_agents(authorization: str = Header(default="")):
         a.setdefault("skills", [])
         a.setdefault("soulVersions", {})
 
-    # Dynamic status: check CloudWatch for recent activity
-    active_emp_ids = _get_active_agent_ids()
+    # Dynamic status from DynamoDB lastInvocationAt (replaces CloudWatch)
     for a in agents:
-        emp_id = a.get("employeeId", "")
-        if emp_id in active_emp_ids:
-            a["status"] = "active"
-        elif a.get("status") == "active":
-            a["status"] = "idle"  # No recent activity -> idle (serverless standby)
+        a["status"] = _resolve_agent_status(a)
 
     if user and user.role == "manager":
         scope = get_dept_scope(user)
@@ -130,13 +97,7 @@ def get_agent(agent_id: str):
     agent.setdefault("channels", [])
     agent.setdefault("skills", [])
     agent.setdefault("soulVersions", {})
-    # Dynamic status
-    active_emp_ids = _get_active_agent_ids()
-    emp_id = agent.get("employeeId", "")
-    if emp_id in active_emp_ids:
-        agent["status"] = "active"
-    elif agent.get("status") == "active":
-        agent["status"] = "idle"
+    agent["status"] = _resolve_agent_status(agent)
     return agent
 
 @router.post("/api/v1/agents")
@@ -146,97 +107,86 @@ def create_agent(body: dict):
     body.setdefault("createdAt", datetime.now(timezone.utc).isoformat())
     body.setdefault("updatedAt", body["createdAt"])
 
-    agent = db.create_agent(body)
-
     emp_id = body.get("employeeId")
     pos_id = body.get("positionId", "")
-    agent_id = body.get("id") or agent.get("id", "")
     channel = body.get("defaultChannel", "discord")
 
-    if emp_id and pos_id:
-        # 1. Write SSM tenant->position and permissions for this employee
-        stack = os.environ.get("STACK_NAME", "openclaw")
-        region = os.environ.get("AWS_REGION", "us-east-1")
-        pos_tools = {
-            "pos-sa": ["web_search", "shell", "browser", "file", "file_write", "code_execution"],
-            "pos-sde": ["web_search", "shell", "browser", "file", "file_write", "code_execution"],
-            "pos-devops": ["web_search", "shell", "browser", "file", "file_write", "code_execution"],
-            "pos-qa": ["web_search", "shell", "file", "code_execution"],
-            "pos-ae": ["web_search", "file", "crm-query", "email-send", "calendar-check"],
-            "pos-pm": ["web_search", "file", "notion-sync", "calendar-check", "excel-gen"],
-            "pos-fa": ["web_search", "file", "excel-gen", "sap-connector"],
-            "pos-hr": ["web_search", "file", "email-send", "calendar-check"],
-            "pos-csm": ["web_search", "file", "crm-query", "email-send"],
-            "pos-legal": ["web_search", "file"],
-            "pos-exec": ["web_search", "shell", "browser", "file", "file_write", "code_execution"],
-        }
-        # Position and permissions are now read from DynamoDB (EMP#/POS# records).
-        # No SSM writes needed.
+    if not emp_id or not pos_id:
+        # Simple agent creation without binding (rare: shared agent)
+        agent = db.create_agent(body)
+        return agent
 
-        # 2. Create binding (employee -> agent)
-        now = datetime.now(timezone.utc).isoformat()
-        emp = next((e for e in db.get_employees() if e["id"] == emp_id), {})
-        positions = db.get_positions()
-        pos = next((p for p in positions if p["id"] == pos_id), {})
-        deploy_mode = body.get("deployMode", "serverless")
-        db.create_binding({
-            "employeeId": emp_id,
-            "employeeName": emp.get("name", ""),
-            "agentId": agent_id,
-            "agentName": body.get("name", ""),
-            "mode": "1:1",  # kept for backward compat with existing binding queries
-            "channel": channel,
-            "status": "active",
-            "source": "manual",
-            "createdAt": now,
-        })
+    # Full provisioning: agent + binding + employee update + audit — atomic
+    now = datetime.now(timezone.utc).isoformat()
+    emp = next((e for e in db.get_employees() if e["id"] == emp_id), {})
+    positions = db.get_positions()
+    pos = next((p for p in positions if p["id"] == pos_id), {})
+    deploy_mode = body.get("deployMode", "serverless")
+    agent_id = body.get("id", f"agent-{int(__import__('time').time())}")
+    body["id"] = agent_id
 
-        # 3. Seed minimal S3 workspace if it doesn't already exist
-        s3_bucket = os.environ.get("S3_BUCKET", f"openclaw-tenants-{GATEWAY_ACCOUNT_ID}")
-        try:
-            s3 = boto3.client("s3", region_name=region)
-            # Only seed if workspace is empty
-            prefix = f"{emp_id}/workspace/"
-            resp = s3.list_objects_v2(Bucket=s3_bucket, Prefix=prefix, MaxKeys=5)
-            if not resp.get("Contents"):
-                emp_name = emp.get("name", emp_id)
-                pos_name = pos.get("name", pos_id)
-                dept = emp.get("departmentName", "")
-                # IDENTITY.md
-                s3.put_object(Bucket=s3_bucket, Key=f"{prefix}IDENTITY.md",
-                    Body=f"# Agent Identity\n\n- **Name**: {emp_name}'s AI Assistant\n- **Position**: {pos_name}\n- **Department**: {dept}\n- **Company**: ACME Corp\n- **Platform**: OpenClaw Enterprise\n".encode())
-                # MEMORY.md
-                s3.put_object(Bucket=s3_bucket, Key=f"{prefix}MEMORY.md",
-                    Body=f"# Memory\nNo previous conversations recorded.\n".encode())
-                # USER.md
-                s3.put_object(Bucket=s3_bucket, Key=f"{prefix}USER.md",
-                    Body=f"# User Profile\n\n- **Name**: {emp_name}\n- **Position**: {pos_name}\n- **Language**: English\n".encode())
-                print(f"[create_agent] S3 workspace seeded for {emp_id}")
-        except Exception as e:
-            print(f"[create_agent] S3 workspace seed failed for {emp_id}: {e}")
+    binding_data = {
+        "employeeId": emp_id,
+        "employeeName": emp.get("name", ""),
+        "agentId": agent_id,
+        "agentName": body.get("name", ""),
+        "mode": "1:1",
+        "channel": channel,
+        "status": "active",
+        "source": "manual",
+        "createdAt": now,
+    }
 
-        # 4. Update employee record with agentId
-        try:
-            emp["agentId"] = agent_id
-            emp["agentStatus"] = "active"
-            db.create_employee(emp)
-        except Exception as e:
-            print(f"[create_agent] employee update failed: {e}")
+    emp["agentId"] = agent_id
+    emp["agentStatus"] = "active"
 
-        # 5. Audit trail
-        db.create_audit_entry({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "eventType": "config_change", "actorId": "admin", "actorName": "IT Admin",
-            "targetType": "agent", "targetId": agent_id,
-            "detail": f"Created agent '{body.get('name')}' for {emp.get('name', emp_id)} ({pos.get('name', pos_id)}) [{deploy_mode}]",
-            "status": "success",
-        })
+    audit_data = {
+        "timestamp": now,
+        "eventType": "config_change", "actorId": "admin", "actorName": "IT Admin",
+        "targetType": "agent", "targetId": agent_id,
+        "detail": f"Created agent '{body.get('name')}' for {emp.get('name', emp_id)} ({pos.get('name', pos_id)}) [{deploy_mode}]",
+        "status": "success",
+    }
 
-        # 6. If always-on, mark as pending -- admin starts from Agent Factory
-        if deploy_mode == "always-on-ecs":
-            agent["note"] = "Agent created with Always-on mode. Go to Agent Factory -> Always-on tab -> Start to launch the ECS container."
+    # Atomic write: AGENT# + BIND# + EMP# + AUDIT# in one DynamoDB transaction
+    ok = db.provision_employee_atomic(
+        agent_data=body,
+        binding_data=binding_data,
+        emp_update=emp,
+        audit_data=audit_data,
+    )
+    if not ok:
+        raise HTTPException(500, "Agent creation failed — transaction rolled back, no partial state.")
 
-    return agent
+    # S3 workspace seeding (non-transactional — but DynamoDB state is consistent)
+    # If S3 fails, agent exists in DynamoDB but workspace will be created on first invocation
+    # by workspace_assembler.py (which seeds missing files automatically).
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    s3_bucket = os.environ.get("S3_BUCKET", f"openclaw-tenants-{GATEWAY_ACCOUNT_ID}")
+    try:
+        s3 = boto3.client("s3", region_name=region)
+        prefix = f"{emp_id}/workspace/"
+        resp = s3.list_objects_v2(Bucket=s3_bucket, Prefix=prefix, MaxKeys=5)
+        if not resp.get("Contents"):
+            emp_name = emp.get("name", emp_id)
+            safe_name = _re_agents.sub(r'([#*_\[\]<>])', r'\\\1', emp_name)
+            pos_name = pos.get("name", pos_id)
+            dept = emp.get("departmentName", "")
+            s3.put_object(Bucket=s3_bucket, Key=f"{prefix}IDENTITY.md",
+                Body=f"# Agent Identity\n\n- **Name**: {safe_name} AI Assistant\n- **Position**: {pos_name}\n- **Department**: {dept}\n- **Company**: ACME Corp\n- **Platform**: OpenClaw Enterprise\n".encode())
+            s3.put_object(Bucket=s3_bucket, Key=f"{prefix}MEMORY.md",
+                Body=f"# Memory\nNo previous conversations recorded.\n".encode())
+            s3.put_object(Bucket=s3_bucket, Key=f"{prefix}USER.md",
+                Body=f"# User Profile\n\n- **Name**: {emp_name}\n- **Position**: {pos_name}\n- **Language**: English\n".encode())
+            s3.put_object(Bucket=s3_bucket, Key=f"{prefix}PERSONAL_SOUL.md",
+                Body=b"# Personal Preferences\n\n(Edit this to customize your AI agent behavior.)\n")
+    except Exception as e:
+        print(f"[create_agent] S3 seed failed (non-fatal, workspace_assembler will retry): {e}")
+
+    if deploy_mode == "always-on-ecs":
+        body["note"] = "Agent created with Always-on mode. Go to Agent Factory -> Always-on tab -> Start to launch the ECS container."
+
+    return body
 
 
 # =========================================================================
@@ -257,7 +207,16 @@ def get_agent_soul(agent_id: str, authorization: str = Header(default="")):
 
     global_soul = s3ops.read_file("_shared/soul/global/SOUL.md") or ""
     position_soul = s3ops.read_file(f"_shared/soul/positions/{pos_id}/SOUL.md") or ""
-    personal_soul = s3ops.read_file(f"{emp_id}/workspace/SOUL.md") if emp_id else ""
+    # Read personal layer from PERSONAL_SOUL.md (new purified design).
+    # Falls back to SOUL.md for pre-migration workspaces.
+    personal_soul = ""
+    if emp_id:
+        personal_soul = s3ops.read_file(f"{emp_id}/workspace/PERSONAL_SOUL.md") or ""
+        if not personal_soul:
+            # Fallback: try old SOUL.md (pre-purification workspace)
+            old = s3ops.read_file(f"{emp_id}/workspace/SOUL.md") or ""
+            if old and "<!-- LAYER: GLOBAL" not in old:
+                personal_soul = old
 
     return [
         {"layer": "global", "content": global_soul, "locked": True, "version": sv.get("global", 3), "updatedAt": "2026-03-15T00:00:00Z"},
@@ -269,30 +228,43 @@ def get_agent_soul(agent_id: str, authorization: str = Header(default="")):
 class SoulSaveRequest(BaseModel):
     layer: str  # "position" or "personal"
     content: str
+    expectedVersion: int | None = None  # for conflict detection
 
 @router.put("/api/v1/agents/{agent_id}/soul")
 def save_agent_soul(agent_id: str, body: SoulSaveRequest, authorization: str = Header(default="")):
-    """Save a SOUL layer to S3. Increments version in DynamoDB."""
-    require_role(authorization, roles=["admin", "manager"])
+    """Save a SOUL layer to S3. Increments version in DynamoDB. Audits the change."""
+    user = require_role(authorization, roles=["admin", "manager"])
     agent = db.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
     if body.layer == "global":
         raise HTTPException(403, "Global layer is locked -- requires CISO + CTO approval")
 
+    # Conflict detection: if client sends expectedVersion, verify it matches
+    sv = agent.get("soulVersions", {})
+    current_version = sv.get(body.layer, 0)
+    if body.expectedVersion is not None and body.expectedVersion != current_version:
+        raise HTTPException(409, "SOUL was modified by another session. Reload to see latest.")
+
     pos_id = agent.get("positionId", "")
     emp_id = agent.get("employeeId")
 
-    result = s3ops.save_soul_layer(body.layer, pos_id, emp_id, "SOUL.md", body.content)
-    if result.get("error"):
-        raise HTTPException(400, result["error"])
+    if body.layer == "personal" and emp_id:
+        s3ops.write_file(f"{emp_id}/workspace/PERSONAL_SOUL.md", body.content)
+        result = {"key": f"{emp_id}/workspace/PERSONAL_SOUL.md"}
+    else:
+        result = s3ops.save_soul_layer(body.layer, pos_id, emp_id, "SOUL.md", body.content)
+        if result.get("error"):
+            raise HTTPException(400, result["error"])
 
-    # Increment version in DynamoDB
-    sv = agent.get("soulVersions", {})
-    sv[body.layer] = sv.get(body.layer, 0) + 1
+    # Increment version
+    sv[body.layer] = current_version + 1
     agent["soulVersions"] = sv
     agent["updatedAt"] = datetime.now(timezone.utc).isoformat()
-    db.create_agent(agent)  # upsert
+    db.create_agent(agent)
+
+    # Audit
+    audit_soul_change(user, body.layer, agent_id, len(body.content))
 
     return {"saved": True, "layer": body.layer, "version": sv[body.layer], "s3Key": result.get("key")}
 
@@ -446,11 +418,17 @@ def get_skill(skill_name: str):
         raise HTTPException(404, f"Skill {skill_name} not found")
     return json.loads(content)
 
+_skill_keys_cache = {"data": None, "expires": 0}
+
 @router.get("/api/v1/skills/keys/all")
 def get_all_skill_keys():
     """List all required API keys across all skills.
     Reads skill manifests from S3 to determine required env vars,
-    then checks SSM to see which are actually configured."""
+    then checks SSM to see which are actually configured.
+    Cached for 5 minutes to reduce S3 API calls."""
+
+    if _skill_keys_cache["data"] and _time_agents.time() < _skill_keys_cache["expires"]:
+        return _skill_keys_cache["data"]
 
     # Get all skills from S3
     files = s3ops.list_files("_shared/skills/")
@@ -501,6 +479,8 @@ def get_all_skill_keys():
                 "note": note,
             })
 
+    _skill_keys_cache["data"] = keys
+    _skill_keys_cache["expires"] = _time_agents.time() + 300
     return keys
 
 
@@ -508,18 +488,17 @@ def get_all_skill_keys():
 
 @router.post("/api/v1/skills/{skill_name}/assign")
 def assign_skill_to_position(skill_name: str, body: dict, authorization: str = Header(default="")):
-    """Assign a skill to a position. Propagates to all agents in that position."""
+    """Assign a skill to a position. Skills are read from POS#.defaultSkills at runtime
+    by workspace_assembler — no need to propagate to individual AGENT# records."""
     require_role(authorization, roles=["admin"])
     position_id = body.get("positionId", "")
     if not position_id:
         raise HTTPException(400, "positionId required")
 
-    # Verify skill exists in S3
     manifest_content = s3ops.read_file(f"_shared/skills/{skill_name}/skill.json")
     if not manifest_content:
         raise HTTPException(404, f"Skill {skill_name} not found in S3")
 
-    # Update position's defaultSkills
     pos = db.get_position(position_id)
     if not pos:
         raise HTTPException(404, f"Position {position_id} not found")
@@ -529,25 +508,12 @@ def assign_skill_to_position(skill_name: str, body: dict, authorization: str = H
         skills.append(skill_name)
         db.update_position(position_id, {"defaultSkills": skills})
 
-    # Propagate to agents: add skill to each agent in this position
-    agents_updated = []
-    for emp in db.get_employees():
-        if emp.get("positionId") == position_id and emp.get("agentId"):
-            agent = db.get_agent(emp["agentId"])
-            if agent:
-                agent_skills = agent.get("skills", [])
-                if skill_name not in agent_skills:
-                    agent_skills.append(skill_name)
-                    db.update_agent(emp["agentId"], {"skills": agent_skills})
-                    agents_updated.append(emp["agentId"])
-
-    return {"assigned": True, "positionId": position_id, "skill": skill_name,
-            "agentsPropagated": len(agents_updated)}
+    return {"assigned": True, "positionId": position_id, "skill": skill_name}
 
 
 @router.delete("/api/v1/skills/{skill_name}/assign")
 def unassign_skill_from_position(skill_name: str, positionId: str = "", authorization: str = Header(default="")):
-    """Remove a skill from a position and its agents."""
+    """Remove a skill from a position."""
     require_role(authorization, roles=["admin"])
     if not positionId:
         raise HTTPException(400, "positionId query param required")
@@ -561,17 +527,83 @@ def unassign_skill_from_position(skill_name: str, positionId: str = "", authoriz
         skills.remove(skill_name)
         db.update_position(positionId, {"defaultSkills": skills})
 
-    # Remove from agents
-    agents_updated = []
-    for emp in db.get_employees():
-        if emp.get("positionId") == positionId and emp.get("agentId"):
-            agent = db.get_agent(emp["agentId"])
-            if agent:
-                agent_skills = agent.get("skills", [])
-                if skill_name in agent_skills:
-                    agent_skills.remove(skill_name)
-                    db.update_agent(emp["agentId"], {"skills": agent_skills})
-                    agents_updated.append(emp["agentId"])
+    return {"unassigned": True, "positionId": positionId, "skill": skill_name}
 
-    return {"unassigned": True, "positionId": positionId, "skill": skill_name,
-            "agentsPropagated": len(agents_updated)}
+
+# =========================================================================
+# DELETE Agent — cascade: BIND#, S3 workspace, AUDIT#
+# =========================================================================
+
+@router.delete("/api/v1/agents/{agent_id}")
+def delete_agent(agent_id: str, authorization: str = Header(default="")):
+    """Delete an agent and cascade: remove bindings, clear employee link, delete S3 workspace."""
+    user = require_role(authorization, roles=["admin"])
+    agent = db.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+    emp_id = agent.get("employeeId", "")
+
+    # 1. Delete all bindings for this agent
+    bindings = [b for b in db.get_bindings() if b.get("agentId") == agent_id]
+    for b in bindings:
+        db.delete_binding(b["id"])
+
+    # 2. Delete agent record
+    db.delete_agent(agent_id)
+
+    # 3. Clear agentId from employee record
+    if emp_id:
+        emp = db.get_employee(emp_id)
+        if emp:
+            emp.pop("agentId", None)
+            emp.pop("agentStatus", None)
+            db.create_employee(emp)
+
+    # 4. Delete S3 workspace (best-effort)
+    if emp_id:
+        try:
+            s3 = boto3.client("s3")
+            bucket = os.environ.get("S3_BUCKET", f"openclaw-tenants-{GATEWAY_ACCOUNT_ID}")
+            resp = s3.list_objects_v2(Bucket=bucket, Prefix=f"{emp_id}/workspace/", MaxKeys=200)
+            for obj in resp.get("Contents", []):
+                s3.delete_object(Bucket=bucket, Key=obj["Key"])
+        except Exception as e:
+            print(f"[delete_agent] S3 cleanup failed (non-fatal): {e}")
+
+    # 5. Audit
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "agent_deleted",
+        "actorId": user.employee_id,
+        "actorName": user.name,
+        "targetType": "agent",
+        "targetId": agent_id,
+        "detail": f"Deleted agent {agent.get('name', agent_id)} (employee: {emp_id})",
+        "status": "success",
+    })
+
+    return {"deleted": True, "agentId": agent_id, "bindingsDeleted": len(bindings)}
+
+
+# =========================================================================
+# Force Refresh — terminate agent session to trigger fresh assembly
+# =========================================================================
+
+@router.post("/api/v1/admin/refresh-agent/{emp_id}")
+def refresh_agent(emp_id: str, authorization: str = Header(default="")):
+    """Force terminate running agent session to trigger fresh workspace assembly.
+    Used after SOUL edits, KB changes, or permission updates."""
+    user = require_role(authorization, roles=["admin", "manager"])
+    from datetime import datetime, timezone
+    result = stop_employee_session(emp_id)
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "agent_refresh",
+        "actorId": user.employee_id,
+        "actorName": user.name,
+        "targetType": "agent",
+        "targetId": emp_id,
+        "detail": f"Admin forced agent refresh for {emp_id}",
+        "status": "success",
+    })
+    return {"refreshed": True, "emp_id": emp_id, "detail": result}

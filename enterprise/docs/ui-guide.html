@@ -427,8 +427,8 @@ soul: { en:{title:'SOUL Editor — 3-Layer Identity System',sub:'The core identi
     )
     + card(t('Layer 3: Personal SOUL — "I prefer bullet points in Chinese"','第 3 层：个人 SOUL — "我喜欢中文要点格式"'),
       t(
-        '<p style="font-size:12px;color:var(--text-s)">The employee\'s own preferences. "I prefer concise bullet points." "Always respond in Chinese when I write in Chinese." "My timezone is Asia/Shanghai." This layer is editable by the <strong>employee themselves</strong> via Portal → My Profile, or by admin via Agent Factory. It adds personalization without overriding company or role rules.</p><div class="code" style="font-size:10px">S3 path: s3://{bucket}/{emp_id}/workspace/SOUL.md\nBackup: s3://{bucket}/{emp_id}/workspace/.personal_soul_backup.md</div>',
-        '<p style="font-size:12px;color:var(--text-s)">员工自己的偏好。"我喜欢简洁的要点格式。""当我用中文写时始终用中文回复。""我的时区是 Asia/Shanghai。"该层可由<strong>员工自己</strong>通过 Portal → My Profile 编辑，或由管理员通过 Agent Factory 编辑。它添加个性化而不覆盖公司或角色规则。</p><div class="code" style="font-size:10px">S3 路径: s3://{bucket}/{emp_id}/workspace/SOUL.md\n备份: s3://{bucket}/{emp_id}/workspace/.personal_soul_backup.md</div>'
+        '<p style="font-size:12px;color:var(--text-s)">The employee\'s own preferences. "I prefer concise bullet points." "Always respond in Chinese when I write in Chinese." "My timezone is Asia/Shanghai." This layer is editable by the <strong>employee themselves</strong> via Portal → My Profile, or by admin via Agent Factory. It adds personalization without overriding company or role rules.</p><div class="code" style="font-size:10px">S3 path: s3://{bucket}/{emp_id}/workspace/PERSONAL_SOUL.md\nPersisted to S3 by watchdog. Assembler reads this (not SOUL.md) as personal layer.</div>',
+        '<p style="font-size:12px;color:var(--text-s)">员工自己的偏好。"我喜欢简洁的要点格式。""当我用中文写时始终用中文回复。""我的时区是 Asia/Shanghai。"该层可由<strong>员工自己</strong>通过 Portal → My Profile 编辑，或由管理员通过 Agent Factory 编辑。它添加个性化而不覆盖公司或角色规则。</p><div class="code" style="font-size:10px">S3 路径: s3://{bucket}/{emp_id}/workspace/PERSONAL_SOUL.md\n由 watchdog 持久化到 S3。Assembler 读取此文件（非 SOUL.md）作为个人层。</div>'
       )
     )
     + deep(
@@ -561,9 +561,95 @@ Always respond in Chinese unless the user writes in English.</div>
 <h4>⚠️ Known Design Considerations</h4>
 <ul style="font-size:12px;color:var(--text-s);line-height:1.8">
 <li><strong>Position change = global cache evict:</strong> Changing one position's SOUL bumps CONFIG#global-version, which evicts ALL agents' assembly cache (not just the affected position). This is simple but wasteful — could be improved with per-position versioning.</li>
-<li><strong>.personal_soul_backup.md deletion risk:</strong> If accidentally deleted, the snowball cycle restarts. The backup is excluded from S3 sync, so it can only be deleted manually inside the microVM or by a code bug.</li>
 <li><strong>USER.md is separate from SOUL merge:</strong> USER.md is read by OpenClaw as additional context (like a profile card), but it's NOT merged into SOUL.md. This is intentional — USER.md is for factual info about the employee, SOUL.md is for behavior instructions.</li>
 <li><strong>5-minute propagation latency:</strong> Global/Position SOUL changes take up to 5 minutes to reach running agents. For serverless agents, the change is instant on next session start (since the microVM is created fresh).</li>
+</ul>
+
+<h4 style="color:var(--primary);margin-top:24px">🔮 PLANNED: SOUL Purification + Review Engine</h4>
+<p style="font-size:12px;color:var(--text-s)">PRD: <code>enterprise/docs/PRD-soul-review-engine.md</code></p>
+
+<h4>Problem: SOUL.md Pollution</h4>
+<p style="font-size:12px;color:var(--text-s)">server.py appends Plan A, KB paths, org-directory (~5KB), and language to SOUL.md via <code>open("a")</code>. If config_version changes trigger reassembly, these blocks accumulate. The <code>.personal_soul_backup.md</code> hack prevents snowball but does not capture agent self-learning.</p>
+
+<h4>New Design: Separation of Concerns</h4>
+<table class="tbl" style="font-size:11px">
+<tr><th>File</th><th>Content</th><th>S3 Sync</th><th>Change</th></tr>
+<tr><td><code>PERSONAL_SOUL.md</code></td><td>Employee personal layer (editable, persistent)</td><td>✅ Write-back</td><td style="color:var(--success)">NEW</td></tr>
+<tr><td><code>SOUL.md</code></td><td>3-layer merge + context block (Plan A + KB refs + language). Assembler writes once.</td><td>❌ Never</td><td>Simplified</td></tr>
+<tr><td><code><s>CONTEXT.md</s></code></td><td><s>Abandoned — OpenClaw only reads SOUL.md as system prompt</s></td><td>—</td><td style="color:var(--text-m)">DROPPED</td></tr>
+<tr><td><code>.personal_soul_backup.md</code></td><td><s>Anti-snowball hack</s></td><td>—</td><td style="color:var(--danger)">REMOVED</td></tr>
+</table>
+
+<h4>New Assembly Flow</h4>
+<div class="code">workspace_assembler.py (single pass, NO server.py append):
+
+  SOUL.md = merge(
+    Global SOUL  ← S3 _shared/soul/global/
+    Position SOUL ← S3 _shared/soul/positions/{pos_id}/
+    PERSONAL_SOUL.md ← workspace (NOT SOUL.md!)
+  )
+  + "Your runtime context is in CONTEXT.md."
+
+  CONTEXT.md = build(
+    Plan A     ← DynamoDB POS#.toolAllowlist
+    KB refs    ← DynamoDB CONFIG#kb-assignments
+    Language   ← DynamoDB EMP# or USER.md
+    Org-dir    ← S3 kb-org-directory (inline)
+  )
+
+  server.py: NO open("a"), NO SOUL.md modification.
+  KB files downloaded to knowledge/ only.</div>
+
+<h4>Personal SOUL Persistence + Agent Self-Learning</h4>
+<div class="code">Session end (SIGTERM, &lt;500ms):
+  1. Read workspace/SOUL.md (agent may have modified it)
+  2. Strip known layers by &lt;!-- LAYER: xxx --&gt; markers
+  3. Remaining = personal content (incl. agent-learned parts)
+  4. SHA256 compare with existing PERSONAL_SOUL.md
+  5. If changed AND S3 version not newer (Portal edit wins):
+     → Save new PERSONAL_SOUL.md
+     → Write AUDIT# eventType="personal_soul_change" status="pending"
+  6. Watchdog final sync → PERSONAL_SOUL.md → S3 (persisted)</div>
+
+<h4>Review Engine (Async, Unified)</h4>
+<div class="code">Two inputs (both written at SIGTERM, &lt;500ms total):
+  ├── Personal SOUL delta  → AUDIT# personal_soul_change
+  └── Tool usage stats     → USAGE_PATTERN#{emp}#{date}
+
+Admin Console (async, every 30 min or manual):
+  ├── Read S3 PERSONAL_SOUL.md
+  ├── Bedrock AI review: security risks, prompt injection, policy violations
+  ├── Update AUDIT# with risk_level + findings + recommendation
+  └── Critical → auto-revert to last approved version
+
+Cold start check (server.py):
+  If latest REVIEW = "critical" → use last approved PERSONAL_SOUL.md
+  If "approved" or "pending" → normal assembly</div>
+
+<h4>Plan A Tool Usage Insights (Same Engine)</h4>
+<div class="code">Same Review Engine, second input stream:
+  USAGE_PATTERN#{emp}#{date} = { shell: 15 blocked, web_search: 30 allowed }
+
+AI analysis detects:
+  "Sarah (Finance) attempted shell 15 times → suggest temp access or training"
+  "Sales team: crm-query assigned but 0 usage in 30 days → send onboarding"
+  "SDE team: browser at 5% usage → consider removing from pos-sde"
+
+Admin actions: [Adjust Permission] [Send Training] [Dismiss]</div>
+
+<h4 style="color:var(--warn)">TODO — Implementation Tasks</h4>
+<ul style="font-size:12px;color:var(--text-s);line-height:1.8">
+<li>☑ <strong>Phase 1:</strong> workspace_assembler.py → read PERSONAL_SOUL.md, build context block, migration from .personal_soul_backup.md <span style="color:var(--success)">(DONE)</span></li>
+<li>☑ <strong>Phase 1:</strong> server.py → removed all open("a") SOUL.md appends (Plan A, KB, language, Twin) <span style="color:var(--success)">(DONE)</span></li>
+<li>☑ <strong>Phase 1:</strong> entrypoint.sh → updated watchdog sync excludes + seed_workspaces.py seeds PERSONAL_SOUL.md <span style="color:var(--success)">(DONE)</span></li>
+<li>☐ <strong>Phase 2:</strong> personal_soul_extractor.py → SIGTERM extraction + hash compare + AUDIT# write</li>
+<li>☐ <strong>Phase 2:</strong> Portal "My Agent Identity" page → edit PERSONAL_SOUL.md</li>
+<li>☐ <strong>Phase 3:</strong> review_engine.py → scheduled Bedrock AI review + auto-revert</li>
+<li>☐ <strong>Phase 3:</strong> tool_usage_collector.py → SIGTERM tool stats collection</li>
+<li>☐ <strong>Phase 3:</strong> Security Center → Review tab frontend</li>
+<li>☐ <strong>Phase 4:</strong> deploy.sh Step 5 → seed PERSONAL_SOUL.md per employee workspace</li>
+<li>☐ <strong>Phase 4:</strong> Migration script → extract personal layer from existing SOUL.md for deployed environments</li>
+<li>☐ <strong>Phase 4:</strong> Verify OpenClaw reads CONTEXT.md (or add reference in SOUL.md footer)</li>
 </ul>`,
 
 `<h4>OpenClaw 如何读取 SOUL — 组装过程</h4>
@@ -638,9 +724,95 @@ Allowed tools: web_search, file. MUST NOT: shell, browser...
 <h4>⚠️ 设计注意事项</h4>
 <ul style="font-size:12px;color:var(--text-s);line-height:1.8">
 <li><strong>岗位变更 = 全局缓存清除：</strong>修改一个岗位的 SOUL 会清除所有 Agent 的缓存（非仅受影响岗位）。</li>
-<li><strong>.personal_soul_backup.md 删除风险：</strong>如被删除，雪球循环重启。</li>
 <li><strong>USER.md 与 SOUL 分离：</strong>USER.md 是员工档案信息，不合并到 SOUL.md。SOUL 是行为指令。</li>
 <li><strong>5 分钟传播延迟：</strong>全局/岗位变更最多 5 分钟到达运行中的 Agent。Serverless Agent 下次会话立即生效。</li>
+</ul>
+
+<h4 style="color:var(--primary);margin-top:24px">🔮 计划中：SOUL 净化 + Review Engine</h4>
+<p style="font-size:12px;color:var(--text-s)">PRD: <code>enterprise/docs/PRD-soul-review-engine.md</code></p>
+
+<h4>问题：SOUL.md 被污染</h4>
+<p style="font-size:12px;color:var(--text-s)">server.py 通过 <code>open("a")</code> 向 SOUL.md 追加 Plan A、KB 路径、org-directory（约 5KB）和语言偏好。config_version 变更触发重新组装时，这些块会累积。<code>.personal_soul_backup.md</code> hack 防止了雪球效应，但无法捕获 Agent 自学习内容。</p>
+
+<h4>新设计：关注点分离</h4>
+<table class="tbl" style="font-size:11px">
+<tr><th>文件</th><th>内容</th><th>S3 同步</th><th>变更</th></tr>
+<tr><td><code>PERSONAL_SOUL.md</code></td><td>员工个人 SOUL 层（可编辑，持久化）</td><td>✅ 回写</td><td style="color:var(--success)">新增</td></tr>
+<tr><td><code>SOUL.md</code></td><td>3 层合并 + context block（Plan A + KB 引用 + 语言）。Assembler 一次写入。</td><td>❌ 不回写</td><td>简化</td></tr>
+<tr><td><code><s>CONTEXT.md</s></code></td><td><s>已放弃——OpenClaw 仅读 SOUL.md 作为系统提示</s></td><td>—</td><td style="color:var(--text-m)">放弃</td></tr>
+<tr><td><code>.personal_soul_backup.md</code></td><td><s>防雪球 hack</s></td><td>—</td><td style="color:var(--danger)">移除</td></tr>
+</table>
+
+<h4>新组装流程</h4>
+<div class="code">workspace_assembler.py（单次执行，server.py 不再追加）:
+
+  SOUL.md = merge(
+    全局 SOUL  ← S3 _shared/soul/global/
+    岗位 SOUL  ← S3 _shared/soul/positions/{pos_id}/
+    PERSONAL_SOUL.md ← workspace（不是 SOUL.md！）
+  )
+  + "你的运行时上下文在 CONTEXT.md 中。"
+
+  CONTEXT.md = build(
+    Plan A     ← DynamoDB POS#.toolAllowlist
+    KB 引用    ← DynamoDB CONFIG#kb-assignments
+    语言偏好   ← DynamoDB EMP# 或 USER.md
+    Org 目录   ← S3 kb-org-directory（内联）
+  )
+
+  server.py: 不再 open("a")，不修改 SOUL.md。
+  KB 文件仅下载到 knowledge/ 目录。</div>
+
+<h4>个人 SOUL 持久化 + Agent 自学习</h4>
+<div class="code">会话结束（SIGTERM，&lt;500ms）:
+  1. 读取 workspace/SOUL.md（Agent 可能已修改）
+  2. 按 &lt;!-- LAYER: xxx --&gt; 标记剥离已知层
+  3. 剩余 = 个人内容（含 Agent 自学习部分）
+  4. SHA256 对比现有 PERSONAL_SOUL.md
+  5. 如有变化且 S3 版本未更新（Portal 编辑优先）：
+     → 保存新 PERSONAL_SOUL.md
+     → 写入 AUDIT# eventType="personal_soul_change" status="pending"
+  6. Watchdog 最终同步 → PERSONAL_SOUL.md → S3（持久化）</div>
+
+<h4>Review Engine（异步，统一）</h4>
+<div class="code">两个输入（均在 SIGTERM 时写入，总计 &lt;500ms）：
+  ├── 个人 SOUL 变化 → AUDIT# personal_soul_change
+  └── 工具使用统计   → USAGE_PATTERN#{emp}#{date}
+
+Admin Console（异步，每 30 分钟或手动）：
+  ├── 读取 S3 PERSONAL_SOUL.md
+  ├── Bedrock AI 审查：安全风险、提示注入、策略违规
+  ├── 更新 AUDIT#：risk_level + findings + recommendation
+  └── Critical → 自动回滚到上次批准版本
+
+冷启动检查（server.py）：
+  如果最近 REVIEW = "critical" → 使用上次批准的 PERSONAL_SOUL.md
+  如果 "approved" 或 "pending" → 正常组装</div>
+
+<h4>Plan A 工具使用洞察（同一引擎）</h4>
+<div class="code">同一 Review Engine，第二输入流：
+  USAGE_PATTERN#{emp}#{date} = { shell: 15 次被阻止, web_search: 30 次允许 }
+
+AI 分析检测：
+  "Sarah（财务）尝试 shell 15 次 → 建议临时权限或培训 excel-gen"
+  "Sales 团队：crm-query 已分配但 30 天零使用 → 发送入职指南"
+  "SDE 团队：browser 使用率 5% → 考虑从 pos-sde 移除"
+
+管理员操作：[调整权限] [发送培训] [忽略]</div>
+
+<h4 style="color:var(--warn)">TODO — 实施任务</h4>
+<ul style="font-size:12px;color:var(--text-s);line-height:1.8">
+<li>☑ <strong>阶段 1：</strong>workspace_assembler.py → 读 PERSONAL_SOUL.md、构建 context block、从 .personal_soul_backup.md 迁移 <span style="color:var(--success)">(已完成)</span></li>
+<li>☑ <strong>阶段 1：</strong>server.py → 删除所有 open("a") SOUL.md 追加（Plan A、KB、语言、Twin）<span style="color:var(--success)">(已完成)</span></li>
+<li>☑ <strong>阶段 1：</strong>entrypoint.sh → 更新 watchdog 排除 + seed_workspaces.py 种子 PERSONAL_SOUL.md <span style="color:var(--success)">(已完成)</span></li>
+<li>☐ <strong>阶段 2：</strong>personal_soul_extractor.py → SIGTERM 提取 + hash 对比 + AUDIT# 写入</li>
+<li>☐ <strong>阶段 2：</strong>Portal "我的 Agent 身份"页面 → 编辑 PERSONAL_SOUL.md</li>
+<li>☐ <strong>阶段 3：</strong>review_engine.py → 定时 Bedrock AI 审查 + 自动回滚</li>
+<li>☐ <strong>阶段 3：</strong>tool_usage_collector.py → SIGTERM 工具统计收集</li>
+<li>☐ <strong>阶段 3：</strong>Security Center → Review 标签前端</li>
+<li>☐ <strong>阶段 4：</strong>deploy.sh 步骤 5 → 为每个员工工作区种子 PERSONAL_SOUL.md</li>
+<li>☐ <strong>阶段 4：</strong>迁移脚本 → 从已部署环境的 SOUL.md 提取个人层</li>
+<li>☐ <strong>阶段 4：</strong>验证 OpenClaw 读取 CONTEXT.md（或在 SOUL.md 末尾添加引用）</li>
 </ul>`
     ); }},
 
@@ -679,8 +851,8 @@ org: { en:{title:'Organization Management',sub:'Code audit: org.py (369 lines). 
       'org.py:283-368 — _auto_provision_employee(emp)\n  触发：create_employee() 当 positionId 存在但无 agentId [行 146-155]\n\n  步骤 1：创建 AGENT# 记录（行 304-318）\n    agent_id = f"agent-{pos_id}-{emp_id}"（确定性）\n\n  步骤 2：创建 BIND# 记录（行 321-332）\n    mode: "1:1", source: "auto-provision"\n\n  步骤 3：自动绑定共享 Agent（行 334-348）\n    查询所有 Agent → 过滤 autoBindAll=true → 创建 N:1 绑定\n    ⚠ 无限制——10 个共享 Agent = 10 个静默绑定\n\n  步骤 4：更新 EMP# 的 agentId（行 350-352）\n  步骤 5：创建 AUDIT#（行 354-363）\n\n  ⚠ 非事务性：5 个 DynamoDB 写入。\n    步骤 3 失败时 1-2 已提交。无回滚。'
     )}</div>`
     + deep(
-      '<h4>Code-Verified Audit Findings (org.py, 369 lines)</h4><p style="color:var(--danger);font-weight:600">CRITICAL</p><div style="border-left:3px solid var(--danger);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#1 create_position and update_position have NO auth check.</strong> File: <code>org.py:97-109</code>. <code>def create_position(body: dict):</code> — no <code>require_role()</code>, no <code>require_auth()</code>. Any authenticated user (including employees) can create or modify positions via direct API call. Compare: <code>create_department()</code> (line 44) correctly calls <code>require_role(authorization, roles=["admin"])</code>.</p><p><strong>#2 Auto-provisioning is non-transactional with no rollback.</strong> File: <code>org.py:283-368</code>. 5 sequential DynamoDB writes. If <code>db.create_binding()</code> (step 2) fails, AGENT# already created (step 1) but employee has no binding. If <code>db.create_employee(emp)</code> (step 4) fails, orphaned agent + binding exist. No cleanup, no compensating transaction. Auto-provision failure caught by bare <code>except Exception</code> at line 153 — printed to console, employee returned without agentId.</p><p><strong>#3 Employee deletion creates no audit trail.</strong> File: <code>org.py:168-190</code>. <code>delete_employee()</code> deletes bindings + mappings + employee but creates NO AUDIT# entry. Admin can silently remove employees from the system. Compare: auto-provisioning (line 354-363) correctly creates audit entry.</p></div><p style="color:var(--warn);font-weight:600">HIGH</p><div style="border-left:3px solid var(--warn);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#4 Department isolation is UI-only.</strong> File: <code>org.py:33-40</code>. Manager scope check: <code>if user and user.role == "manager"</code> filters GET responses. But POST/PUT/DELETE endpoints return unfiltered data. <code>update_department()</code> (line 50) requires admin role but <code>get_departments()</code> API itself returns ALL departments before client-side filtering.</p><p><strong>#5 Department deletion doesn\'t cascade to positions.</strong> File: <code>org.py:59-81</code>. Blocks if employees exist in department, blocks if sub-departments exist. But does NOT check if positions reference this department. Positions become orphaned (departmentId pointing to deleted department).</p><p><strong>#6 Shared agent auto-binding is unbounded.</strong> File: <code>org.py:334-348</code>. <code>shared_agents = [a for a in agents if not a.get("employeeId") and a.get("autoBindAll")]</code>. Every new employee gets bound to ALL autoBindAll agents. 10 shared agents = 10 silent bindings per new hire. No limit, no approval required.</p><p><strong>#7 create_employee has NO auth check.</strong> File: <code>org.py:141-155</code>. <code>def create_employee(body: dict):</code> — no <code>require_role()</code>. Any authenticated user can create employees and trigger auto-provisioning via direct API. Only <code>update_employee()</code> (line 159) and <code>delete_employee()</code> (line 168) check admin role.</p></div><p style="color:var(--text-m);font-weight:600">DESIGN</p><div style="border-left:3px solid var(--text-m);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#8</strong> Activity endpoint scans ALL sessions for all employees (<code>:195-245</code>) — O(n×m) per request, no caching. <strong>#9</strong> <code>_get_current_user()</code> (<code>:22-27</code>) swallows auth errors → unauthenticated users see unfiltered data on list endpoints. <strong>#10</strong> Agent ID pattern <code>agent-{pos_id}-{emp_id}</code> (<code>:299</code>) is predictable — enumerable if you know position/employee ID patterns. <strong>#11</strong> <code>defaultChannel</code> from position (<code>:297</code>: <code>pos.get("defaultChannel", "slack")</code>) defaults to "slack" even if only Feishu is configured. <strong>#12</strong> Force-delete (<code>:184-189</code>) cascades to bindings and mappings but NOT to the AGENT# record itself — orphaned agent remains.</p></div>',
-      '<h4>代码验证的审计发现（org.py，369 行）</h4><p style="color:var(--danger);font-weight:600">关键</p><div style="border-left:3px solid var(--danger);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#1 create_position 和 update_position 无认证检查。</strong>文件：<code>org.py:97-109</code>。<code>def create_position(body: dict):</code> — 无 <code>require_role()</code>，无 <code>require_auth()</code>。任何认证用户（含员工）可通过直接 API 调用创建或修改岗位。对比：<code>create_department()</code>（行 44）正确调用 <code>require_role(authorization, roles=["admin"])</code>。</p><p><strong>#2 自动配置非事务性，无回滚。</strong>文件：<code>org.py:283-368</code>。5 步顺序 DynamoDB 写入。如果 <code>db.create_binding()</code>（步骤 2）失败，AGENT# 已创建（步骤 1）但员工无绑定。如果 <code>db.create_employee(emp)</code>（步骤 4）失败，孤立的 agent + binding 已存在。无清理，无补偿事务。自动配置失败被行 153 的 <code>except Exception</code> 捕获 — 打印到控制台，员工返回时无 agentId。</p><p><strong>#3 员工删除无审计日志。</strong>文件：<code>org.py:168-190</code>。<code>delete_employee()</code> 删除绑定 + 映射 + 员工但不创建 AUDIT# 条目。管理员可静默从系统中移除员工。对比：自动配置（行 354-363）正确创建审计条目。</p></div><p style="color:var(--warn);font-weight:600">高</p><div style="border-left:3px solid var(--warn);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#4 部门隔离仅 UI 层。</strong>文件：<code>org.py:33-40</code>。Manager 范围检查：<code>if user and user.role == "manager"</code> 过滤 GET 响应。但 POST/PUT/DELETE 端点返回未过滤数据。<code>update_department()</code>（行 50）要求 admin 角色，但 <code>get_departments()</code> API 本身在客户端过滤前返回所有部门。</p><p><strong>#5 部门删除不级联到岗位。</strong>文件：<code>org.py:59-81</code>。如果部门有员工则阻止删除，如果有子部门则阻止删除。但不检查岗位是否引用此部门。岗位变成孤立状态（departmentId 指向已删除的部门）。</p><p><strong>#6 共享 Agent 自动绑定无上限。</strong>文件：<code>org.py:334-348</code>。<code>shared_agents = [a for a in agents if not a.get("employeeId") and a.get("autoBindAll")]</code>。每个新员工都绑定到所有 autoBindAll Agent。10 个共享 Agent = 每个新员工 10 个静默绑定。无限制，无需审批。</p><p><strong>#7 create_employee 无认证检查。</strong>文件：<code>org.py:141-155</code>。<code>def create_employee(body: dict):</code> — 无 <code>require_role()</code>。任何认证用户可通过直接 API 创建员工并触发自动配置。仅 <code>update_employee()</code>（行 159）和 <code>delete_employee()</code>（行 168）检查 admin 角色。</p></div><p style="color:var(--text-m);font-weight:600">设计</p><div style="border-left:3px solid var(--text-m);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#8</strong> Activity 端点扫描所有员工的所有会话（<code>:195-245</code>）— 每次请求 O(n×m)，无缓存。<strong>#9</strong> <code>_get_current_user()</code>（<code>:22-27</code>）吞掉认证错误 → 未认证用户在列表端点看到未过滤数据。<strong>#10</strong> Agent ID 模式 <code>agent-{pos_id}-{emp_id}</code>（<code>:299</code>）可预测 — 知道岗位/员工 ID 模式即可枚举。<strong>#11</strong> 岗位的 <code>defaultChannel</code>（<code>:297</code>：<code>pos.get("defaultChannel", "slack")</code>）即使只配置了飞书也默认 "slack"。<strong>#12</strong> Force-delete（<code>:184-189</code>）级联到绑定和映射但不删除 AGENT# 记录本身 — 孤立 Agent 残留。</p></div>'
+      '<h4>Code-Verified Audit Findings (org.py, 369 lines)</h4><p style="color:var(--danger);font-weight:600">CRITICAL</p><div style="border-left:3px solid var(--danger);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#1 create_position and update_position have NO auth check.</strong> File: <code>org.py:97-109</code>. <code>def create_position(body: dict):</code> — no <code>require_role()</code>, no <code>require_auth()</code>. Any authenticated user (including employees) can create or modify positions via direct API call. Compare: <code>create_department()</code> (line 44) correctly calls <code>require_role(authorization, roles=["admin"])</code>.</p><p><strong>#2 Auto-provisioning is non-transactional with no rollback.</strong> File: <code>org.py:283-368</code>. 5 sequential DynamoDB writes. If <code>db.create_binding()</code> (step 2) fails, AGENT# already created (step 1) but employee has no binding. If <code>db.create_employee(emp)</code> (step 4) fails, orphaned agent + binding exist. No cleanup, no compensating transaction. Auto-provision failure caught by bare <code>except Exception</code> at line 153 — printed to console, employee returned without agentId.</p><p><strong>#3 Employee deletion creates no audit trail.</strong> <span style="color:var(--success)">FIXED</span> File: <code>org.py:168-190</code>. <code>delete_employee()</code> deletes bindings + mappings + employee but creates NO AUDIT# entry. Admin can silently remove employees from the system. Compare: auto-provisioning (line 354-363) correctly creates audit entry.</p></div><p style="color:var(--warn);font-weight:600">HIGH</p><div style="border-left:3px solid var(--warn);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#4 Department isolation is UI-only.</strong> File: <code>org.py:33-40</code>. Manager scope check: <code>if user and user.role == "manager"</code> filters GET responses. But POST/PUT/DELETE endpoints return unfiltered data. <code>update_department()</code> (line 50) requires admin role but <code>get_departments()</code> API itself returns ALL departments before client-side filtering.</p><p><strong>#5 Department deletion doesn\'t cascade to positions.</strong> File: <code>org.py:59-81</code>. Blocks if employees exist in department, blocks if sub-departments exist. But does NOT check if positions reference this department. Positions become orphaned (departmentId pointing to deleted department).</p><p><strong>#6 Shared agent auto-binding is unbounded.</strong> File: <code>org.py:334-348</code>. <code>shared_agents = [a for a in agents if not a.get("employeeId") and a.get("autoBindAll")]</code>. Every new employee gets bound to ALL autoBindAll agents. 10 shared agents = 10 silent bindings per new hire. No limit, no approval required.</p><p><strong>#7 create_employee has NO auth check.</strong> File: <code>org.py:141-155</code>. <code>def create_employee(body: dict):</code> — no <code>require_role()</code>. Any authenticated user can create employees and trigger auto-provisioning via direct API. Only <code>update_employee()</code> (line 159) and <code>delete_employee()</code> (line 168) check admin role.</p></div><p style="color:var(--text-m);font-weight:600">DESIGN</p><div style="border-left:3px solid var(--text-m);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#8</strong> Activity endpoint scans ALL sessions for all employees (<code>:195-245</code>) — O(n×m) per request, no caching. <strong>#9</strong> <code>_get_current_user()</code> (<code>:22-27</code>) swallows auth errors → unauthenticated users see unfiltered data on list endpoints. <strong>#10</strong> Agent ID pattern <code>agent-{pos_id}-{emp_id}</code> (<code>:299</code>) is predictable — enumerable if you know position/employee ID patterns. <strong>#11</strong> <code>defaultChannel</code> from position (<code>:297</code>: <code>pos.get("defaultChannel", "slack")</code>) defaults to "slack" even if only Feishu is configured. <strong>#12</strong> Force-delete (<code>:184-189</code>) cascades to bindings and mappings but NOT to the AGENT# record itself — orphaned agent remains.</p></div>',
+      '<h4>代码验证的审计发现（org.py，369 行）</h4><p style="color:var(--danger);font-weight:600">关键</p><div style="border-left:3px solid var(--danger);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#1 create_position 和 update_position 无认证检查。</strong>文件：<code>org.py:97-109</code>。<code>def create_position(body: dict):</code> — 无 <code>require_role()</code>，无 <code>require_auth()</code>。任何认证用户（含员工）可通过直接 API 调用创建或修改岗位。对比：<code>create_department()</code>（行 44）正确调用 <code>require_role(authorization, roles=["admin"])</code>。</p><p><strong>#2 自动配置非事务性，无回滚。</strong>文件：<code>org.py:283-368</code>。5 步顺序 DynamoDB 写入。如果 <code>db.create_binding()</code>（步骤 2）失败，AGENT# 已创建（步骤 1）但员工无绑定。如果 <code>db.create_employee(emp)</code>（步骤 4）失败，孤立的 agent + binding 已存在。无清理，无补偿事务。自动配置失败被行 153 的 <code>except Exception</code> 捕获 — 打印到控制台，员工返回时无 agentId。</p><p><strong>#3 员工删除无审计日志。</strong><span style="color:var(--success)">已修复</span>文件：<code>org.py:168-190</code>。<code>delete_employee()</code> 删除绑定 + 映射 + 员工但不创建 AUDIT# 条目。管理员可静默从系统中移除员工。对比：自动配置（行 354-363）正确创建审计条目。</p></div><p style="color:var(--warn);font-weight:600">高</p><div style="border-left:3px solid var(--warn);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#4 部门隔离仅 UI 层。</strong>文件：<code>org.py:33-40</code>。Manager 范围检查：<code>if user and user.role == "manager"</code> 过滤 GET 响应。但 POST/PUT/DELETE 端点返回未过滤数据。<code>update_department()</code>（行 50）要求 admin 角色，但 <code>get_departments()</code> API 本身在客户端过滤前返回所有部门。</p><p><strong>#5 部门删除不级联到岗位。</strong>文件：<code>org.py:59-81</code>。如果部门有员工则阻止删除，如果有子部门则阻止删除。但不检查岗位是否引用此部门。岗位变成孤立状态（departmentId 指向已删除的部门）。</p><p><strong>#6 共享 Agent 自动绑定无上限。</strong>文件：<code>org.py:334-348</code>。<code>shared_agents = [a for a in agents if not a.get("employeeId") and a.get("autoBindAll")]</code>。每个新员工都绑定到所有 autoBindAll Agent。10 个共享 Agent = 每个新员工 10 个静默绑定。无限制，无需审批。</p><p><strong>#7 create_employee 无认证检查。</strong>文件：<code>org.py:141-155</code>。<code>def create_employee(body: dict):</code> — 无 <code>require_role()</code>。任何认证用户可通过直接 API 创建员工并触发自动配置。仅 <code>update_employee()</code>（行 159）和 <code>delete_employee()</code>（行 168）检查 admin 角色。</p></div><p style="color:var(--text-m);font-weight:600">设计</p><div style="border-left:3px solid var(--text-m);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#8</strong> Activity 端点扫描所有员工的所有会话（<code>:195-245</code>）— 每次请求 O(n×m)，无缓存。<strong>#9</strong> <code>_get_current_user()</code>（<code>:22-27</code>）吞掉认证错误 → 未认证用户在列表端点看到未过滤数据。<strong>#10</strong> Agent ID 模式 <code>agent-{pos_id}-{emp_id}</code>（<code>:299</code>）可预测 — 知道岗位/员工 ID 模式即可枚举。<strong>#11</strong> 岗位的 <code>defaultChannel</code>（<code>:297</code>：<code>pos.get("defaultChannel", "slack")</code>）即使只配置了飞书也默认 "slack"。<strong>#12</strong> Force-delete（<code>:184-189</code>）级联到绑定和映射但不删除 AGENT# 记录本身 — 孤立 Agent 残留。</p></div>'
     ); }},
 
 
@@ -698,8 +870,8 @@ agents: { en:{title:'Agent Factory',sub:'Code audit: agents.py (578 lines). 14 v
       'agents.py:142-239 — create_agent(body)\n  步骤 1: db.create_agent() → AGENT# [行 149]\n  步骤 2: 死代码——pos_tools 字典 [行 160-172]\n    ⚠ SSM 迁移残留。行 173 注释说"无需 SSM 写入"\n    但 11 行 pos_tools 字典从未使用。\n  步骤 3: db.create_binding() [行 182-192]\n  步骤 4: S3 工作区种子 [行 196-216]\n    仅在工作区为空时。创建 IDENTITY.md、MEMORY.md、USER.md\n    ⚠ 员工姓名未转义嵌入\n  步骤 5: 更新 EMP# [行 219-224]\n  步骤 6: AUDIT# [行 227-233]\n\n  非事务性：3+ DynamoDB 写入 + 3 S3 put。\n  任何步骤失败 → 部分状态。无回滚。'
     )}</div>`
     + deep(
-      '<h4>Code-Verified Audit Findings (agents.py, 578 lines)</h4><p style="color:var(--danger);font-weight:600">CRITICAL</p><div style="border-left:3px solid var(--danger);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#1 No DELETE agent endpoint.</strong> File: <code>agents.py</code> — search for <code>@router.delete("/api/v1/agents"</code> → not found. Agents created but never deletable via API. Orphaned agents accumulate in DynamoDB + S3 forever. Only manual DynamoDB delete_item works.</p><p><strong>#2 SOUL save creates no audit trail.</strong> File: <code>agents.py:273-297</code>. <code>save_agent_soul()</code> writes to S3, increments DynamoDB version. But creates NO AUDIT# entry. Admin can silently modify an employee\'s SOUL — changing agent behavior with no record. Compare: <code>create_agent()</code> (line 227) correctly creates audit.</p><p><strong>#3 Agent status queries CloudWatch on EVERY page load.</strong> File: <code>agents.py:58-90</code>. <code>_get_active_agent_ids()</code> calls <code>cw.filter_log_events()</code> for every log group on every <code>get_agents()</code> and <code>get_agent()</code> call. 20 agents × page refresh = 20+ CloudWatch API calls. No caching. <code>_get_all_agentcore_log_groups()</code> (line 44-55) same issue — says "Caches for 5 minutes" but NO cache.</p><p><strong>#4 create_agent has NO auth check.</strong> File: <code>agents.py:142</code>. <code>def create_agent(body: dict):</code> — no <code>require_role()</code>. Any authenticated user can create agents via direct POST. Compare: <code>save_agent_soul()</code> (line 276) correctly checks admin/manager.</p></div><p style="color:var(--warn);font-weight:600">HIGH</p><div style="border-left:3px solid var(--warn);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#5 XSS risk in S3 workspace seed.</strong> <code>agents.py:206-207</code>: <code>f"# Agent Identity\\n\\n- **Name**: {emp_name}\'s AI Assistant"</code>. Employee name embedded raw into markdown. Name like <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> or <code># Ignore all rules</code> persists in IDENTITY.md. Markdown injection could override SOUL instructions.</p><p><strong>#6 Dead code: pos_tools dict (12 lines).</strong> <code>agents.py:160-172</code>. 11-entry hardcoded position→tools mapping. Comment at line 173: "Position and permissions are now read from DynamoDB". Dict never referenced — pure dead code from SSM migration.</p><p><strong>#7 Workspace file read allows _shared/ prefix for employees.</strong> <code>agents.py:332</code>: <code>if not key.startswith(allowed_prefix) and not key.startswith("_shared/")</code>. Employees can read ALL _shared/ files including other position SOUL templates and all skill manifests. Information disclosure.</p><p><strong>#8 Skill assignment propagation is O(n×m).</strong> <code>agents.py:509-545</code>. <code>assign_skill_to_position()</code> loops through ALL employees, gets each agent individually, updates skills. 50 employees in a position = 50 individual DynamoDB reads + 50 writes. No batch operation.</p></div><p style="color:var(--text-m);font-weight:600">DESIGN</p><div style="border-left:3px solid var(--text-m);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#9</strong> SOUL version increment not atomic (<code>:291-295</code>): S3 write + DynamoDB update separate. S3 succeeds but DB fails → version number stale. <strong>#10</strong> <code>get_agent_soul_full()</code> (<code>:300-310</code>) has no auth check — any user reads any agent\'s full workspace. <strong>#11</strong> <code>get_workspace_tree()</code> (<code>:317-323</code>) no auth check. <strong>#12</strong> Memory endpoint (<code>:386-396</code>) requires auth but no department scoping — admin sees all agent memory. <strong>#13</strong> <code>get_all_skill_keys()</code> (<code>:449-504</code>) reads every skill manifest from S3 on each call — no caching. <strong>#14</strong> <code>stop_employee_session()</code> called in background thread on USER.md/SOUL.md edit (<code>:364</code>) — race condition if two admins edit simultaneously.</p></div>',
-      '<h4>代码验证的审计发现（agents.py，578 行）</h4><p style="color:var(--danger);font-weight:600">关键</p><div style="border-left:3px solid var(--danger);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#1 无 DELETE agent 端点。</strong>文件：<code>agents.py</code> — 搜索 <code>@router.delete("/api/v1/agents"</code> → 未找到。Agent 可创建但永远无法通过 API 删除。孤立 Agent 永久积累在 DynamoDB + S3 中。只能通过手动 DynamoDB delete_item 删除。</p><p><strong>#2 SOUL 保存无审计日志。</strong>文件：<code>agents.py:273-297</code>。<code>save_agent_soul()</code> 写入 S3，递增 DynamoDB 版本。但不创建 AUDIT# 条目。管理员可静默修改员工的 SOUL — 改变 Agent 行为而无任何记录。对比：<code>create_agent()</code>（行 227）正确创建审计。</p><p><strong>#3 Agent 状态每次页面加载查询 CloudWatch。</strong>文件：<code>agents.py:58-90</code>。<code>_get_active_agent_ids()</code> 在每次 <code>get_agents()</code> 和 <code>get_agent()</code> 调用时对每个日志组调用 <code>cw.filter_log_events()</code>。20 Agent × 页面刷新 = 20+ CloudWatch API 调用。无缓存。<code>_get_all_agentcore_log_groups()</code>（行 44-55）同样问题 — 注释说"缓存 5 分钟"但实际无缓存。</p><p><strong>#4 create_agent 无认证检查。</strong>文件：<code>agents.py:142</code>。<code>def create_agent(body: dict):</code> — 无 <code>require_role()</code>。任何认证用户可通过直接 POST 创建 Agent。对比：<code>save_agent_soul()</code>（行 276）正确检查 admin/manager。</p></div><p style="color:var(--warn);font-weight:600">高</p><div style="border-left:3px solid var(--warn);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#5 S3 工作区种子存在 XSS 风险。</strong><code>agents.py:206-207</code>：<code>f"# Agent Identity\\n\\n- **Name**: {emp_name} AI Assistant"</code>。员工姓名原始嵌入 markdown。名称如 <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> 或 <code># Ignore all rules</code> 会持久化到 IDENTITY.md。Markdown 注入可能覆盖 SOUL 指令。</p><p><strong>#6 死代码：pos_tools 字典（12 行）。</strong><code>agents.py:160-172</code>。11 条硬编码的岗位→工具映射。行 173 注释："Position and permissions are now read from DynamoDB"。字典从未被引用 — SSM 迁移遗留的纯死代码。</p><p><strong>#7 Workspace 文件读取允许员工访问 _shared/ 前缀。</strong><code>agents.py:332</code>：<code>if not key.startswith(allowed_prefix) and not key.startswith("_shared/")</code>。员工可读取所有 _shared/ 文件，包括其他岗位的 SOUL 模板和所有技能清单。信息泄露。</p><p><strong>#8 技能分配传播复杂度 O(n×m)。</strong><code>agents.py:509-545</code>。<code>assign_skill_to_position()</code> 遍历所有员工，逐个获取 Agent，逐个更新技能。岗位有 50 名员工 = 50 次单独 DynamoDB 读取 + 50 次写入。无批量操作。</p></div><p style="color:var(--text-m);font-weight:600">设计</p><div style="border-left:3px solid var(--text-m);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#9</strong> SOUL 版本递增非原子操作（<code>:291-295</code>）：S3 写入 + DynamoDB 更新分开执行。S3 成功但 DB 失败 → 版本号过时。<strong>#10</strong> <code>get_agent_soul_full()</code>（<code>:300-310</code>）无认证检查 — 任何用户可读取任意 Agent 的完整工作区。<strong>#11</strong> <code>get_workspace_tree()</code>（<code>:317-323</code>）无认证检查。<strong>#12</strong> Memory 端点（<code>:386-396</code>）要求认证但无部门范围限制 — 管理员可查看所有 Agent 记忆。<strong>#13</strong> <code>get_all_skill_keys()</code>（<code>:449-504</code>）每次调用从 S3 读取每个技能清单 — 无缓存。<strong>#14</strong> <code>stop_employee_session()</code> 在 USER.md/SOUL.md 编辑时通过后台线程调用（<code>:364</code>）— 两个管理员同时编辑时存在竞态条件。</p></div>'
+      '<h4>Code-Verified Audit Findings (agents.py, 578 lines)</h4><p style="color:var(--danger);font-weight:600">CRITICAL</p><div style="border-left:3px solid var(--danger);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#1 No DELETE agent endpoint.</strong> <span style="color:var(--success)">FIXED</span> File: <code>agents.py</code> — search for <code>@router.delete("/api/v1/agents"</code> → not found. Agents created but never deletable via API. Orphaned agents accumulate in DynamoDB + S3 forever. Only manual DynamoDB delete_item works.</p><p><strong>#2 SOUL save creates no audit trail.</strong> <span style="color:var(--success)">FIXED</span> File: <code>agents.py:273-297</code>. <code>save_agent_soul()</code> writes to S3, increments DynamoDB version. But creates NO AUDIT# entry. Admin can silently modify an employee\'s SOUL — changing agent behavior with no record. Compare: <code>create_agent()</code> (line 227) correctly creates audit.</p><p><strong>#3 Agent status queries CloudWatch on EVERY page load.</strong> <span style="color:var(--success)">FIXED: uses DynamoDB lastInvocationAt</span> File: <code>agents.py:58-90</code>. <code>_get_active_agent_ids()</code> calls <code>cw.filter_log_events()</code> for every log group on every <code>get_agents()</code> and <code>get_agent()</code> call. 20 agents × page refresh = 20+ CloudWatch API calls. No caching. <code>_get_all_agentcore_log_groups()</code> (line 44-55) same issue — says "Caches for 5 minutes" but NO cache.</p><p><strong>#4 create_agent has NO auth check.</strong> File: <code>agents.py:142</code>. <code>def create_agent(body: dict):</code> — no <code>require_role()</code>. Any authenticated user can create agents via direct POST. Compare: <code>save_agent_soul()</code> (line 276) correctly checks admin/manager.</p></div><p style="color:var(--warn);font-weight:600">HIGH</p><div style="border-left:3px solid var(--warn);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#5 XSS risk in S3 workspace seed.</strong> <code>agents.py:206-207</code>: <code>f"# Agent Identity\\n\\n- **Name**: {emp_name}\'s AI Assistant"</code>. Employee name embedded raw into markdown. Name like <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> or <code># Ignore all rules</code> persists in IDENTITY.md. Markdown injection could override SOUL instructions.</p><p><strong>#6 Dead code: pos_tools dict (12 lines).</strong> <code>agents.py:160-172</code>. 11-entry hardcoded position→tools mapping. Comment at line 173: "Position and permissions are now read from DynamoDB". Dict never referenced — pure dead code from SSM migration.</p><p><strong>#7 Workspace file read allows _shared/ prefix for employees.</strong> <code>agents.py:332</code>: <code>if not key.startswith(allowed_prefix) and not key.startswith("_shared/")</code>. Employees can read ALL _shared/ files including other position SOUL templates and all skill manifests. Information disclosure.</p><p><strong>#8 Skill assignment propagation is O(n×m).</strong> <code>agents.py:509-545</code>. <code>assign_skill_to_position()</code> loops through ALL employees, gets each agent individually, updates skills. 50 employees in a position = 50 individual DynamoDB reads + 50 writes. No batch operation.</p></div><p style="color:var(--text-m);font-weight:600">DESIGN</p><div style="border-left:3px solid var(--text-m);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#9</strong> SOUL version increment not atomic (<code>:291-295</code>): S3 write + DynamoDB update separate. S3 succeeds but DB fails → version number stale. <strong>#10</strong> <code>get_agent_soul_full()</code> (<code>:300-310</code>) has no auth check — any user reads any agent\'s full workspace. <strong>#11</strong> <code>get_workspace_tree()</code> (<code>:317-323</code>) no auth check. <strong>#12</strong> Memory endpoint (<code>:386-396</code>) requires auth but no department scoping — admin sees all agent memory. <strong>#13</strong> <code>get_all_skill_keys()</code> (<code>:449-504</code>) reads every skill manifest from S3 on each call — no caching. <strong>#14</strong> <code>stop_employee_session()</code> called in background thread on USER.md/SOUL.md edit (<code>:364</code>) — race condition if two admins edit simultaneously.</p></div>',
+      '<h4>代码验证的审计发现（agents.py，578 行）</h4><p style="color:var(--danger);font-weight:600">关键</p><div style="border-left:3px solid var(--danger);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#1 无 DELETE agent 端点。</strong><span style="color:var(--success)">已修复</span>文件：<code>agents.py</code> — 搜索 <code>@router.delete("/api/v1/agents"</code> → 未找到。Agent 可创建但永远无法通过 API 删除。孤立 Agent 永久积累在 DynamoDB + S3 中。只能通过手动 DynamoDB delete_item 删除。</p><p><strong>#2 SOUL 保存无审计日志。</strong><span style="color:var(--success)">已修复</span>文件：<code>agents.py:273-297</code>。<code>save_agent_soul()</code> 写入 S3，递增 DynamoDB 版本。但不创建 AUDIT# 条目。管理员可静默修改员工的 SOUL — 改变 Agent 行为而无任何记录。对比：<code>create_agent()</code>（行 227）正确创建审计。</p><p><strong>#3 Agent 状态每次页面加载查询 CloudWatch。</strong><span style="color:var(--success)">已修复：改用 DynamoDB lastInvocationAt</span>文件：<code>agents.py:58-90</code>。<code>_get_active_agent_ids()</code> 在每次 <code>get_agents()</code> 和 <code>get_agent()</code> 调用时对每个日志组调用 <code>cw.filter_log_events()</code>。20 Agent × 页面刷新 = 20+ CloudWatch API 调用。无缓存。<code>_get_all_agentcore_log_groups()</code>（行 44-55）同样问题 — 注释说"缓存 5 分钟"但实际无缓存。</p><p><strong>#4 create_agent 无认证检查。</strong>文件：<code>agents.py:142</code>。<code>def create_agent(body: dict):</code> — 无 <code>require_role()</code>。任何认证用户可通过直接 POST 创建 Agent。对比：<code>save_agent_soul()</code>（行 276）正确检查 admin/manager。</p></div><p style="color:var(--warn);font-weight:600">高</p><div style="border-left:3px solid var(--warn);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#5 S3 工作区种子存在 XSS 风险。</strong><code>agents.py:206-207</code>：<code>f"# Agent Identity\\n\\n- **Name**: {emp_name} AI Assistant"</code>。员工姓名原始嵌入 markdown。名称如 <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> 或 <code># Ignore all rules</code> 会持久化到 IDENTITY.md。Markdown 注入可能覆盖 SOUL 指令。</p><p><strong>#6 死代码：pos_tools 字典（12 行）。</strong><code>agents.py:160-172</code>。11 条硬编码的岗位→工具映射。行 173 注释："Position and permissions are now read from DynamoDB"。字典从未被引用 — SSM 迁移遗留的纯死代码。</p><p><strong>#7 Workspace 文件读取允许员工访问 _shared/ 前缀。</strong><code>agents.py:332</code>：<code>if not key.startswith(allowed_prefix) and not key.startswith("_shared/")</code>。员工可读取所有 _shared/ 文件，包括其他岗位的 SOUL 模板和所有技能清单。信息泄露。</p><p><strong>#8 技能分配传播复杂度 O(n×m)。</strong><code>agents.py:509-545</code>。<code>assign_skill_to_position()</code> 遍历所有员工，逐个获取 Agent，逐个更新技能。岗位有 50 名员工 = 50 次单独 DynamoDB 读取 + 50 次写入。无批量操作。</p></div><p style="color:var(--text-m);font-weight:600">设计</p><div style="border-left:3px solid var(--text-m);padding-left:12px;margin:8px 0;font-size:12px;color:var(--text-s);line-height:1.8"><p><strong>#9</strong> SOUL 版本递增非原子操作（<code>:291-295</code>）：S3 写入 + DynamoDB 更新分开执行。S3 成功但 DB 失败 → 版本号过时。<strong>#10</strong> <code>get_agent_soul_full()</code>（<code>:300-310</code>）无认证检查 — 任何用户可读取任意 Agent 的完整工作区。<strong>#11</strong> <code>get_workspace_tree()</code>（<code>:317-323</code>）无认证检查。<strong>#12</strong> Memory 端点（<code>:386-396</code>）要求认证但无部门范围限制 — 管理员可查看所有 Agent 记忆。<strong>#13</strong> <code>get_all_skill_keys()</code>（<code>:449-504</code>）每次调用从 S3 读取每个技能清单 — 无缓存。<strong>#14</strong> <code>stop_employee_session()</code> 在 USER.md/SOUL.md 编辑时通过后台线程调用（<code>:364</code>）— 两个管理员同时编辑时存在竞态条件。</p></div>'
     ); }},
 
 skills: { en:{title:'Skill Market — Agent App Store',sub:'3-layer skill system. Code audit: 19 verified findings, 2 CRITICAL production bugs.'}, zh:{title:'技能市场 — Agent 应用商店',sub:'三层技能系统。代码审计：19 项已验证发现，2 个关键生产 bug。'}, body(){ return intent(
@@ -720,8 +892,7 @@ skills: { en:{title:'Skill Market — Agent App Store',sub:'3-layer skill system
       '步骤 2：分配给岗位 → 该岗位所有 Agent 在下次会话开始时获得技能。',
       'API Key 存储在 SSM：<code>/openclaw/{stack}/skill-keys/{skill_name}/{ENV_VAR}</code>。全局 Key：<code>_global/{ENV_VAR}</code>。'
     ]))
-    + deep(
-t(`<h4>3-Layer Architecture (Verified)</h4>
+    + deep(`<h4>3-Layer Architecture (Verified)</h4>
 <table class="tbl">
 <tr><th>Layer</th><th>Where</th><th>Load Time</th><th>How to Add</th><th>Permission Filtered?</th></tr>
 <tr><td><strong>L1 Built-in</strong></td><td>Docker image<br><code>Dockerfile:36-43 SKILLS_PREINSTALL</code></td><td>0s (in image)</td><td>Modify Dockerfile → rebuild (~15 min)</td><td>No (always loaded)</td></tr>
@@ -868,9 +1039,8 @@ No mechanism for employees to input their own keys. No Portal UI for key managem
 <p><strong>#13 No per-employee API key mechanism:</strong> Portal has no UI for employees to input personal tokens. Needs: DynamoDB <code>SKILL_KEY#{emp_id}#{skill}#{env_var}</code> + skill_loader.py to read employee key first, fallback to global.</p>
 <p><strong>#14 No centralized role registry:</strong> Skill manifests use "sales", positions use "pos-ae", permissions.py extracts from positionId. Three different naming conventions, no mapping table.</p>
 <p><strong>#15 Dockerfile skill install has no backoff:</strong> 3 retries with 5s fixed sleep (Dockerfile:38-42). clawhub unreachable = Docker build fails entirely.</p>
-</div>`)
-,
-t(`<h4>三层架构（已验证）</h4>
+</div>`,
+`<h4>三层架构（已验证）</h4>
 <table class="tbl">
 <tr><th>层</th><th>位置</th><th>加载时间</th><th>添加方式</th><th>权限过滤？</th></tr>
 <tr><td><strong>L1 内置</strong></td><td>Docker 镜像</td><td>0 秒</td><td>修改 Dockerfile → 重建</td><td>否（始终加载）</td></tr>
@@ -935,8 +1105,7 @@ tenant_roles = ["employee"]（总是，因为 SSM bug）：
 <p style="font-size:14px;font-weight:700;color:var(--text-m)">⚪ 设计缺口</p>
 <div style="border-left:4px solid var(--text-m);padding-left:14px;margin:10px 0;font-size:12.5px;color:var(--text-s);line-height:1.9">
 <p><strong>#12</strong> 技能过滤无审计日志。<strong>#13</strong> 无每员工 API Key 机制。<strong>#14</strong> 无集中角色注册表（三种命名约定无映射）。<strong>#15</strong> Dockerfile 安装无退避。</p>
-</div>`)
-    ); }},
+</div>`); }},
 
 
 
@@ -949,8 +1118,7 @@ kb: { en:{title:'Knowledge Base — Company Library',sub:'S3-backed document sys
     )
     + sectionHead(t('How KB Works','KB 工作方式'))
     + note('info','📍',t('<strong>Navigate:</strong> Knowledge Base (sidebar). Browse 11 KBs, upload docs, assign via Settings → KB Assignments.','<strong>导航：</strong>Knowledge Base（侧边栏）。浏览 11 个 KB，上传文档，通过 Settings → KB Assignments 分配。'))
-    + deep(
-t(`<h4>KB Data Model</h4>
+    + deep(`<h4>KB Data Model</h4>
 <div class="code">DynamoDB:
   KB#{kb_id} — name, scope (global/department), s3Prefix, docCount, sizeMB
   CONFIG#kb-assignments — {
@@ -1013,21 +1181,17 @@ Line 682-699: SPECIAL — org-directory inline:
 
 <p style="font-size:14px;font-weight:700;color:var(--danger);margin:16px 0 8px">🔴 CRITICAL</p>
 <div style="border-left:4px solid var(--danger);padding-left:14px;margin:10px 0;font-size:12.5px;color:var(--text-s);line-height:1.9">
-<p><strong>#1 Unbounded file download — no size limit</strong><br>
-<em>File: server.py:665-667</em><br>
-<code>obj["Body"].read()</code> reads entire S3 object into memory. If a KB has a 500MB PDF, the Firecracker microVM (limited memory) will OOM. No file size check before download. No pagination.<br>
-<strong>Reproduce:</strong> Upload a 100MB file to <code>_shared/knowledge/company-policies/huge.md</code> → invoke agent → microVM download hangs or OOM kills.</p>
+<p><strong>#1 Unbounded file download — no size limit</strong> <span style="color:var(--success)">FIXED: upload limited to 1MB</span><br>
+<em>File: knowledge.py</em><br>
+Upload now enforces <code>MAX_KB_DOC_SIZE = 1MB</code>. Oversized documents rejected with 413 + suggestion to use Bedrock KB skill (RAG). Prevents OOM at runtime.</p>
 
-<p><strong>#2 Read API has no access control</strong><br>
-<em>File: knowledge.py:116-125</em><br>
-<code>get_knowledge_file(kb_id, filename)</code> has no <code>require_role()</code>. Any logged-in employee can read ANY KB file — including Finance-only budgets, Legal-only contracts, HR-only salary data.<br>
-<strong>Reproduce:</strong> Login as emp-ryan (SDE) → GET <code>/api/v1/knowledge/kb-finance/file?filename=budget-guidelines.md</code> → returns Finance data.<br>
-<strong>Compare:</strong> Upload (line 137) requires admin. Delete (line 153) requires admin. Read = open to everyone.</p>
+<p><strong>#2 Read API has no access control</strong> <span style="color:var(--success)">FIXED: auth middleware</span><br>
+<em>File: main.py auth middleware</em><br>
+All <code>/api/</code> endpoints now require JWT via middleware. No more unauthenticated KB reads. (Note: department-level KB scoping still a gap — any logged-in user can read any KB via admin API.)</p>
 
-<p><strong>#3 Org-directory inlined for ALL employees</strong><br>
-<em>File: seed_settings.py CONFIG#kb-assignments + server.py:682-699</em><br>
-All 12 positions have <code>"kb-org-directory"</code> in their KB list. server.py line 682 checks if "org-directory" appears in any loaded KB → inlines full company-directory.md (~5KB, 479 lines) into SOUL.md.<br>
-<strong>Impact:</strong> Every agent's SOUL.md gets ~5KB of employee directory. For 500 employees × 10 sessions/day = 25,000 extra SOUL reads with unnecessary data. Wastes tokens. For 1000+ employee orgs, directory grows proportionally.</p>
+<p><strong>#3 Org-directory inlined for ALL employees</strong> <span style="color:var(--success)">FIXED: file reference only</span><br>
+<em>File: workspace_assembler.py</em><br>
+Org-directory no longer inlined into SOUL.md. Now uses file path reference like all other KBs: "When asked about colleagues, read knowledge/kb-org-directory/company-directory.md". Saves ~5KB per employee per session.</p>
 </div>
 
 <p style="font-size:14px;font-weight:700;color:var(--warn);margin:16px 0 8px">🟡 HIGH</p>
@@ -1037,19 +1201,19 @@ All 12 positions have <code>"kb-org-directory"</code> in their KB list. server.p
 KB assignment is position-based (CONFIG#kb-assignments). But when employee changes departments, KB assignment isn't updated. Employee retains old department's confidential KBs until admin manually reassigns.<br>
 <strong>Example:</strong> Employee moves from Finance → Engineering. Their positionId changes but CONFIG#kb-assignments still has old Finance KBs.</p>
 
-<p><strong>#5 Dual data source: KB_PREFIXES vs DynamoDB KB#</strong><br>
-<em>File: knowledge.py:16-28 vs seed_knowledge.py:13-24</em><br>
-knowledge.py has hardcoded <code>KB_PREFIXES</code> dict (11 KBs). server.py reads from DynamoDB <code>KB#{kb_id}</code>. If admin adds a new KB to DynamoDB without updating knowledge.py, the API returns 404 but the runtime injection works. Two sources of truth.</p>
+<p><strong>#5 Dual data source: KB_PREFIXES vs DynamoDB KB#</strong> <span style="color:var(--success)">FIXED: DynamoDB only</span><br>
+<em>File: knowledge.py</em><br>
+<code>KB_PREFIXES</code> dict removed. All endpoints now use <code>db.get_knowledge_bases()</code> and <code>db.get_knowledge_base(kb_id)</code>. DynamoDB KB# is the single source of truth.</p>
 
-<p><strong>#6 Session Storage caches stale KB files</strong><br>
-<em>File: server.py:664</em><br>
-<code>if not os.path.isfile(local_path)</code> — skips download if file exists from previous session. If KB document updated in S3, Session Storage retains old version. No staleness check (no ETag, no timestamp comparison).</p>
+<p><strong>#6 Session Storage caches stale KB files</strong> <span style="color:var(--success)">FIXED: force refresh</span><br>
+<em>File: settings.py</em><br>
+KB assignment change now triggers <code>stop_employee_session()</code> for all affected employees. VM terminated → next message = fresh cold start with new KB download. Admin + Portal also have "Refresh Agent" button.</p>
 </div>
 
 <p style="font-size:14px;font-weight:700;color:var(--pl);margin:16px 0 8px">🟣 MEDIUM</p>
 <div style="border-left:4px solid var(--pl);padding-left:14px;margin:10px 0;font-size:12.5px;color:var(--text-s);line-height:1.9">
-<p><strong>#7 Search scans all S3 files with no cache/index:</strong> knowledge.py:66-73 reads every .md file on every search request. O(files × file_size). No Bedrock KB integration (could use RAG instead of substring match).</p>
-<p><strong>#8 KB injection after Plan A may conflict:</strong> server.py appends KB block after SOUL merge + Plan A. If Plan A says "cannot access external data" but KB block says "use file tool to read these" → conflicting instructions to the model.</p>
+<p><strong>#7 Search scans all S3 files:</strong> <span style="color:var(--success)">FIXED: filename search only</span>. Admin search now matches KB name + document filename. No S3 GetObject calls. Full-text search is Agent capability via Bedrock KB skill.</p>
+<p><strong>#8 KB injection after Plan A may conflict:</strong> <span style="color:var(--success)">FIXED: assembler single pass</span>. Plan A + KB refs now assembled together by workspace_assembler.py in deterministic order. No more server.py append conflicts.</p>
 <p><strong>#9 S3 ListObjects eventual consistency:</strong> server.py:649 list_objects_v2 may miss recently uploaded files.</p>
 <p><strong>#10 KB file download failures caught silently:</strong> server.py:670 catches all exceptions with logger.warning. Agent continues without the file. No audit entry for missing KB files.</p>
 </div>
@@ -1059,9 +1223,8 @@ knowledge.py has hardcoded <code>KB_PREFIXES</code> dict (11 KBs). server.py rea
 <p><strong>#11</strong> No audit trail for KB access (which employee accessed which KB, when).</p>
 <p><strong>#12</strong> KB content not escaped before SOUL.md injection — could inject instructions via file content.</p>
 <p><strong>#13</strong> No KB versioning — can't revert to previous version of a document.</p>
-</div>`)
-,
-t(`<h4>KB 数据模型</h4>
+</div>`,
+`<h4>KB 数据模型</h4>
 <div class="code">DynamoDB:
   KB#{kb_id} — name, scope, s3Prefix, docCount
   CONFIG#kb-assignments — { "positionKBs": {...}, "employeeKBs": {} }
@@ -1107,8 +1270,7 @@ S3:
 <p style="color:var(--text-m);font-weight:700">⚪ 设计</p>
 <div style="border-left:4px solid var(--text-m);padding-left:14px;margin:10px 0;font-size:12.5px;color:var(--text-s);line-height:1.8">
 <p><strong>#11</strong> 无 KB 访问审计。<strong>#12</strong> KB 内容注入 SOUL.md 未转义。<strong>#13</strong> 无 KB 版本控制。</p>
-</div>`)
-    ); }},
+</div>`); }},
 
 
 im: { en:{title:'IM Channels — The Last Mile',sub:'How employee messages flow from Feishu/Telegram/Discord through 5 components to reach their personal AI agent.'}, zh:{title:'IM 渠道 — 最后一公里',sub:'员工消息如何从飞书/Telegram/Discord 经过 5 个组件到达个人 AI Agent。'}, body(){ return intent(
@@ -1477,7 +1639,8 @@ costs: { en:{title:'Cost Estimates',sub:'Monthly breakdown for a typical deploym
 function t(en, zh) { return lang === 'en' ? en : zh; }
 
 function intent(en, zh) {
-  return `<div class="intent"><div class="intent-head" onclick="this.parentElement.classList.toggle('closed')">💡 ${t('Design Intent','设计意图')}</div><div class="intent-body">${t(en,zh)}</div></div>`;
+  const body = zh === undefined ? en : t(en, zh);
+  return `<div class="intent"><div class="intent-head" onclick="this.parentElement.classList.toggle('closed')">💡 ${t('Design Intent','设计意图')}</div><div class="intent-body">${body}</div></div>`;
 }
 
 function sectionHead(text) {
@@ -1504,7 +1667,8 @@ function flow(items) {
 }
 
 function deep(en, zh) {
-  return `<div class="deep"><div class="deep-head" onclick="this.parentElement.classList.toggle('open')">🔬 ${t('Technical Details','技术细节')}</div><div class="deep-body">${t(en,zh)}</div></div>`;
+  const body = zh === undefined ? en : t(en, zh);
+  return `<div class="deep"><div class="deep-head" onclick="this.parentElement.classList.toggle('open')">🔬 ${t('Technical Details','技术细节')}</div><div class="deep-body">${body}</div></div>`;
 }
 
 function steps(title, items) {
