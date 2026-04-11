@@ -4,27 +4,27 @@ Admin — IM Channels Management.
 Endpoints:
   /api/v1/admin/im-channel-connections
   /api/v1/admin/im-channels
+  /api/v1/admin/im-channels/health
+  /api/v1/admin/im-channels/enrollment
+  /api/v1/admin/im-channels/{channel}/unbind-all
   /api/v1/internal/im-binding-check
   /api/v1/admin/im-channels/{channel}/test
+  /api/v1/admin/im-bot-info
 """
 
 import os
 import json
+from datetime import datetime, timezone, timedelta
 
 import boto3
 
 from fastapi import APIRouter, HTTPException, Header
+from pydantic import BaseModel
 
 import db
-from shared import require_role, ssm_client, GATEWAY_REGION, STACK_NAME
+from shared import require_role, GATEWAY_REGION, STACK_NAME
 
 router = APIRouter(tags=["admin-im"])
-
-
-# Import mapping helpers from main at call time to avoid circular imports
-def _mapping_prefix():
-    stack = os.environ.get("STACK_NAME", "openclaw")
-    return f"/openclaw/{stack}/user-mapping/"
 
 
 def _run_openclaw_channels() -> list:
@@ -50,9 +50,6 @@ def _run_openclaw_channels() -> list:
             line = _ansi_re.sub('', line).strip()
             if not line.startswith("- "):
                 continue
-            # Example lines:
-            #   - Telegram default: not configured, token=none, enabled
-            #   - Feishu default: configured, enabled
             parts = line[2:].split()
             ch_type = parts[0].lower() if parts else "unknown"
             configured = "not configured" not in line and "configured" in line
@@ -70,53 +67,22 @@ def _run_openclaw_channels() -> list:
     return []
 
 
-def _list_user_mappings() -> list:
-    """List all user mappings — DynamoDB primary, SSM fallback."""
-    ddb = db.get_user_mappings()
-    if ddb:
-        return ddb
-    # SSM fallback for fresh deploys before migration runs
-    prefix = _mapping_prefix()
-    try:
-        ssm = ssm_client()
-        mappings = []
-        params = {"Path": prefix, "Recursive": True, "MaxResults": 10}
-        while True:
-            resp = ssm.get_parameters_by_path(**params)
-            for p in resp.get("Parameters", []):
-                name = p["Name"].replace(prefix, "")
-                parts = name.split("__", 1)
-                if len(parts) == 2:
-                    mappings.append({
-                        "channel": parts[0],
-                        "channelUserId": parts[1],
-                        "employeeId": p["Value"],
-                        "lastModified": str(p.get("LastModifiedDate", "")),
-                    })
-            token = resp.get("NextToken")
-            if not token:
-                break
-            params["NextToken"] = token
-        return mappings
-    except Exception:
-        return []
-
+# =========================================================================
+# Connections — per-channel employee connection table
+# =========================================================================
 
 @router.get("/api/v1/admin/im-channel-connections")
 def get_im_channel_connections(authorization: str = Header(default="")):
     """Per-channel employee connection table for admin management."""
     require_role(authorization, roles=["admin"])
     try:
-        # 1. Get all SSM user-mapping params
-        raw_mappings = _list_user_mappings()
-        print(f"[im-connections] _list_user_mappings returned {len(raw_mappings)} entries")
+        raw_mappings = db.get_user_mappings()
+        print(f"[im-connections] db.get_user_mappings returned {len(raw_mappings)} entries")
 
-        # 2. Employee lookup
         emps = db.get_employees()
         emp_map = {e["id"]: e for e in emps}
         print(f"[im-connections] {len(emps)} employees loaded")
 
-        # 3. Session counts from audit log (lightweight: limit 500)
         session_counts: dict = {}
         last_active: dict = {}
         try:
@@ -131,7 +97,6 @@ def get_im_channel_connections(authorization: str = Header(default="")):
         except Exception as ae:
             print(f"[im-connections] audit fetch failed (non-fatal): {ae}")
 
-        # 4. Group by channel — skip unknown/unkn prefixes
         by_channel: dict = {}
         for m in raw_mappings:
             channel = m.get("channel", "")
@@ -163,33 +128,29 @@ def get_im_channel_connections(authorization: str = Header(default="")):
         return {"connections": {}, "error": str(e)}
 
 
+# =========================================================================
+# Channel List — live status + DynamoDB mapping counts
+# =========================================================================
+
 @router.get("/api/v1/admin/im-channels")
 def get_im_channels(authorization: str = Header(default="")):
-    """Get live IM channel status from Gateway + SSM mappings count per channel."""
+    """Get live IM channel status from Gateway + DynamoDB mapping counts."""
     require_role(authorization, roles=["admin", "manager"])
-    ssm = boto3.client("ssm", region_name=GATEWAY_REGION)
 
-    # Get all user mappings to count per channel
+    # Count per channel from DynamoDB MAPPING# (replaces SSM scan)
     channel_counts: dict = {}
     try:
-        prefix = _mapping_prefix()
-        resp = ssm.get_parameters_by_path(Path=prefix, Recursive=True, MaxResults=10)
-        for p in resp.get("Parameters", []):
-            name = p["Name"].replace(prefix, "")
-            for ch in ["telegram", "discord", "slack", "whatsapp", "feishu", "dingtalk", "teams", "googlechat"]:
-                if name.startswith(f"{ch}__"):
-                    channel_counts[ch] = channel_counts.get(ch, 0) + 1
-                    break
-            else:
-                # Bare user_id mappings — count but don't attribute to a channel
-                pass
+        all_mappings = db.get_user_mappings()
+        for m in all_mappings:
+            ch = m.get("channel", "")
+            if ch:
+                channel_counts[ch] = channel_counts.get(ch, 0) + 1
     except Exception:
         pass
 
     # Get live Gateway channel status
     gateway_channels = _run_openclaw_channels()
 
-    # Build enriched channel list
     all_channels = [
         {"id": "telegram",   "label": "Telegram",          "enterprise": True},
         {"id": "discord",    "label": "Discord",            "enterprise": True},
@@ -218,12 +179,15 @@ def get_im_channels(authorization: str = Header(default="")):
     return result
 
 
+# =========================================================================
+# Binding Check — internal endpoint for H2 Proxy
+# =========================================================================
+
 @router.get("/api/v1/internal/im-binding-check")
 def im_binding_check(channel: str, channelUserId: str):
     """Internal endpoint called by H2 Proxy before routing each IM message.
     Strict enforcement: only respond to IM accounts that have a valid employee binding.
     No auth required — only accessible from the same EC2 (internal network)."""
-    # Primary: DynamoDB channel-specific lookup
     m = db.get_user_mapping(channel, channelUserId)
     if m and m.get("employeeId"):
         return {"bound": True, "employeeId": m["employeeId"]}
@@ -233,7 +197,7 @@ def im_binding_check(channel: str, channelUserId: str):
         ddb = boto3.resource("dynamodb", region_name=os.environ.get("DYNAMODB_REGION", os.environ.get("AWS_REGION", "us-east-1")))
         table = ddb.Table(os.environ.get("DYNAMODB_TABLE", os.environ.get("STACK_NAME", "openclaw")))
         resp = table.query(
-            KeyConditionExpression=_KBC("PK").eq("ORG#acme") & _KBC("SK").begins_with("MAPPING#"),
+            KeyConditionExpression=_KBC("PK").eq(db.ORG_PK) & _KBC("SK").begins_with("MAPPING#"),
             FilterExpression=_ABC("channelUserId").eq(channelUserId),
         )
         if resp.get("Items"):
@@ -243,11 +207,13 @@ def im_binding_check(channel: str, channelUserId: str):
     return {"bound": False}
 
 
+# =========================================================================
+# Test Connection
+# =========================================================================
+
 @router.post("/api/v1/admin/im-channels/{channel}/test")
 def test_im_channel(channel: str, authorization: str = Header(default="")):
-    """Test bot connection for a channel by asking OpenClaw if it has the channel configured.
-    OpenClaw manages bot credentials — we don't store them separately.
-    Returns {ok, botName, error}."""
+    """Test bot connection for a channel by asking OpenClaw if it has the channel configured."""
     require_role(authorization, roles=["admin"])
     try:
         channels = _run_openclaw_channels()
@@ -270,12 +236,20 @@ def test_im_channel(channel: str, authorization: str = Header(default="")):
         return {"ok": False, "error": str(e)}
 
 
-# ── IM Bot Info Configuration ────────────────────────────────────────────
+# =========================================================================
+# IM Bot Info Configuration
+# =========================================================================
+
+class IMBotInfoUpdate(BaseModel):
+    botUsername: str = ""
+    feishuAppId: str = ""
+    deepLinkTemplate: str = ""
+    webhookUrl: str = ""
+
 
 @router.get("/api/v1/admin/im-bot-info")
 def get_im_bot_info(authorization: str = Header(default="")):
-    """Return IM bot info config (appIds, bot usernames, deep link templates).
-    Used by Portal pairing flow to generate correct deep links / QR codes."""
+    """Return IM bot info config (appIds, bot usernames, deep link templates)."""
     require_role(authorization, roles=["admin", "manager"])
     config = db.get_config("im-bot-info")
     if not config:
@@ -284,15 +258,129 @@ def get_im_bot_info(authorization: str = Header(default="")):
 
 
 @router.put("/api/v1/admin/im-bot-info/{channel}")
-def set_im_bot_info(channel: str, body: dict, authorization: str = Header(default="")):
+def set_im_bot_info(channel: str, body: IMBotInfoUpdate, authorization: str = Header(default="")):
     """Update bot info for a specific IM channel (feishuAppId, botUsername, etc.)."""
     require_role(authorization, roles=["admin"])
     config = db.get_config("im-bot-info") or {"channels": {}}
     channels = config.get("channels", {})
-    # Merge incoming fields into existing channel config
     existing = channels.get(channel, {})
-    existing.update(body)
+    updates = body.model_dump(exclude_unset=True)
+    existing.update(updates)
     channels[channel] = existing
     config["channels"] = channels
     db.set_config("im-bot-info", config)
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change",
+        "actorId": "admin",
+        "actorName": "IT Admin",
+        "targetType": "im-bot-info",
+        "targetId": channel,
+        "detail": f"Updated IM bot info for {channel}: {list(updates.keys())}",
+        "status": "success",
+    })
     return {"ok": True, "channel": channel, "config": existing}
+
+
+# =========================================================================
+# Channel Health — last activity per channel
+# =========================================================================
+
+@router.get("/api/v1/admin/im-channels/health")
+def get_im_channel_health(authorization: str = Header(default="")):
+    """Last message timestamp per channel from AUDIT# entries."""
+    require_role(authorization, roles=["admin", "manager"])
+    entries = db.get_audit_entries(limit=200)
+    last_by_channel: dict = {}
+    count_24h: dict = {}
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    for e in entries:
+        if e.get("eventType") != "agent_invocation":
+            continue
+        detail = e.get("detail", "").lower()
+        ts = e.get("timestamp", "")
+        for ch in ["telegram", "discord", "feishu", "slack", "whatsapp", "dingtalk", "teams", "googlechat", "portal"]:
+            if ch in detail:
+                if ts > last_by_channel.get(ch, ""):
+                    last_by_channel[ch] = ts
+                if ts >= cutoff:
+                    count_24h[ch] = count_24h.get(ch, 0) + 1
+                break
+    return {"lastActivity": last_by_channel, "messagesLast24h": count_24h}
+
+
+# =========================================================================
+# Enrollment Stats — which employees are bound/unbound
+# =========================================================================
+
+@router.get("/api/v1/admin/im-channels/enrollment")
+def get_im_enrollment_stats(authorization: str = Header(default="")):
+    """Which employees are bound/unbound to IM channels."""
+    require_role(authorization, roles=["admin", "manager"])
+    emps = db.get_employees()
+    mappings = db.get_user_mappings()
+
+    emp_channels: dict = {}
+    for m in mappings:
+        eid = m.get("employeeId", "")
+        ch = m.get("channel", "")
+        if eid and ch:
+            emp_channels.setdefault(eid, set()).add(ch)
+
+    bound = []
+    unbound = []
+    for emp in emps:
+        if not emp.get("agentId"):
+            continue
+        eid = emp["id"]
+        channels = emp_channels.get(eid, set())
+        entry = {
+            "id": eid,
+            "name": emp.get("name", eid),
+            "position": emp.get("positionName", ""),
+            "department": emp.get("departmentName", ""),
+            "channels": sorted(channels),
+        }
+        if channels:
+            bound.append(entry)
+        else:
+            unbound.append(entry)
+
+    return {
+        "totalWithAgent": len(bound) + len(unbound),
+        "bound": len(bound),
+        "unbound": len(unbound),
+        "unboundEmployees": unbound,
+        "multiChannel": [e for e in bound if len(e["channels"]) > 1],
+    }
+
+
+# =========================================================================
+# Batch Unbind — disconnect all employees from a channel
+# =========================================================================
+
+@router.delete("/api/v1/admin/im-channels/{channel}/unbind-all")
+def batch_unbind_channel(channel: str, authorization: str = Header(default="")):
+    """Disconnect all employees from a specific IM channel.
+    Use case: bot token rotation — unbind all, rotate token, employees re-pair."""
+    require_role(authorization, roles=["admin"])
+    mappings = db.get_user_mappings()
+    channel_mappings = [m for m in mappings if m.get("channel") == channel]
+    deleted = 0
+    for m in channel_mappings:
+        try:
+            db.delete_user_mapping(channel, m["channelUserId"])
+            deleted += 1
+        except Exception:
+            pass
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change",
+        "actorId": "admin",
+        "actorName": "IT Admin",
+        "targetType": "im-channel",
+        "targetId": channel,
+        "detail": f"Batch unbind: removed {deleted} bindings from {channel}",
+        "status": "success",
+    })
+    return {"channel": channel, "deleted": deleted}

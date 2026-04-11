@@ -37,3 +37,4 @@ enterprise/.env
 enterprise/.env.*
 !enterprise/.env.example
 .claude/
+enterprise/docs/environments.md

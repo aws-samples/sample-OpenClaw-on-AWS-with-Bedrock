@@ -98,6 +98,30 @@ def _log_permission_denied(tenant_id: str, tool_name: str, resource: Optional[st
         "tool_name": tool_name,
         "resource": resource,
     }))
+    # Write to DynamoDB AUDIT# for Audit Center visibility
+    try:
+        import time as _time_perm
+        ddb = boto3.resource("dynamodb", region_name=DYNAMODB_REGION)
+        table = ddb.Table(DYNAMODB_TABLE)
+        ts = datetime.now(timezone.utc).isoformat()
+        base_id = _base_tenant_id(tenant_id)
+        table.put_item(Item={
+            "PK": "ORG#acme",
+            "SK": f"AUDIT#perm-{int(_time_perm.time()*1000)}",
+            "GSI1PK": "TYPE#audit",
+            "GSI1SK": f"AUDIT#perm-{int(_time_perm.time()*1000)}",
+            "eventType": "permission_denied",
+            "actorId": base_id,
+            "actorName": base_id,
+            "targetType": "tool",
+            "targetId": tool_name,
+            "detail": f"Tool '{tool_name}' denied for {base_id}"
+                      + (f" (resource: {resource})" if resource else ""),
+            "status": "blocked",
+            "timestamp": ts,
+        })
+    except Exception:
+        pass  # non-fatal — CloudWatch log is primary record
 
 
 def check_tool_permission(

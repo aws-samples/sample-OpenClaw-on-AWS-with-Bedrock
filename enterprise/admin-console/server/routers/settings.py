@@ -64,59 +64,93 @@ def _get_security_config():
     return config
 
 
+import threading as _threading_settings
+
+
+def _audit_config(user, target_type: str, target_id: str, detail: str):
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change",
+        "actorId": user.employee_id, "actorName": user.name,
+        "targetType": target_type, "targetId": target_id,
+        "detail": detail, "status": "success",
+    })
+
+
 @router.get("/api/v1/settings/model")
-def get_model_config_endpoint():
+def get_model_config_endpoint(authorization: str = Header(default="")):
+    require_role(authorization, roles=["admin"])
     return _get_model_config()
 
 
 @router.put("/api/v1/settings/model/default")
-def set_default_model(body: dict):
+def set_default_model(body: dict, authorization: str = Header(default="")):
+    user = require_role(authorization, roles=["admin"])
     config = _get_model_config()
     config["default"] = body
     db.set_config("model", config)
+    bump_config_version()
+    _audit_config(user, "model", "default", f"Default model → {body.get('modelId','')}")
     return config["default"]
 
 
 @router.put("/api/v1/settings/model/fallback")
-def set_fallback_model(body: dict):
+def set_fallback_model(body: dict, authorization: str = Header(default="")):
+    user = require_role(authorization, roles=["admin"])
     config = _get_model_config()
     config["fallback"] = body
     db.set_config("model", config)
+    bump_config_version()
+    _audit_config(user, "model", "fallback", f"Fallback model → {body.get('modelId','')}")
     return config["fallback"]
 
 
 @router.put("/api/v1/settings/model/position/{pos_id}")
-def set_position_model(pos_id: str, body: dict):
+def set_position_model(pos_id: str, body: dict, authorization: str = Header(default="")):
+    user = require_role(authorization, roles=["admin"])
     config = _get_model_config()
     config.setdefault("positionOverrides", {})[pos_id] = body
     db.set_config("model", config)
+    bump_config_version()
+    _audit_config(user, "model", pos_id, f"Position model override → {body.get('modelId','')}")
+    # Force refresh affected employees
+    for emp in db.get_employees():
+        if emp.get("positionId") == pos_id and emp.get("agentId"):
+            _threading_settings.Thread(target=stop_employee_session, args=(emp["id"],), daemon=True).start()
     return config["positionOverrides"]
 
 
 @router.delete("/api/v1/settings/model/position/{pos_id}")
-def remove_position_model(pos_id: str):
+def remove_position_model(pos_id: str, authorization: str = Header(default="")):
+    user = require_role(authorization, roles=["admin"])
     config = _get_model_config()
     config.get("positionOverrides", {}).pop(pos_id, None)
     db.set_config("model", config)
+    bump_config_version()
+    _audit_config(user, "model", pos_id, f"Position model override removed")
     return config["positionOverrides"]
 
 
 @router.put("/api/v1/settings/model/employee/{emp_id}")
 def set_employee_model(emp_id: str, body: dict, authorization: str = Header(default="")):
-    """Set a per-employee model override — highest priority, overrides position and global."""
-    require_role(authorization, roles=["admin"])
+    user = require_role(authorization, roles=["admin"])
     config = _get_model_config()
     config.setdefault("employeeOverrides", {})[emp_id] = body
     db.set_config("model", config)
+    bump_config_version()
+    _audit_config(user, "model", emp_id, f"Employee model override → {body.get('modelId','')}")
+    _threading_settings.Thread(target=stop_employee_session, args=(emp_id,), daemon=True).start()
     return config["employeeOverrides"]
 
 
 @router.delete("/api/v1/settings/model/employee/{emp_id}")
 def remove_employee_model(emp_id: str, authorization: str = Header(default="")):
-    require_role(authorization, roles=["admin"])
+    user = require_role(authorization, roles=["admin"])
     config = _get_model_config()
     config.get("employeeOverrides", {}).pop(emp_id, None)
     db.set_config("model", config)
+    bump_config_version()
+    _audit_config(user, "model", emp_id, "Employee model override removed")
     return config.get("employeeOverrides", {})
 
 
@@ -137,38 +171,44 @@ def get_agent_config(authorization: str = Header(default="")):
 
 @router.put("/api/v1/settings/agent-config/position/{pos_id}")
 def set_position_agent_config(pos_id: str, body: dict, authorization: str = Header(default="")):
-    """Set position-level agent config: recentTurnsPreserve, compactionMode, maxTokens, language."""
-    require_role(authorization, roles=["admin"])
+    user = require_role(authorization, roles=["admin"])
     cfg = _get_agent_config()
     cfg.setdefault("positionConfig", {})[pos_id] = body
     db.set_config("agent-config", cfg)
+    bump_config_version()
+    _audit_config(user, "agent-config", pos_id, f"Position agent config: {list(body.keys())}")
     return cfg["positionConfig"][pos_id]
 
 
 @router.delete("/api/v1/settings/agent-config/position/{pos_id}")
 def delete_position_agent_config(pos_id: str, authorization: str = Header(default="")):
-    require_role(authorization, roles=["admin"])
+    user = require_role(authorization, roles=["admin"])
     cfg = _get_agent_config()
     cfg.get("positionConfig", {}).pop(pos_id, None)
     db.set_config("agent-config", cfg)
+    bump_config_version()
+    _audit_config(user, "agent-config", pos_id, "Position agent config removed")
     return {"deleted": pos_id}
 
 
 @router.put("/api/v1/settings/agent-config/employee/{emp_id}")
 def set_employee_agent_config(emp_id: str, body: dict, authorization: str = Header(default="")):
-    require_role(authorization, roles=["admin"])
+    user = require_role(authorization, roles=["admin"])
     cfg = _get_agent_config()
     cfg.setdefault("employeeConfig", {})[emp_id] = body
     db.set_config("agent-config", cfg)
+    bump_config_version()
+    _audit_config(user, "agent-config", emp_id, f"Employee agent config: {list(body.keys())}")
     return cfg["employeeConfig"][emp_id]
 
 
 @router.delete("/api/v1/settings/agent-config/employee/{emp_id}")
 def delete_employee_agent_config(emp_id: str, authorization: str = Header(default="")):
-    require_role(authorization, roles=["admin"])
+    user = require_role(authorization, roles=["admin"])
     cfg = _get_agent_config()
     cfg.get("employeeConfig", {}).pop(emp_id, None)
     db.set_config("agent-config", cfg)
+    _audit_config(user, "agent-config", emp_id, "Employee agent config removed")
     return {"deleted": emp_id}
 
 
@@ -222,15 +262,18 @@ def set_employee_kbs(emp_id: str, body: dict, authorization: str = Header(defaul
 
 
 @router.get("/api/v1/settings/security")
-def get_security_config_endpoint():
+def get_security_config_endpoint(authorization: str = Header(default="")):
+    require_role(authorization, roles=["admin"])
     return _get_security_config()
 
 
 @router.put("/api/v1/settings/security")
-def update_security_config(body: dict):
+def update_security_config(body: dict, authorization: str = Header(default="")):
+    user = require_role(authorization, roles=["admin"])
     config = _get_security_config()
     config.update(body)
     db.set_config("security", config)
+    _audit_config(user, "security", "global", f"Security config updated: {list(body.keys())}")
     return config
 
 
@@ -546,6 +589,7 @@ def get_services():
         "platform": {
             "instanceId": GATEWAY_INSTANCE_ID,
             "region": GATEWAY_REGION,
+            "awsRegion": AWS_REGION,
             "stackName": STACK_NAME,
         },
     }
@@ -581,21 +625,58 @@ def get_admin_assistant(authorization: str = Header(default="")):
         cfg = {}
     return {
         "model": cfg.get("model", os.environ.get("BEDROCK_MODEL_ID", "global.amazon.nova-2-lite-v1:0")),
-        "allowedCommands": cfg.get("allowedCommands", ["list_employees", "list_agents", "get_agent", "list_sessions", "list_audit", "list_approvals", "approve_request", "deny_request", "get_service_status", "get_model_config", "update_model_config"]),
+        "systemPrompt": cfg.get("systemPrompt",
+            "You are the IT Admin Assistant for OpenClaw Enterprise platform. "
+            "You help the admin manage AI agents, monitor system health, "
+            "troubleshoot issues, and configure the platform. "
+            "Be concise, technical, and actionable."),
         "systemPromptExtra": cfg.get("systemPromptExtra", ""),
+        "maxHistoryTurns": int(cfg.get("maxHistoryTurns", 20)),
+        "maxTokens": int(cfg.get("maxTokens", 4096)),
     }
 
 
 @router.put("/api/v1/settings/admin-assistant")
 def put_admin_assistant(body: dict, authorization: str = Header(default="")):
-    require_role(authorization, roles=["admin"])
+    user = require_role(authorization, roles=["admin"])
     cfg = {
         "model": body.get("model", ""),
-        "allowedCommands": body.get("allowedCommands", []),
+        "systemPrompt": body.get("systemPrompt", ""),
         "systemPromptExtra": body.get("systemPromptExtra", ""),
+        "maxHistoryTurns": int(body.get("maxHistoryTurns", 20)),
+        "maxTokens": int(body.get("maxTokens", 4096)),
     }
     db.set_config("admin-assistant", cfg)
+    _audit_config(user, "admin-assistant", "config", "Admin assistant config updated")
     return {"saved": True}
+
+
+@router.get("/api/v1/settings/admin-assistant/history")
+def get_admin_history(authorization: str = Header(default="")):
+    """Get admin assistant conversation history from DynamoDB."""
+    require_role(authorization, roles=["admin"])
+    records = db.get_session_conversation("admin-assistant")
+    return [{"role": r.get("role", ""), "content": r.get("content", ""), "ts": r.get("ts", "")}
+            for r in records[-50:]]
+
+
+@router.delete("/api/v1/settings/admin-assistant/history")
+def clear_admin_history(authorization: str = Header(default="")):
+    """Clear admin assistant conversation history."""
+    require_role(authorization, roles=["admin"])
+    try:
+        from boto3.dynamodb.conditions import Key
+        ddb = boto3.resource("dynamodb", region_name=db.AWS_REGION)
+        table = ddb.Table(db.TABLE_NAME)
+        resp = table.query(
+            KeyConditionExpression=Key("PK").eq("ORG#acme") & Key("SK").begins_with("CONV#admin-assistant"),
+        )
+        with table.batch_writer() as batch:
+            for item in resp.get("Items", []):
+                batch.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
+        return {"cleared": True, "count": len(resp.get("Items", []))}
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 @router.get("/api/v1/settings/system-stats")
@@ -656,3 +737,75 @@ def get_system_stats(authorization: str = Header(default="")):
     except Exception:
         result["ports"] = []
     return result
+
+
+# =========================================================================
+# Platform Access — SSM commands, Gateway UI
+# =========================================================================
+
+@router.get("/api/v1/settings/platform-access")
+def get_platform_access(authorization: str = Header(default="")):
+    """Pre-built SSM commands for EC2 access and Gateway UI."""
+    require_role(authorization, roles=["admin"])
+    return {
+        "instanceId": GATEWAY_INSTANCE_ID,
+        "region": GATEWAY_REGION,
+        "stackName": STACK_NAME,
+        "ssmSession": f"aws ssm start-session --target {GATEWAY_INSTANCE_ID} --region {GATEWAY_REGION}",
+        "gatewayPortForward": (
+            f"aws ssm start-session --target {GATEWAY_INSTANCE_ID} --region {GATEWAY_REGION} "
+            f"--document-name AWS-StartPortForwardingSession "
+            f"--parameters portNumber=18789,localPortNumber=18789"),
+        "gatewayUrl": "http://localhost:18789",
+        "note": "Run the port forward command in terminal, then open Gateway URL in browser.",
+    }
+
+
+# =========================================================================
+# Platform Logs — journalctl for systemd services
+# =========================================================================
+
+@router.get("/api/v1/settings/platform-logs")
+def get_platform_logs(service: str = "openclaw-admin", lines: int = 50, authorization: str = Header(default="")):
+    """Read recent journalctl logs for a platform service."""
+    require_role(authorization, roles=["admin"])
+    allowed = {"openclaw-admin", "tenant-router", "bedrock-proxy-h2"}
+    if service not in allowed:
+        raise HTTPException(400, f"Service must be one of: {sorted(allowed)}")
+    lines = min(lines, 200)
+    try:
+        import subprocess
+        output = subprocess.check_output(
+            ["journalctl", "-u", service, "--no-pager", "-n", str(lines)],
+            text=True, timeout=10)
+        log_lines = output.strip().split("\n") if output.strip() else []
+        return {"service": service, "lines": log_lines, "count": len(log_lines)}
+    except Exception as e:
+        return {"service": service, "lines": [], "error": str(e)}
+
+
+# =========================================================================
+# Service Restart
+# =========================================================================
+
+@router.post("/api/v1/settings/restart-service")
+def restart_service(body: dict, authorization: str = Header(default="")):
+    """Restart a platform systemd service. Admin only."""
+    user = require_role(authorization, roles=["admin"])
+    service = body.get("service", "")
+    allowed = {"openclaw-admin", "tenant-router", "bedrock-proxy-h2"}
+    if service not in allowed:
+        raise HTTPException(400, f"Service must be one of: {sorted(allowed)}")
+    try:
+        import subprocess
+        subprocess.check_output(["sudo", "systemctl", "restart", service], text=True, timeout=15)
+        db.create_audit_entry({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "eventType": "service_restart",
+            "actorId": user.employee_id, "actorName": user.name,
+            "targetType": "service", "targetId": service,
+            "detail": f"Admin restarted {service}", "status": "success",
+        })
+        return {"restarted": True, "service": service}
+    except Exception as e:
+        raise HTTPException(500, str(e))

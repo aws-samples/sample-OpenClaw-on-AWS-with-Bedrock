@@ -14,8 +14,11 @@ from pydantic import BaseModel
 
 import db
 import s3ops
+import threading
+
 from shared import (
     require_role, ssm_client, bump_config_version, audit_soul_change,
+    stop_employee_session,
     GATEWAY_REGION, STACK_NAME, DYNAMODB_REGION, DYNAMODB_TABLE,
 )
 
@@ -88,8 +91,9 @@ def get_position_tools(pos_id: str, authorization: str = Header(default="")):
 
 @router.put("/api/v1/security/positions/{pos_id}/tools")
 def put_position_tools(pos_id: str, body: dict, authorization: str = Header(default="")):
-    """Write tool permissions for a position to DynamoDB POS# record."""
-    require_role(authorization, roles=["admin"])
+    """Write tool permissions for a position to DynamoDB POS# record.
+    Triggers config version bump + force refresh for affected employees."""
+    user = require_role(authorization, roles=["admin"])
     tools = body.get("tools", [])
     try:
         import boto3 as _b3_sec
@@ -102,68 +106,104 @@ def put_position_tools(pos_id: str, body: dict, authorization: str = Header(defa
         )
     except Exception as e:
         print(f"[security] position tools write failed: {e}")
-    emps = db.get_employees()
-    return {"saved": True, "propagated": len([e for e in emps if e.get("positionId") == pos_id])}
+
+    # Audit trail
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "tool_permission_change",
+        "actorId": user.employee_id,
+        "actorName": user.name,
+        "targetType": "position",
+        "targetId": pos_id,
+        "detail": f"Tool allowlist changed for {pos_id}: {tools}",
+        "status": "success",
+    })
+
+    # Config version bump → workspace_assembler regenerates Plan A context block
+    bump_config_version()
+
+    # Force refresh affected employees
+    refreshed = []
+    for emp in db.get_employees():
+        if emp.get("positionId") == pos_id and emp.get("agentId"):
+            threading.Thread(target=stop_employee_session, args=(emp["id"],), daemon=True).start()
+            refreshed.append(emp["id"])
+
+    return {"saved": True, "tools": tools, "refreshed": refreshed}
 
 
 # ── Runtime Assignment ───────────────────────────────────────────────────
 
 @router.get("/api/v1/security/positions/{pos_id}/runtime")
 def get_position_runtime(pos_id: str, authorization: str = Header(default="")):
+    """Read runtime assignment from DynamoDB CONFIG#routing (SSM fallback)."""
     require_role(authorization, roles=["admin"])
-    try:
-        import boto3 as _b3pr
-        ssm = _b3pr.client("ssm", region_name=GATEWAY_REGION)
-        resp = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/positions/{pos_id}/runtime-id")
-        return {"posId": pos_id, "runtimeId": resp["Parameter"]["Value"]}
-    except Exception:
-        return {"posId": pos_id, "runtimeId": None}
+    cfg = db.get_routing_config()
+    runtime_id = cfg.get("position_runtime", {}).get(pos_id)
+    if not runtime_id:
+        # SSM fallback for pre-migration data
+        try:
+            import boto3 as _b3pr
+            ssm = _b3pr.client("ssm", region_name=GATEWAY_REGION)
+            resp = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/positions/{pos_id}/runtime-id")
+            runtime_id = resp["Parameter"]["Value"]
+        except Exception:
+            pass
+    return {"posId": pos_id, "runtimeId": runtime_id}
 
 
 @router.put("/api/v1/security/positions/{pos_id}/runtime")
 def put_position_runtime(pos_id: str, body: dict, authorization: str = Header(default="")):
-    """Assign a runtime to a position. Propagates to all employees."""
-    require_role(authorization, roles=["admin"])
+    """Assign a runtime to a position. Dual-write: DynamoDB + SSM.
+    Force refresh affected employees so they route to new runtime immediately."""
+    user = require_role(authorization, roles=["admin"])
     runtime_id = body.get("runtimeId", "")
     if not runtime_id:
         raise HTTPException(400, "runtimeId required")
-    import boto3 as _b3pr2
-    ssm = _b3pr2.client("ssm", region_name=GATEWAY_REGION)
-    ssm.put_parameter(
-        Name=f"/openclaw/{STACK_NAME}/positions/{pos_id}/runtime-id",
-        Value=runtime_id, Type="String", Overwrite=True,
-    )
-    emps = db.get_employees()
-    propagated = []
-    for emp in emps:
-        if emp.get("positionId") == pos_id:
-            try:
-                ssm.put_parameter(
-                    Name=f"/openclaw/{STACK_NAME}/tenants/{emp['id']}/runtime-id",
-                    Value=runtime_id, Type="String", Overwrite=True,
-                )
-                propagated.append(emp["id"])
-            except Exception as e:
-                print(f"[position-runtime] emp {emp['id']} failed: {e}")
+
+    # DynamoDB: Tenant Router reads CONFIG#routing for position→runtime mapping
+    db.set_position_runtime(pos_id, runtime_id)
+
+    # SSM: backward compat + default runtime fallback
+    try:
+        import boto3 as _b3pr2
+        ssm = _b3pr2.client("ssm", region_name=GATEWAY_REGION)
+        ssm.put_parameter(
+            Name=f"/openclaw/{STACK_NAME}/positions/{pos_id}/runtime-id",
+            Value=runtime_id, Type="String", Overwrite=True,
+        )
+    except Exception as e:
+        print(f"[position-runtime] SSM write failed (non-fatal): {e}")
+
+    # Force refresh affected employees
+    refreshed = []
+    for emp in db.get_employees():
+        if emp.get("positionId") == pos_id and emp.get("agentId"):
+            threading.Thread(target=stop_employee_session, args=(emp["id"],), daemon=True).start()
+            refreshed.append(emp["id"])
+
     db.create_audit_entry({
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "eventType": "config_change",
-        "actorId": "admin",
-        "actorName": "Admin",
+        "actorId": user.employee_id,
+        "actorName": user.name,
         "targetType": "runtime_assignment",
-        "targetId": f"{pos_id} → {runtime_id}",
-        "detail": f"Position {pos_id} assigned to runtime {runtime_id}. Propagated to {len(propagated)} employees.",
+        "targetId": f"{pos_id} -> {runtime_id}",
+        "detail": f"Position {pos_id} assigned to runtime {runtime_id}. Refreshed {len(refreshed)} agents.",
         "status": "success",
     })
-    return {"saved": True, "posId": pos_id, "runtimeId": runtime_id, "propagated": propagated}
+    return {"saved": True, "posId": pos_id, "runtimeId": runtime_id, "refreshed": refreshed}
 
 
 @router.delete("/api/v1/security/positions/{pos_id}/runtime")
 def delete_position_runtime(pos_id: str, authorization: str = Header(default="")):
     require_role(authorization, roles=["admin"])
-    import boto3 as _b3pr3
-    ssm = _b3pr3.client("ssm", region_name=GATEWAY_REGION)
+    # DynamoDB
+    db.remove_position_runtime(pos_id)
+    # SSM cleanup
     try:
+        import boto3 as _b3pr3
+        ssm = _b3pr3.client("ssm", region_name=GATEWAY_REGION)
         ssm.delete_parameter(Name=f"/openclaw/{STACK_NAME}/positions/{pos_id}/runtime-id")
     except Exception:
         pass
@@ -172,22 +212,10 @@ def delete_position_runtime(pos_id: str, authorization: str = Header(default="")
 
 @router.get("/api/v1/security/position-runtime-map")
 def get_position_runtime_map(authorization: str = Header(default="")):
+    """Read full position→runtime map from DynamoDB (single call)."""
     require_role(authorization, roles=["admin"])
-    import boto3 as _b3prm
-    ssm = _b3prm.client("ssm", region_name=GATEWAY_REGION)
-    result = {}
-    try:
-        prefix = f"/openclaw/{STACK_NAME}/positions/"
-        paginator = ssm.get_paginator("get_parameters_by_path")
-        for page in paginator.paginate(Path=prefix, Recursive=True):
-            for p in page["Parameters"]:
-                name = p["Name"].replace(prefix, "")
-                if name.endswith("/runtime-id"):
-                    pos_id = name.replace("/runtime-id", "")
-                    result[pos_id] = p["Value"]
-    except Exception as e:
-        print(f"[position-runtime-map] {e}")
-    return {"map": result}
+    cfg = db.get_routing_config()
+    return {"map": cfg.get("position_runtime", {})}
 
 
 # ── Runtimes (AgentCore) ─────────────────────────────────────────────────
@@ -308,7 +336,29 @@ def update_runtime_config(runtime_id: str, body: dict, authorization: str = Head
             kwargs["protocolConfiguration"] = detail["protocolConfiguration"]
 
         ac.update_agent_runtime(**kwargs)
-        return {"saved": True, "runtimeId": runtime_id}
+
+        # Force refresh all agents using this runtime
+        routing = db.get_routing_config()
+        affected_positions = [pid for pid, rid in routing.get("position_runtime", {}).items()
+                              if rid == runtime_id]
+        refreshed = []
+        for emp in db.get_employees():
+            if emp.get("positionId") in affected_positions and emp.get("agentId"):
+                threading.Thread(target=stop_employee_session, args=(emp["id"],), daemon=True).start()
+                refreshed.append(emp["id"])
+
+        db.create_audit_entry({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "eventType": "runtime_config_change",
+            "actorId": "admin",
+            "actorName": "Admin",
+            "targetType": "runtime",
+            "targetId": runtime_id,
+            "detail": f"Runtime config updated. Refreshed {len(refreshed)} agents.",
+            "status": "success",
+        })
+
+        return {"saved": True, "runtimeId": runtime_id, "refreshed": refreshed}
     except Exception as e:
         raise HTTPException(500, str(e))
 

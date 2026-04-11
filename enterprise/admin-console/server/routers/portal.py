@@ -110,33 +110,17 @@ from routers.admin_im import _run_openclaw_channels
 # ── Helper: find channel user id (reverse lookup) ───────────────────────
 def _find_channel_user_id(emp_id: str, channel_prefix: str) -> str:
     """Reverse lookup: given emp_id + channel, return the IM user_id."""
-    try:
-        prefix = _mapping_prefix()
-        ssm = boto3.client("ssm", region_name=GATEWAY_REGION)
-        resp = ssm.get_parameters_by_path(Path=prefix, Recursive=True, MaxResults=10)
-        for p in resp.get("Parameters", []):
-            if p.get("Value") == emp_id:
-                name = p["Name"].replace(prefix, "")
-                if name.startswith(f"{channel_prefix}__"):
-                    return name.replace(f"{channel_prefix}__", "")
-        return ""
-    except Exception:
-        return ""
+    mappings = db.get_user_mappings_for_employee(emp_id)
+    for m in mappings:
+        if m.get("channel", "").startswith(channel_prefix):
+            return m.get("channelUserId", "")
+    return ""
 
 
 def _list_user_mappings_for_employee(emp_id: str, channel_prefix: str) -> bool:
-    """Check if any SSM mapping exists for this employee on the given channel.
-    Always uses us-east-1 (where agent container reads mappings from)."""
-    try:
-        prefix = _mapping_prefix()
-        ssm = boto3.client("ssm", region_name=GATEWAY_REGION)
-        resp = ssm.get_parameters_by_path(Path=prefix, Recursive=True, MaxResults=10)
-        for p in resp.get("Parameters", []):
-            if p.get("Value") == emp_id and channel_prefix in p.get("Name", ""):
-                return True
-        return False
-    except Exception:
-        return False
+    """Check if any DynamoDB mapping exists for this employee on the given channel."""
+    mappings = db.get_user_mappings_for_employee(emp_id)
+    return any(m.get("channel", "").startswith(channel_prefix) for m in mappings)
 
 
 # =========================================================================

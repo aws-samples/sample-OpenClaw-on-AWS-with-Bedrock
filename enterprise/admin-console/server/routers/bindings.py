@@ -69,36 +69,6 @@ def _read_user_mapping(channel: str, channel_user_id: str) -> str:
         return ""
 
 
-def _list_user_mappings() -> list:
-    """List all user mappings -- DynamoDB primary, SSM fallback."""
-    ddb = db.get_user_mappings()
-    if ddb:
-        return ddb
-    # SSM fallback for fresh deploys before migration runs
-    prefix = _mapping_prefix()
-    try:
-        ssm = ssm_client()
-        mappings = []
-        params = {"Path": prefix, "Recursive": True, "MaxResults": 10}
-        while True:
-            resp = ssm.get_parameters_by_path(**params)
-            for p in resp.get("Parameters", []):
-                name = p["Name"].replace(prefix, "")
-                parts = name.split("__", 1)
-                if len(parts) == 2:
-                    mappings.append({
-                        "channel": parts[0],
-                        "channelUserId": parts[1],
-                        "employeeId": p["Value"],
-                    })
-            token = resp.get("NextToken")
-            if not token:
-                break
-            params["NextToken"] = token
-        return mappings
-    except Exception as e:
-        print(f"[user-mapping] SSM fallback failed: {e}")
-        return []
 
 
 def _send_im_notification(channel: str, channel_user_id: str, message: str) -> None:
@@ -208,22 +178,25 @@ def create_binding(body: dict):
 # =========================================================================
 
 @router.get("/api/v1/bindings/user-mappings")
-def get_user_mappings():
-    """List all IM user -> employee mappings from SSM."""
-    return _list_user_mappings()
+def get_user_mappings(authorization: str = Header(default="")):
+    """List all IM user -> employee mappings."""
+    require_role(authorization, roles=["admin", "manager"])
+    return db.get_user_mappings()
 
 
 @router.post("/api/v1/bindings/user-mappings")
-def create_user_mapping(body: UserMappingRequest):
-    """Create or update an IM user -> employee mapping in SSM."""
+def create_user_mapping(body: UserMappingRequest, authorization: str = Header(default="")):
+    """Create or update an IM user -> employee mapping."""
+    require_role(authorization, roles=["admin"])
     _write_user_mapping(body.channel, body.channelUserId, body.employeeId)
     return {"saved": True, "channel": body.channel, "channelUserId": body.channelUserId, "employeeId": body.employeeId}
 
 
 @router.delete("/api/v1/bindings/user-mappings")
-def delete_user_mapping(channel: str, channelUserId: str):
+def delete_user_mapping(channel: str, channelUserId: str, authorization: str = Header(default="")):
     """Delete an IM user -> employee mapping from DynamoDB + SSM.
     Sends a best-effort IM notification before deleting."""
+    require_role(authorization, roles=["admin"])
     # Look up emp_id before deleting (needed for notification and audit)
     existing = db.get_user_mapping(channel, channelUserId)
     emp_id = existing.get("employeeId", "") if existing else ""
@@ -395,38 +368,20 @@ def provision_by_position(body: dict):
 
 @router.get("/api/v1/routing/resolve")
 def resolve_route(channel: str = "", user_id: str = "", message: str = ""):
-    """Simulate routing resolution -- shows which rule would match and where the message goes."""
-    # Look up user's bindings
+    """Simulate routing resolution — shows which employee binding matches."""
     bindings = db.get_bindings()
-    user_bindings = [b for b in bindings if b.get("employeeId") == user_id or b.get("employeeName") == user_id]
-
-    for rule in sorted(db.get_routing_rules(), key=lambda r: r.get("priority", 99)):
-        cond = rule.get("condition", {})
-        match = True
-
-        if "channel" in cond and cond["channel"] != channel:
-            match = False
-        if "messagePrefix" in cond and not message.startswith(cond["messagePrefix"]):
-            match = False
-        if "department" in cond:
-            # Would check user's department from DynamoDB
-            pass
-        if "role" in cond:
-            # Would check user's role from DynamoDB
-            pass
-
-        if match:
-            if rule["action"] == "route_to_shared_agent":
-                agent_id = rule.get("agentId", "")
-                return {"matched_rule": rule["name"], "action": rule["action"], "agent_id": agent_id, "description": rule["description"]}
-            else:
-                # Find user's personal binding for this channel
-                binding = next((b for b in user_bindings if b.get("channel") == channel and b.get("mode") == "1:1"), None)
-                if binding:
-                    return {"matched_rule": rule["name"], "action": "route_to_personal_agent", "agent_id": binding.get("agentId"), "agent_name": binding.get("agentName"), "description": rule["description"]}
-                return {"matched_rule": rule["name"], "action": "route_to_personal_agent", "agent_id": None, "description": "No binding found for this user/channel"}
-
-    return {"matched_rule": "none", "action": "rejected", "description": "No routing rule matched"}
+    binding = next(
+        (b for b in bindings
+         if b.get("employeeId") == user_id and b.get("mode") == "1:1"),
+        None)
+    if binding:
+        return {
+            "matched": True,
+            "action": "route_to_personal_agent",
+            "agent_id": binding.get("agentId"),
+            "agent_name": binding.get("agentName"),
+        }
+    return {"matched": False, "action": "no_binding", "description": "No 1:1 binding for this user"}
 
 
 # =========================================================================

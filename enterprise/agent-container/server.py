@@ -180,8 +180,21 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
         output_tokens = int(usage.get("output", 0))
         total_tokens = int(usage.get("total", input_tokens + output_tokens))
 
-        # Estimate cost based on model (Nova 2 Lite: $0.30/$2.50 per 1M tokens)
-        cost = Decimal(str(round(input_tokens * 0.30 / 1_000_000 + output_tokens * 2.50 / 1_000_000, 6)))
+        # Model-aware pricing — cost based on actual model used
+        MODEL_PRICING = {
+            "global.amazon.nova-2-lite-v1:0":           {"input": 0.30, "output": 2.50},
+            "us.amazon.nova-pro-v1:0":                  {"input": 0.80, "output": 3.20},
+            "global.anthropic.claude-sonnet-4-5-20250929-v1:0": {"input": 3.00, "output": 15.00},
+            "global.anthropic.claude-sonnet-4-6":        {"input": 3.00, "output": 15.00},
+            "global.anthropic.claude-opus-4-6-v1":       {"input": 15.00, "output": 75.00},
+            "global.anthropic.claude-opus-4-5-20251101-v1:0": {"input": 15.00, "output": 75.00},
+            "global.anthropic.claude-haiku-4-5-20251001-v1:0": {"input": 0.80, "output": 4.00},
+            "us.deepseek.r1-v1:0":                      {"input": 1.35, "output": 5.40},
+            "us.meta.llama3-3-70b-instruct-v1:0":       {"input": 0.72, "output": 0.72},
+            "moonshotai.kimi-k2.5":                      {"input": 0.60, "output": 3.00},
+        }
+        pricing = MODEL_PRICING.get(model, {"input": 0.30, "output": 2.50})
+        cost = Decimal(str(round((input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000, 6)))
 
         # 1. Atomic increment USAGE#{base_id}#{date}
         table.update_item(

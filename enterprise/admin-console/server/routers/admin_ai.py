@@ -167,7 +167,7 @@ _ADMIN_AI_TOOLS = [
 
 def _execute_admin_tool(name: str, inputs: dict, actor_id: str, actor_name: str) -> str:
     """Execute one whitelisted admin tool. Returns result as string for Claude."""
-    from routers.usage import _get_agent_usage_today, usage_summary, usage_by_department, usage_by_agent
+    from routers.usage import _get_agent_usage_recent, usage_summary, usage_by_department, usage_by_agent
     try:
         if name == "list_employees":
             emps = db.get_employees()
@@ -187,7 +187,7 @@ def _execute_admin_tool(name: str, inputs: dict, actor_id: str, actor_name: str)
                 return f"Employee '{emp_id}' not found."
             agent = db.get_agent(emp.get("agentId", "")) if emp.get("agentId") else None
             bindings = [b for b in db.get_bindings() if b.get("employeeId") == emp["id"]]
-            usage = _get_agent_usage_today().get(emp.get("agentId", ""), {})
+            usage = _get_agent_usage_recent().get(emp.get("agentId", ""), {})
             lines = [
                 f"**{emp['name']}** ({emp['id']})",
                 f"Position: {emp.get('positionName','')} | Dept: {emp.get('departmentName','')} | Role: {emp.get('role','')}",
@@ -272,7 +272,7 @@ def _execute_admin_tool(name: str, inputs: dict, actor_id: str, actor_name: str)
                 agent = next((a for a in agents if a.get("employeeId") == inputs["employee_id"]), None)
             if not agent:
                 return "Agent not found."
-            usage = _get_agent_usage_today().get(agent["id"], {})
+            usage = _get_agent_usage_recent().get(agent["id"], {})
             sv = agent.get("soulVersions") or {}
             lines = [
                 f"**{agent['name']}** ({agent['id']})",
@@ -291,10 +291,9 @@ def _execute_admin_tool(name: str, inputs: dict, actor_id: str, actor_name: str)
                 s = usage_summary()
                 return (f"Input: {s['totalInputTokens']:,} tokens\n"
                         f"Output: {s['totalOutputTokens']:,} tokens\n"
-                        f"Cost today: ${s['totalCost']:.4f}\n"
+                        f"Cost (7-day): ${s['totalCost']:.4f}\n"
                         f"Requests: {s['totalRequests']}\n"
-                        f"Active tenants: {s['tenantCount']}\n"
-                        f"vs ChatGPT equivalent: ${s['chatgptEquivalent']:.2f}/day")
+                        f"Active tenants: {s['tenantCount']}")
             elif scope == "by_department":
                 rows = usage_by_department()
                 lines = [f"{'Dept':<25} {'Agents':>6} {'Reqs':>6} {'Tokens':>8} {'Cost':>8}"]
@@ -426,6 +425,15 @@ def admin_ai_chat(body: AdminAiMessage, authorization: str = Header(default=""))
 
     response_text = _admin_ai_loop(history, user)
     history.append({"role": "assistant", "content": [{"text": response_text}]})
+
+    # Audit trail
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "admin_assistant_query",
+        "actorId": user.employee_id, "actorName": user.name,
+        "targetType": "assistant", "targetId": "admin-ai",
+        "detail": f"Admin query: {body.message[:80]}", "status": "success",
+    })
 
     return {"response": response_text}
 
