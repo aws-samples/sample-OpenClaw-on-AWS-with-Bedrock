@@ -339,6 +339,13 @@ cleanup() {
             --region "$AWS_REGION" 2>/dev/null || true
         echo "[entrypoint] SSM endpoint deregistered for ${SHARED_AGENT_ID}"
     fi
+    # Also deregister tier endpoint if FARGATE_TIER is set
+    if [ -n "${FARGATE_TIER:-}" ]; then
+        aws ssm delete-parameter \
+            --name "/openclaw/${STACK_NAME}/fargate/tier-${FARGATE_TIER}/endpoint" \
+            --region "$AWS_REGION" 2>/dev/null || true
+        echo "[entrypoint] Fargate tier endpoint deregistered: tier-${FARGATE_TIER}"
+    fi
 
     # Step 1: Stop server first — no new requests during shutdown
     kill "$SERVER_PID" 2>/dev/null || true
@@ -400,6 +407,7 @@ trap cleanup SIGTERM SIGINT
 # Register ECS Fargate task endpoint in SSM once server is healthy.
 # Runs in the background so it doesn't block the main process.
 # The Tenant Router reads this SSM parameter to route requests to this task.
+# Supports both per-agent endpoints (SHARED_AGENT_ID) and per-tier endpoints (FARGATE_TIER).
 if [ -n "${SHARED_AGENT_ID:-}" ] && [ -n "${ECS_CONTAINER_METADATA_URI_V4:-}" ]; then
 (
     # Wait up to 15s for server.py to be ready
@@ -432,12 +440,22 @@ except Exception:
     done
     if [ -n "$TASK_IP" ]; then
         ENDPOINT="http://${TASK_IP}:8080"
+        # Register per-agent endpoint (always-on dedicated agents)
         aws ssm put-parameter \
             --name "/openclaw/${STACK_NAME}/always-on/${SHARED_AGENT_ID}/endpoint" \
             --value "$ENDPOINT" --type "String" --overwrite \
             --region "$AWS_REGION" 2>/dev/null \
             && echo "[entrypoint] ECS endpoint registered: $ENDPOINT" \
             || echo "[entrypoint] WARNING: SSM endpoint registration failed"
+        # Also register per-tier endpoint if FARGATE_TIER is set (Fargate-first mode)
+        if [ -n "${FARGATE_TIER:-}" ]; then
+            aws ssm put-parameter \
+                --name "/openclaw/${STACK_NAME}/fargate/tier-${FARGATE_TIER}/endpoint" \
+                --value "$ENDPOINT" --type "String" --overwrite \
+                --region "$AWS_REGION" 2>/dev/null \
+                && echo "[entrypoint] Fargate tier endpoint registered: tier-${FARGATE_TIER} → $ENDPOINT" \
+                || echo "[entrypoint] WARNING: Fargate tier endpoint registration failed"
+        fi
     else
         echo "[entrypoint] WARNING: Could not determine ECS task IP"
     fi

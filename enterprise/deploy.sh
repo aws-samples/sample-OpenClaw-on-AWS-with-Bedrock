@@ -337,6 +337,147 @@ aws ssm put-parameter \
   --value "$RUNTIME_ID" --type String --overwrite \
   --region "$REGION" &>/dev/null
 
+# ── Step 4.5: Fargate Tier Services ──────────────────────────────────────────
+# Create ECS Fargate services for always-on deployment mode (one per security tier).
+# Services start with desiredCount=0 — admin enables per-position via Security Center.
+info "[4.5/8] Setting up Fargate tier services..."
+
+ECS_CLUSTER="${STACK_NAME}-always-on"
+BASE_TASK_DEF="${STACK_NAME}-always-on-agent"
+
+# Read network config from CloudFormation outputs
+SUBNET_ID=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+  --query "Stacks[0].Outputs[?OutputKey=='AlwaysOnSubnetId'].OutputValue" \
+  --output text --region "$REGION" 2>/dev/null || echo "")
+TASK_SG=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+  --query "Stacks[0].Outputs[?OutputKey=='AlwaysOnTaskSecurityGroupId'].OutputValue" \
+  --output text --region "$REGION" 2>/dev/null || echo "")
+
+if [ -z "$SUBNET_ID" ] || [ "$SUBNET_ID" = "None" ]; then
+  warn "  Could not read SubnetId from stack outputs — Fargate setup skipped"
+  warn "  (Run CloudFormation update first, or set ECS_SUBNET_ID manually)"
+else
+  # Store ECS config in SSM for admin_always_on.py
+  aws ssm put-parameter --name "/openclaw/${STACK_NAME}/ecs/cluster-name" \
+    --value "$ECS_CLUSTER" --type String --overwrite --region "$REGION" &>/dev/null
+  aws ssm put-parameter --name "/openclaw/${STACK_NAME}/ecs/subnet-id" \
+    --value "$SUBNET_ID" --type String --overwrite --region "$REGION" &>/dev/null
+  [ -n "$TASK_SG" ] && [ "$TASK_SG" != "None" ] && \
+    aws ssm put-parameter --name "/openclaw/${STACK_NAME}/ecs/task-sg-id" \
+      --value "$TASK_SG" --type String --overwrite --region "$REGION" &>/dev/null
+
+  # Define tiers: name:model:guardrailId
+  # desiredCount=0 for all — admin activates via Security Center
+  declare -A TIER_MODELS=(
+    [standard]="${MODEL:-global.amazon.nova-2-lite-v1:0}"
+    [restricted]="us.deepseek.r1-v1:0"
+    [engineering]="global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    [executive]="global.anthropic.claude-sonnet-4-6"
+  )
+  declare -A TIER_GUARDRAILS=(
+    [standard]="${GUARDRAIL_MODERATE_ID:-}"
+    [restricted]="${GUARDRAIL_STRICT_ID:-}"
+    [engineering]=""
+    [executive]=""
+  )
+
+  for TIER_NAME in standard restricted engineering executive; do
+    SERVICE_NAME="${STACK_NAME}-tier-${TIER_NAME}"
+    TIER_MODEL="${TIER_MODELS[$TIER_NAME]}"
+    TIER_GUARDRAIL="${TIER_GUARDRAILS[$TIER_NAME]}"
+
+    # Register tier-specific task definition with tier env vars
+    TIER_FAMILY="${STACK_NAME}-tier-${TIER_NAME}"
+
+    # Build container environment JSON
+    TIER_ENV=$(cat <<ENVJSON
+[
+  {"name":"STACK_NAME","value":"${STACK_NAME}"},
+  {"name":"AWS_REGION","value":"${REGION}"},
+  {"name":"S3_BUCKET","value":"${S3_BUCKET}"},
+  {"name":"DYNAMODB_TABLE","value":"${DYNAMODB_TABLE:-$STACK_NAME}"},
+  {"name":"DYNAMODB_REGION","value":"${DYNAMODB_REGION:-$REGION}"},
+  {"name":"PORT","value":"8080"},
+  {"name":"EFS_ENABLED","value":"true"},
+  {"name":"SYNC_INTERVAL","value":"120"},
+  {"name":"BEDROCK_MODEL_ID","value":"${TIER_MODEL}"},
+  {"name":"GUARDRAIL_ID","value":"${TIER_GUARDRAIL}"},
+  {"name":"FARGATE_TIER","value":"${TIER_NAME}"},
+  {"name":"SHARED_AGENT_ID","value":"tier-${TIER_NAME}"}
+]
+ENVJSON
+)
+
+    # Get base task definition details
+    BASE_TD_ARN=$(aws ecs describe-task-definition --task-definition "$BASE_TASK_DEF" \
+      --query 'taskDefinition.taskDefinitionArn' --output text --region "$REGION" 2>/dev/null || echo "")
+
+    if [ -z "$BASE_TD_ARN" ] || [ "$BASE_TD_ARN" = "None" ]; then
+      warn "  Base task definition $BASE_TASK_DEF not found — tier $TIER_NAME skipped"
+      continue
+    fi
+
+    # Register new task definition revision for this tier
+    aws ecs register-task-definition \
+      --family "$TIER_FAMILY" \
+      --task-role-arn "$(aws ecs describe-task-definition --task-definition "$BASE_TASK_DEF" \
+        --query 'taskDefinition.taskRoleArn' --output text --region "$REGION")" \
+      --execution-role-arn "$(aws ecs describe-task-definition --task-definition "$BASE_TASK_DEF" \
+        --query 'taskDefinition.executionRoleArn' --output text --region "$REGION")" \
+      --network-mode awsvpc \
+      --requires-compatibilities FARGATE \
+      --cpu "512" --memory "1024" \
+      --runtime-platform cpuArchitecture=ARM64,operatingSystemFamily=LINUX \
+      --container-definitions "$(aws ecs describe-task-definition --task-definition "$BASE_TASK_DEF" \
+        --query 'taskDefinition.containerDefinitions' --output json --region "$REGION" \
+        | python3 -c "
+import sys, json
+defs = json.load(sys.stdin)
+env = json.loads('''${TIER_ENV}''')
+for d in defs:
+    if d.get('name') == 'always-on-agent':
+        d['environment'] = env
+        for k in ['cpu','status','taskDefinitionArn','containerInstanceArn','networkBindings','requiredAttributes']:
+            d.pop(k, None)
+print(json.dumps(defs))
+")" \
+      --volumes "$(aws ecs describe-task-definition --task-definition "$BASE_TASK_DEF" \
+        --query 'taskDefinition.volumes' --output json --region "$REGION")" \
+      --region "$REGION" &>/dev/null \
+      && info "  Registered task definition: $TIER_FAMILY" \
+      || warn "  Failed to register task definition: $TIER_FAMILY"
+
+    # Create ECS Service (if not exists) with desiredCount=0
+    EXISTING_SVC=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$SERVICE_NAME" \
+      --query 'services[?status==`ACTIVE`].serviceName' --output text --region "$REGION" 2>/dev/null || echo "")
+
+    if [ -z "$EXISTING_SVC" ] || [ "$EXISTING_SVC" = "None" ]; then
+      aws ecs create-service \
+        --cluster "$ECS_CLUSTER" \
+        --service-name "$SERVICE_NAME" \
+        --task-definition "$TIER_FAMILY" \
+        --desired-count 0 \
+        --launch-type FARGATE \
+        --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$TASK_SG],assignPublicIp=ENABLED}" \
+        --tags "key=tier,value=$TIER_NAME" "key=stack,value=$STACK_NAME" \
+        --region "$REGION" &>/dev/null \
+        && info "  Created service: $SERVICE_NAME (desiredCount=0)" \
+        || warn "  Failed to create service: $SERVICE_NAME"
+    else
+      # Update existing service with new task definition
+      aws ecs update-service \
+        --cluster "$ECS_CLUSTER" \
+        --service "$SERVICE_NAME" \
+        --task-definition "$TIER_FAMILY" \
+        --region "$REGION" &>/dev/null \
+        && info "  Updated service: $SERVICE_NAME" \
+        || warn "  Failed to update service: $SERVICE_NAME"
+    fi
+  done
+
+  success "Fargate tier services configured (desiredCount=0, activate via Security Center)"
+fi
+
 # ── Step 5: Upload SOUL templates and knowledge docs ──────────────────────────
 # SOUL architecture: workspace_assembler.py merges Global + Position + PERSONAL_SOUL.md
 # into SOUL.md (single write). server.py does NOT modify SOUL.md.

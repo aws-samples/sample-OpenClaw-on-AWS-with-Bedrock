@@ -218,6 +218,132 @@ def get_position_runtime_map(authorization: str = Header(default="")):
     return {"map": cfg.get("position_runtime", {})}
 
 
+@router.put("/api/v1/security/positions/{pos_id}/deploy-mode")
+def set_position_deploy_mode(pos_id: str, body: dict, authorization: str = Header(default="")):
+    """Set a position's deployment mode: 'serverless' (AgentCore) or 'fargate' (always-on).
+
+    When set to 'fargate', Tenant Router routes employees in this position to
+    the Fargate tier service instead of AgentCore Runtime.
+    The tier is derived from the position's runtime assignment (standard/restricted/engineering/executive).
+    """
+    user = require_role(authorization, roles=["admin"])
+    deploy_mode = body.get("deployMode", "serverless")
+    if deploy_mode not in ("serverless", "fargate"):
+        raise HTTPException(400, "deployMode must be 'serverless' or 'fargate'")
+
+    fargate_tier = body.get("fargateTier", "")  # optional explicit tier override
+
+    db.update_position(pos_id, {"deployMode": deploy_mode, "fargateTier": fargate_tier})
+    db.bump_config_version()
+
+    # Force refresh affected employees so routing changes take effect
+    refreshed = []
+    for emp in db.get_employees():
+        if emp.get("positionId") == pos_id and emp.get("agentId"):
+            threading.Thread(target=stop_employee_session, args=(emp["id"],), daemon=True).start()
+            refreshed.append(emp["id"])
+
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change",
+        "actorId": user.employee_id,
+        "actorName": user.name,
+        "targetType": "deploy_mode",
+        "targetId": pos_id,
+        "detail": f"Position {pos_id} deploy mode set to '{deploy_mode}'"
+                  + (f" (tier: {fargate_tier})" if fargate_tier else "")
+                  + f". Refreshed {len(refreshed)} agents.",
+        "status": "success",
+    })
+    return {"saved": True, "posId": pos_id, "deployMode": deploy_mode,
+            "fargateTier": fargate_tier, "refreshed": refreshed}
+
+
+@router.get("/api/v1/security/fargate/tiers")
+def get_fargate_tiers(authorization: str = Header(default="")):
+    """List Fargate tier services and their status."""
+    require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw")
+    tiers = []
+    try:
+        import boto3 as _b3ft
+        ecs = _b3ft.client("ecs", region_name=GATEWAY_REGION)
+        ssm = _b3ft.client("ssm", region_name=GATEWAY_REGION)
+        cluster = f"{stack}-always-on"
+
+        for tier_name in ("standard", "restricted", "engineering", "executive"):
+            service_name = f"{stack}-tier-{tier_name}"
+            tier_info = {"name": tier_name, "serviceName": service_name,
+                         "running": False, "desiredCount": 0, "endpoint": None}
+            try:
+                desc = ecs.describe_services(cluster=cluster, services=[service_name])
+                active = [s for s in desc.get("services", []) if s["status"] == "ACTIVE"]
+                if active:
+                    svc = active[0]
+                    tier_info["desiredCount"] = svc.get("desiredCount", 0)
+                    tier_info["runningCount"] = svc.get("runningCount", 0)
+                    tier_info["running"] = svc.get("runningCount", 0) > 0
+            except Exception:
+                pass
+            try:
+                r = ssm.get_parameter(Name=f"/openclaw/{stack}/fargate/tier-{tier_name}/endpoint")
+                tier_info["endpoint"] = r["Parameter"]["Value"]
+            except Exception:
+                pass
+            tiers.append(tier_info)
+    except Exception as e:
+        print(f"[fargate-tiers] Error: {e}")
+    return {"tiers": tiers}
+
+
+@router.post("/api/v1/security/fargate/tiers/{tier_name}/activate")
+def activate_fargate_tier(tier_name: str, authorization: str = Header(default="")):
+    """Activate a Fargate tier service by scaling desiredCount to 1."""
+    require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw")
+    service_name = f"{stack}-tier-{tier_name}"
+    try:
+        import boto3 as _b3at
+        ecs = _b3at.client("ecs", region_name=GATEWAY_REGION)
+        ecs.update_service(
+            cluster=f"{stack}-always-on",
+            service=service_name,
+            desiredCount=1,
+        )
+        db.create_audit_entry({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "eventType": "config_change",
+            "actorId": "admin",
+            "actorName": "Admin",
+            "targetType": "fargate_tier",
+            "targetId": tier_name,
+            "detail": f"Fargate tier '{tier_name}' activated (desiredCount=1)",
+            "status": "success",
+        })
+        return {"activated": True, "tier": tier_name, "serviceName": service_name}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to activate tier: {e}")
+
+
+@router.post("/api/v1/security/fargate/tiers/{tier_name}/deactivate")
+def deactivate_fargate_tier(tier_name: str, authorization: str = Header(default="")):
+    """Deactivate a Fargate tier service by scaling desiredCount to 0."""
+    require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw")
+    service_name = f"{stack}-tier-{tier_name}"
+    try:
+        import boto3 as _b3dt
+        ecs = _b3dt.client("ecs", region_name=GATEWAY_REGION)
+        ecs.update_service(
+            cluster=f"{stack}-always-on",
+            service=service_name,
+            desiredCount=0,
+        )
+        return {"deactivated": True, "tier": tier_name, "serviceName": service_name}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to deactivate tier: {e}")
+
+
 # ── Runtimes (AgentCore) ─────────────────────────────────────────────────
 
 @router.get("/api/v1/security/runtimes")

@@ -384,6 +384,11 @@ _always_on_cache: dict = {}
 _always_on_cache_ts: dict = {}
 _ALWAYS_ON_TTL = 60  # seconds
 
+# Fargate tier endpoint cache
+_fargate_tier_cache: dict = {}
+_fargate_tier_cache_ts: dict = {}
+_FARGATE_TIER_TTL = 60  # seconds
+
 def _get_always_on_endpoint(user_id: str, channel: str) -> str:
     """Return the localhost endpoint of an always-on container for this user/agent,
     or empty string if the user should use AgentCore (normal path).
@@ -422,6 +427,72 @@ def _get_always_on_endpoint(user_id: str, channel: str) -> str:
             _always_on_cache_ts[cache_key] = now
             return ""
     except Exception:
+        return ""
+
+
+def _get_fargate_tier_endpoint(pos_id: str) -> str:
+    """Check if this position uses Fargate deployment mode, and return the tier endpoint.
+
+    Reads POS#.deployMode from DynamoDB (via routing config cache).
+    If deployMode == "fargate", looks up the tier name from position_runtime mapping,
+    then reads the tier's Fargate endpoint from SSM.
+
+    Returns empty string if position uses serverless (AgentCore) or no endpoint found.
+    """
+    if not pos_id:
+        return ""
+
+    now = time.time()
+    cache_key = f"fargate_tier__{pos_id}"
+    if cache_key in _fargate_tier_cache and now - _fargate_tier_cache_ts.get(cache_key, 0) < _FARGATE_TIER_TTL:
+        return _fargate_tier_cache[cache_key]
+
+    # Check DynamoDB for position's deploy mode
+    try:
+        ddb = boto3.resource("dynamodb", region_name=DYNAMODB_REGION)
+        table = ddb.Table(DYNAMODB_TABLE)
+        resp = table.get_item(Key={"PK": "ORG#acme", "SK": f"POS#{pos_id}"})
+        pos_item = resp.get("Item", {})
+        deploy_mode = pos_item.get("deployMode", "serverless")
+
+        if deploy_mode != "fargate":
+            _fargate_tier_cache[cache_key] = ""
+            _fargate_tier_cache_ts[cache_key] = now
+            return ""
+
+        # Determine which tier this position belongs to
+        tier_name = pos_item.get("fargateTier", "")
+        if not tier_name:
+            # Derive from runtime assignment: position_runtime maps pos → runtime name
+            cfg = _get_routing_config()
+            runtime_name = cfg.get("position_runtime", {}).get(pos_id, "")
+            # Map runtime name to tier: look for "restricted", "engineering", "executive" in name
+            tier_name = "standard"  # default
+            if runtime_name:
+                rn_lower = runtime_name.lower()
+                for t in ("restricted", "engineering", "executive"):
+                    if t in rn_lower:
+                        tier_name = t
+                        break
+
+        # Read tier endpoint from SSM
+        ssm = boto3.client("ssm", region_name=AWS_REGION)
+        try:
+            r = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/fargate/tier-{tier_name}/endpoint")
+            endpoint = r["Parameter"]["Value"]
+            _fargate_tier_cache[cache_key] = endpoint
+            _fargate_tier_cache_ts[cache_key] = now
+            logger.info("Fargate tier routing: %s → tier-%s (%s)", pos_id, tier_name, endpoint)
+            return endpoint
+        except Exception:
+            _fargate_tier_cache[cache_key] = ""
+            _fargate_tier_cache_ts[cache_key] = now
+            return ""
+
+    except Exception as e:
+        logger.debug("Fargate tier check failed for %s: %s", pos_id, e)
+        _fargate_tier_cache[cache_key] = ""
+        _fargate_tier_cache_ts[cache_key] = now
         return ""
 
 
@@ -504,16 +575,29 @@ class TenantRouterHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            # Check if this routes to an always-on Docker container
-            always_on_url = _get_always_on_endpoint(user_id, channel)
+            # 3-level routing cascade:
+            # 1. Per-employee always-on assignment (dedicated agents)
+            # 2. Position-level Fargate tier (default always-on)
+            # 3. AgentCore serverless (default)
+            always_on_url = _get_always_on_endpoint(resolved_emp_id or user_id, channel)
             if always_on_url:
                 result = _invoke_local_container(always_on_url, tenant_id, message, payload.get("model"))
             else:
-                result = invoke_agent_runtime(
-                    tenant_id=tenant_id,
-                    message=message,
-                    model=payload.get("model"),
-                )
+                # Check if position uses Fargate deployment mode
+                fargate_url = ""
+                if resolved_emp_id:
+                    pos_id = _get_position_for_emp(resolved_emp_id)
+                    if pos_id:
+                        fargate_url = _get_fargate_tier_endpoint(pos_id)
+
+                if fargate_url:
+                    result = _invoke_local_container(fargate_url, tenant_id, message, payload.get("model"))
+                else:
+                    result = invoke_agent_runtime(
+                        tenant_id=tenant_id,
+                        message=message,
+                        model=payload.get("model"),
+                    )
             self._respond(200, {
                 "tenant_id": tenant_id,
                 "response": result,
