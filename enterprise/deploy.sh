@@ -337,6 +337,23 @@ aws ssm put-parameter \
   --value "$RUNTIME_ID" --type String --overwrite \
   --region "$REGION" &>/dev/null
 
+# Update ALL AgentCore runtimes to use new Docker image (not just the default one).
+# Production has 4 runtimes (Standard, Restricted, Engineering, Executive) —
+# all must point to the latest image after a Docker rebuild.
+info "  Updating all AgentCore runtimes to latest image..."
+ALL_RUNTIMES=$(aws bedrock-agentcore-control list-agent-runtimes \
+  --query 'agentRuntimes[*].agentRuntimeId' --output text --region "$REGION" 2>/dev/null || echo "")
+UPDATED=0
+for RT_ID in $ALL_RUNTIMES; do
+  [ -z "$RT_ID" ] && continue
+  [ "$RT_ID" = "$RUNTIME_ID" ] && continue  # already updated above
+  aws bedrock-agentcore-control update-agent-runtime \
+    --agent-runtime-id "$RT_ID" \
+    --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_URI}:latest\"}}" \
+    --region "$REGION" &>/dev/null && UPDATED=$((UPDATED+1)) || true
+done
+[ $UPDATED -gt 0 ] && info "  Updated $UPDATED additional runtime(s) to new image"
+
 # ── Step 4.5: Fargate Tier Services ──────────────────────────────────────────
 # Create ECS Fargate services for always-on deployment mode (one per security tier).
 # Services start with desiredCount=0 — admin enables per-position via Security Center.

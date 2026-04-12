@@ -1177,6 +1177,14 @@ Resources:
             - ContainerPort: 8080
               Protocol: tcp
           Essential: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -sf http://localhost:8080/ping || exit 1
+            Interval: 30
+            Timeout: 10
+            Retries: 3
+            StartPeriod: 60
           LogConfiguration:
             LogDriver: awslogs
             Options:

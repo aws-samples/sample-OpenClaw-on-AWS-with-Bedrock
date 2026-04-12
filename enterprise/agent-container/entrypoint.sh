@@ -171,10 +171,20 @@ openclaw gateway --port 18789 > /tmp/openclaw-gateway.log 2>&1 &
 GATEWAY_PID=$!
 echo "[entrypoint] OpenClaw Gateway PID=${GATEWAY_PID}"
 
-# Wait up to 30s for Gateway to start listening
-# Use curl instead of ss (ss may not exist in slim images)
+# Wait for Gateway to start — but don't block server.py startup.
+# AgentCore: wait up to 30s (server.py starts after this, healthcheck needs it fast)
+# Fargate:   wait only 5s, then continue (server.py starts immediately for health check,
+#            Gateway continues starting in background — tools available within ~25s)
+if [ "$EFS_MODE" = "true" ]; then
+    GATEWAY_WAIT=5
+    echo "[entrypoint] Fargate mode: waiting ${GATEWAY_WAIT}s for Gateway (non-blocking)"
+else
+    GATEWAY_WAIT=30
+    echo "[entrypoint] AgentCore mode: waiting ${GATEWAY_WAIT}s for Gateway"
+fi
+
 GATEWAY_READY=false
-for i in $(seq 1 30); do
+for i in $(seq 1 $GATEWAY_WAIT); do
     if curl -sf --connect-timeout 1 http://127.0.0.1:18789/__openclaw/control-ui-config.json >/dev/null 2>&1; then
         echo "[entrypoint] Gateway ready on port 18789 (${i}s)"
         GATEWAY_READY=true
@@ -183,7 +193,11 @@ for i in $(seq 1 30); do
     sleep 1
 done
 if [ "$GATEWAY_READY" = "false" ]; then
-    echo "[entrypoint] WARNING: Gateway not ready after 30s (may still be starting)"
+    if [ "$EFS_MODE" = "true" ]; then
+        echo "[entrypoint] Gateway still starting (Fargate: will be ready for next request)"
+    else
+        echo "[entrypoint] WARNING: Gateway not ready after ${GATEWAY_WAIT}s (tools may be unavailable)"
+    fi
 fi
 
 # Auto-pair Control UI and store the dashboard URL token in SSM.
