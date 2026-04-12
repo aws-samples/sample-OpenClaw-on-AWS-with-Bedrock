@@ -307,6 +307,11 @@ if [ -n "$EXISTING_RUNTIME" ] && [ "$EXISTING_RUNTIME" != "UNKNOWN" ]; then
     --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_URI}:latest\"}}" \
     --role-arn "$EXECUTION_ROLE_ARN" \
     --network-configuration '{"networkMode":"PUBLIC"}' \
+    --protocol-configuration '{"serverProtocol":"HTTP"}' \
+    --lifecycle-configuration '{"idleRuntimeSessionTimeout":300,"maxLifetime":3600}' \
+    --environment-variables \
+      STACK_NAME="${STACK_NAME}",AWS_REGION="${REGION}",S3_BUCKET="${S3_BUCKET}",\
+BEDROCK_MODEL_ID="${MODEL}",DYNAMODB_TABLE="${DYNAMODB_TABLE}",DYNAMODB_REGION="${DYNAMODB_REGION}" \
     --region "$REGION" &>/dev/null || warn "  Runtime update failed — may need manual update in console"
   RUNTIME_ID="$EXISTING_RUNTIME"
 else
