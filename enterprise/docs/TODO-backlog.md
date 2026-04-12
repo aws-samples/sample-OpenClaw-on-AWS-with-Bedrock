@@ -23,16 +23,65 @@ Added AgentCore CRUD + PassRole + ListRoles + Guardrail permissions to CloudForm
 
 ## P0.5: NEW Infrastructure Blockers (discovered 2026-04-13)
 
-### P0.5.1 server.py ThreadingMixIn — Docker Rebuild Required
-**What:** server.py changed to ThreadingMixIn (fixes healthcheck blocking agent requests → 502), but the code change is not in the running Docker image yet.
-**Status:** Code fixed in source, needs Docker rebuild + ECR push + runtime update.
-**Impact:** Complex agent tasks timeout when healthcheck arrives during processing.
-**Source:** worklog-2026-04-13-full:101
+### ~~P0.5.1 server.py ThreadingMixIn~~ DONE (2026-04-14)
+Docker 镜像已重建并推送 ECR，包含 ThreadingMixIn 修复。us-east-2 Fargate 72 次测试无 502。
+AgentCore runtime 也需要 update-agent-runtime 指向新镜像（ap-northeast-1 生产环境待做）。
 
-### P0.5.2 AgentCore Platform Limitations — Fargate Alternative
-**What:** Multiple AgentCore issues cannot be fixed on our side (cold start, Session Storage black box, session invalidation on runtime update, Gateway startup timeout). Need Fargate as alternative deployment mode.
-**Status:** Design in progress (this session). See agentcore-issues-analysis.md + design-fargate-full-architecture.md.
-**Source:** worklog-2026-04-13-full:115-131, memory/project_next_session.md
+### P0.5.2 Fargate 替代 AgentCore — IN PROGRESS
+**Status:** 4 tier 容器已运行，72 次测试通过，13 个缺口已识别。详见 worklog-2026-04-14.md。
+
+---
+
+## P0.6: 单线程 / 超时 / 自动重启问题追踪
+
+> 这 3 个问题在 AgentCore 和 Fargate 下的影响不同，统一记录。
+
+### P0.6.1 server.py 单线程 HTTPServer（容器内 Python）
+
+**问题：** `http.server.HTTPServer` 单线程。Agent 处理 Bedrock 调用（10-60s）时无法同时响应 `/ping` 健康检查。
+**AgentCore 影响：** 健康检查超时 → AgentCore 判定不健康 → **杀掉 microVM** → 用户 502。这是最严重的问题。
+**Fargate 影响：** 新 Docker 镜像已含 `ThreadingMixIn` 修复 ✓。72 次测试无复现。但**生产环境需要配 ECS container health check**，届时需要验证 ThreadingMixIn 在 ECS health check 下正常工作。
+**修复：** `server.py:1230` — `class ThreadedServer(ThreadingMixIn, HTTPServer)`
+**状态：**
+- Fargate (us-east-2): ✓ 新镜像已部署，已验证
+- AgentCore (ap-northeast-1 生产): **TODO** — 需要 `update-agent-runtime` 指向新镜像
+- ECS health check 配置: **TODO** — 生产环境需要配置并验证
+
+### P0.6.2 Tenant Router 单线程（EC2 Python）
+
+**问题：** `tenant_router.py` 同样用 `HTTPServer` 单线程。一个请求等 AgentCore 响应时（25-60s），其他请求排队。
+**AgentCore 影响：** 多个员工同时发消息 → 后面的排队等待 → CloudFront 超时 → BrokenPipeError 洪水。
+**Fargate 影响：** Fargate 模式下 H2 Proxy 直连容器（`forwardToFargateContainer()`），**绕过 Tenant Router**。但 deployMode=serverless 的 position 仍走 Tenant Router，所以修复仍重要。
+**修复：** `tenant_router.py:620` — `class ThreadedHTTPServer(ThreadingMixIn, HTTPServer)` — 已在 4/13 部署到 EC2。
+**状态：** ✓ EC2 已部署修复版。
+
+### P0.6.3 OpenClaw Gateway 启动 30s+（容器内 Node.js）
+
+**问题：** Gateway 是 Node.js 进程，启动需解析 config → 发现工具 → 注册插件 → 建立 WebSocket server ≈ 30s。启动期间 `openclaw agent` 回退到 embedded mode — **没有工具定义**（shell、web_search、browser 全不可用）。
+**AgentCore 影响：** 每次冷启动（idle 15-60 分钟后 microVM 被销毁）→ Gateway 重新启动 → **前 30s 工具不可用**。员工每天首次使用或间隔较长时一定会遇到。
+**Fargate 影响：** **解决了。** 容器启动一次后 Gateway 永远运行。只有第一次启动有 30s 延迟（ECS Service 创建或 rolling deploy 时），之后工具永远可用。72 次测试中工具全程可用。
+**缓解措施（已实施）：** V8 compile cache 预热（`entrypoint.sh:37-40`）、IPv4 优先（`entrypoint.sh:44`）。将 45s 降到约 30s。
+**状态：**
+- Fargate: ✓ 结构性解决（永远在线）
+- AgentCore: **无法根治** — 只要 microVM 被销毁就会冷启动。这是 Fargate 替代 AgentCore 的核心理由之一。
+
+### 三个问题的交叉影响
+
+```
+员工发消息
+  │
+  ├── AgentCore 路径（问题集中爆发）
+  │   ├── P0.6.3: Gateway 30s 启动 → 工具不可用
+  │   ├── P0.6.1: 健康检查阻塞 → 502 + VM 被杀
+  │   └── P0.6.2: Tenant Router 排队 → 后续请求超时
+  │   结果: 复杂任务 502、工具不可用、多用户并发卡死
+  │
+  └── Fargate 路径（问题基本消除）
+      ├── P0.6.3: ✓ Gateway 永远在线
+      ├── P0.6.1: ✓ ThreadingMixIn 已修复（需验证 ECS health check）
+      └── P0.6.2: ✓ 绕过 Tenant Router（直连容器）
+      结果: 72 次测试 0 个 502、工具全程可用
+```
 
 ---
 
