@@ -7,6 +7,7 @@ Extracted from main.py lines 699-1172.
 
 import os
 import json
+import re
 import threading
 import subprocess
 from datetime import datetime, timezone
@@ -124,6 +125,32 @@ class PairingApproveRequest(BaseModel):
     employeeId: str       # e.g. emp-carol
     channelUserId: str = ""   # numeric platform user ID (from pairing message)
     pairingUserId: str = ""   # username/handle (e.g. "wujiade4444") for dm_ mapping
+
+
+def _candidate_pairing_aliases(channel: str, pairing_user_id: str, employee_id: str) -> list[str]:
+    aliases: list[str] = []
+
+    def add(value: str):
+        value = (value or "").strip()
+        if not value or value in aliases:
+            return
+        aliases.append(value)
+
+    add(pairing_user_id)
+
+    # Slack DMs in this deployment are currently surfaced as "dm_<display name>"
+    # rather than the stable Slack user ID. When the operator leaves
+    # pairingUserId empty, synthesize a few likely aliases from the employee name
+    # so the initial mapping still works.
+    if channel == "slack" and not pairing_user_id:
+        emp = db.get_employee(employee_id)
+        name = emp.get("name", "") if emp else ""
+        parts = [p for p in re.split(r"\s+", name.strip()) if p]
+        if parts:
+            add(parts[0])
+            add("_".join(parts))
+            add("".join(parts))
+    return aliases
 
 
 # =========================================================================
@@ -276,12 +303,12 @@ def approve_pairing(body: PairingApproveRequest, authorization: str = Header(def
     mapping_written = False
     if body.channelUserId and body.employeeId:
         _write_user_mapping(body.channel, body.channelUserId, body.employeeId)
-        # Also write username-based mappings extracted by H2 Proxy from Discord DM format
-        if body.pairingUserId:  # Discord username from pairing message meta
-            _write_user_mapping(body.channel, f"dm_{body.pairingUserId}", body.employeeId)
-            _write_user_mapping(body.channel, body.pairingUserId, body.employeeId)
+        for alias in _candidate_pairing_aliases(body.channel, body.pairingUserId, body.employeeId):
+            _write_user_mapping(body.channel, f"dm_{alias}", body.employeeId)
+            _write_user_mapping(body.channel, alias, body.employeeId)
         # Position and permissions are now read from DynamoDB (EMP#/POS# records).
         # DynamoDB MAPPING# resolves channelUserId → emp_id → positionId at runtime.
+        mapping_written = True
 
     # 3. Sync updated allowFrom list to S3 so microVMs pick it up
     # The EC2's openclaw pairing approve updates the local credentials file.

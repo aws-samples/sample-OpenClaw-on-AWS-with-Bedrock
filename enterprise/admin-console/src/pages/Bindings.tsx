@@ -413,7 +413,7 @@ export default function Bindings() {
               <input value={pairUsername} onChange={e => setPairUsername(e.target.value)}
                 placeholder="e.g. wujiade4444"
                 className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-primary focus:outline-none font-mono" />
-              <p className="text-xs text-text-muted mt-1">Discord username shown in pairing message meta. Creates additional SSM mappings for reliable routing.</p>
+              <p className="text-xs text-text-muted mt-1">For Discord, use the username from pairing metadata. For Slack, use the DM display name if the runtime surfaces messages as <code>dm_name</code>. This creates compatibility mappings for reliable routing.</p>
             </div>
             <Select label="Employee" value={pairEmpId} onChange={setPairEmpId}
               options={EMPLOYEES.map(e => ({ label: `${e.name} (${e.positionName})`, value: e.id }))}
