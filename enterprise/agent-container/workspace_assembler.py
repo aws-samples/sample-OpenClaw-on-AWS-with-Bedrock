@@ -277,6 +277,27 @@ def _build_context_block(
     except Exception as e:
         logger.warning("Language context failed: %s", e)
 
+    # 5. AWS Environment — tell the agent about its cloud resources and IAM role
+    aws_region = os.environ.get("AWS_REGION", "us-east-1")
+    parts.append(
+        "<!-- AWS ENVIRONMENT -->\n"
+        "You are running inside an AWS environment with an IAM Role attached.\n"
+        "You do NOT need access keys or credentials — use AWS CLI directly.\n\n"
+        f"**Your S3 Workspace:**\n"
+        f"- Bucket: `{bucket}`\n"
+        f"- Your path: `s3://{bucket}/{base_id}/workspace/`\n"
+        f"- Output directory: `workspace/output/` (files here auto-sync to S3)\n"
+        f"- Region: `{aws_region}`\n\n"
+        "**File operations:**\n"
+        "- To save a file for the employee: write to `workspace/output/filename`\n"
+        f"- To upload to S3 manually: `aws s3 cp file s3://{bucket}/{base_id}/workspace/output/file --region {aws_region}`\n"
+        "- The employee can download output files from the Portal → My Workspace\n\n"
+        "**Available AWS services** (via IAM Role, no keys needed):\n"
+        "- S3: read/write files in the workspace bucket\n"
+        "- Bedrock: invoke AI models\n"
+        "- DynamoDB: read/write application data\n"
+    )
+
     return "\n\n---\n\n".join(parts) if parts else ""
 
 
