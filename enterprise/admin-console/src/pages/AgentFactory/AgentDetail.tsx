@@ -45,8 +45,8 @@ export default function AgentDetail() {
   const [showDelete, setShowDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const empId = agent?.employeeId || '';
-  const { data: aoStatus } = useAlwaysOnStatus(empId);
-  const { data: aoChannels } = useAlwaysOnChannels(empId);
+  const { data: aoStatus } = useAlwaysOnStatus(empId) as { data: any };
+  const { data: aoChannels } = useAlwaysOnChannels(empId) as { data: any };
   const enableAO = useEnableAlwaysOn();
   const disconnectCh = useDisconnectChannel();
 

@@ -1214,7 +1214,7 @@ export default function SecurityCenter() {
 // ── Fargate Overview Panel ────────────────────────────────────────────────
 
 function FargateOverviewPanel() {
-  const { data, isLoading } = useFargateOverview();
+  const { data, isLoading } = useFargateOverview() as { data: any; isLoading: boolean };
   const agents = data?.alwaysOnAgents || [];
 
   const tierColors: Record<string, string> = {
@@ -1262,7 +1262,7 @@ function FargateOverviewPanel() {
                     <td className="py-2 px-3 font-medium">{a.employeeName}</td>
                     <td className="py-2 px-3 text-text-secondary">{a.positionName}</td>
                     <td className="py-2 px-3">
-                      <Badge color={tierColors[a.tier] || 'default'}>{a.tier}</Badge>
+                      <Badge color={(tierColors[a.tier] || 'default') as any}>{a.tier}</Badge>
                     </td>
                     <td className="py-2 px-3">
                       <Badge color={a.status === 'starting' || a.status === 'running' ? 'success' : 'danger'}>
@@ -1273,7 +1273,7 @@ function FargateOverviewPanel() {
                       {(a.imChannels || []).length === 0
                         ? <span className="text-text-muted">—</span>
                         : (a.imChannels || []).map((ch: string) => (
-                            <Badge key={ch} color="info" className="mr-1">{ch}</Badge>
+                            <Badge key={ch} color="info">{ch}</Badge>
                           ))
                       }
                     </td>

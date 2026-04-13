@@ -1234,7 +1234,7 @@ export function useDisconnectChannel() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ empId, channel }: { empId: string; channel: string }) =>
-      api.delete(`/agents/${empId}/always-on/channels/${channel}`),
+      api.del(`/agents/${empId}/always-on/channels/${channel}`),
     onSuccess: (_, { empId }) => {
       qc.invalidateQueries({ queryKey: ['always-on-channels', empId] });
     },

@@ -45,7 +45,7 @@ export default function MyAgents() {
   const handleDisconnect = async (channel: string) => {
     if (!confirm(`Disconnect ${channel}?`)) return;
     try {
-      await api.delete(`/portal/agent/channels/${channel}`);
+      await api.del(`/portal/agent/channels/${channel}`);
       const updated = await api.get('/portal/my-agents');
       setAgents(updated);
     } catch {}
