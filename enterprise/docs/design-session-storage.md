@@ -1,6 +1,23 @@
 # Session Storage Integration Design
 
-## Status: DESIGN READY — OQ1/OQ2/OQ4 resolved via StopRuntimeSession
+## Status: ABANDONED (2026-04-14)
+
+> **Decision: Session Storage is no longer used.** The optimization (skip workspace
+> assembly if Session Storage has files from a previous session) caused critical bugs:
+> - Employee identity lost (cached generic SOUL from tenant=unknown boot)
+> - Stale KB files (cached old versions, os.path.isfile skipped re-download)
+> - 1GB space limit risk (output files + skills accumulated over sessions)
+> - 3-way state complexity (microVM local + Session Storage + S3 divergence)
+>
+> Architecture now uses 2-way state: microVM local workspace + S3 (source of truth).
+> Every cold start runs full workspace assembly from S3 (~6s). Acceptable trade-off.
+> Fargate mode uses EFS (persistent, unlimited) and has 0s cold start.
+>
+> The design below is kept for historical reference only.
+
+---
+
+## Original Design (no longer implemented)
 
 ## Problem Statement
 

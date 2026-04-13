@@ -84,24 +84,11 @@
 
 ### P1: Impacts Experience
 
-#### 1.5 Session Storage Black Box — No API, ~1GB Limit
+#### ~~1.5 Session Storage Black Box~~ — RESOLVED (2026-04-14)
 
-- **Symptom:** Admin cannot control what Session Storage saves, how much, or when it clears. Storage fills up silently; agent workspace becomes slow.
-- **Root Cause:** AgentCore Session Storage is an opaque snapshot mechanism:
-  - Automatically snapshots the microVM's writable overlay between sessions
-  - No API to query usage, configure retention, or selectively clear
-  - Documented limit: ~1GB writable space
-  - Undocumented behavior: may snapshot more than expected (e.g., node_modules, skill downloads)
-- **What We Tried:**
-  - `_enforce_workspace_budget()` in `workspace_assembler.py:293-326` — caps user files at 100MB
-  - `entrypoint.sh:72-74` — cleans output/ on session restore
-  - `entrypoint.sh:236` — excludes output/ from cold start S3 sync
-  - Watchdog sync excludes platform files (SOUL.md, skills/, knowledge/, node_modules)
-- **Result:** Our workarounds keep workspace lean. But we cannot guarantee what Session Storage snapshots beyond our workspace directory. If OpenClaw's own files (node_modules, .cache) grow, Session Storage could still fill.
-- **User Impact:**
-  - Demo: Manageable with 100MB budget.
-  - Production: Risk of silent degradation after weeks of use. No monitoring available.
-- **AgentCore Platform Limitation:** Yes. No Session Storage management API.
+- **Decision:** Session Storage removed from architecture. Every cold start rebuilds workspace from S3.
+- **Bugs it caused:** Identity loss (cached generic SOUL), stale KB files, 1GB space risk, 3-way state divergence.
+- **New model:** 2-way state only (microVM local + S3). Trade-off: +6s per cold start. Fargate: 0s.
 
 #### 1.6 tenant=unknown at Startup — SOUL Not Assembled
 

@@ -281,6 +281,8 @@ def _build_context_block(
 
 
 # ── Workspace budget enforcement ──────────────────────────────────────────
+# Keeps workspace lean on AgentCore (limited microVM disk).
+# On Fargate + EFS this is less critical but still good hygiene.
 from pathlib import Path
 
 WORKSPACE_MAX_MB = 100

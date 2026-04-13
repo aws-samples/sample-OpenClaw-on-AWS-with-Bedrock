@@ -68,8 +68,8 @@ else
     mkdir -p "$WORKSPACE" "$WORKSPACE/memory" "$WORKSPACE/skills"
 fi
 
-# Clean output/ directory — Session Storage may have restored old output files.
-# These are already persisted in S3 by the previous session's watchdog sync.
+# Clean output/ directory on every cold start.
+# Output files are persisted in S3 by the watchdog sync — no need to keep old ones locally.
 rm -rf "$WORKSPACE/output" 2>/dev/null
 mkdir -p "$WORKSPACE/output"
 

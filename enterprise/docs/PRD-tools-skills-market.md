@@ -614,9 +614,14 @@ def set_skill_key(skill_name: str, env_var: str, body: dict, authorization=Heade
 
 ### 7.1 The Constraint
 
-AgentCore Session Storage is a **black box**. No API to configure what it saves, how much, or when it clears. It automatically snapshots the entire microVM workspace directory between sessions. The only documented hard limit is ~1GB (writable overlay). We cannot control it — we can only control what goes INTO the workspace.
+> **UPDATE 2026-04-14: Session Storage is no longer used.** See design-session-storage.md.
+> The 100MB budget is kept as good hygiene for AgentCore microVM disk,
+> but the 1GB Session Storage limit and 3-way state issues no longer apply.
+> Fargate + EFS has unlimited storage.
 
-**One rule: workspace user-writable space is capped at 100MB.**
+~~AgentCore Session Storage is a **black box**.~~ Every cold start rebuilds workspace from S3 (source of truth). No caching between sessions.
+
+**Workspace budget: 100MB** (keeps microVM disk lean; not a hard platform limit anymore).
 
 ### 7.2 How Skill Output Works
 
