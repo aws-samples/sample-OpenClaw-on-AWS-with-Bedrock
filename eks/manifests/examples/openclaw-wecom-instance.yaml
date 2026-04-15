@@ -1,14 +1,4 @@
-apiVersion: v1
-kind: Secret
-metadata:
-  name: openclaw-wecom-credentials
-  namespace: openclaw
-type: Opaque
-# Set WeCom secret here
-stringData:
-  WECOM_BOT_ID: ""
-  WECOM_SECRET: ""
----
+# OpenClaw instance with WeCom (企业微信) integration
 apiVersion: openclaw.rocks/v1alpha1
 kind: OpenClawInstance
 metadata:
@@ -27,7 +17,7 @@ spec:
       agents:
         defaults:
           model:
-            primary: amazon-bedrock/us.anthropic.claude-opus-4-6-v1
+            primary: "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
       plugins:
         allow:
           - "wecom-openclaw-plugin"
@@ -49,11 +39,16 @@ spec:
   envFrom:
     - secretRef:
         name: openclaw-wecom-credentials
+        # Create this secret with:
+        # kubectl create secret generic openclaw-wecom-credentials \
+        #   --from-literal=WECOM_BOT_ID=... \
+        #   --from-literal=WECOM_SECRET=... \
+        #   -n openclaw
 
   security:
     rbac:
       serviceAccountAnnotations:
-        eks.amazonaws.com/role-arn: # REPLACE_WITH_BEDROCK_ROLE_ARN
+        eks.amazonaws.com/role-arn: "REPLACE_WITH_BEDROCK_ROLE_ARN"
 
   storage:
     persistence:
