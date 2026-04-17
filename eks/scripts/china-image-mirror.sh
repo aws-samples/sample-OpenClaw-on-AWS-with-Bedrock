@@ -290,6 +290,8 @@ MIRROR_OCI_CHARTS=(
   "oci://ghcr.io/kata-containers/kata-deploy-charts|kata-deploy|3.27.0"
   # LiteLLM (optional: enable_litellm)
   "oci://ghcr.io/berriai|litellm-helm|0.1.812"
+  # Bitnami PostgreSQL (LiteLLM subchart, only needed when enable_db=true)
+  "oci://registry-1.docker.io/bitnamicharts|postgresql|18.5.10"
 )
 
 # HTTPS-repo charts (monitoring, grafana) — uncomment if needed:
