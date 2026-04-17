@@ -1,32 +1,30 @@
 # GitHub Traffic Data
 
-自动收集的 GitHub 仓库访问数据，每天 UTC 1:00 (北京时间 9:00) 更新。
+Auto-collected daily at UTC 1:00 (Beijing 9:00) via GitHub Actions.
 
-## 文件说明
+## Files
 
-- `clones-history.ndjson` — 每行一条 clone 记录，包含 14 天滚动窗口数据
-- `views-history.ndjson` — 每行一条 views 记录
+| File | Format | Content |
+|------|--------|---------|
+| `clones-history.ndjson` | `{"date":"2026-04-15","count":170,"uniques":60}` | Daily clone counts |
+| `views-history.ndjson` | `{"date":"2026-04-15","count":622,"uniques":214}` | Daily page view counts |
+| `stats-history.ndjson` | `{"date":"2026-04-17","stars":389,"forks":118,...}` | Daily repo stats snapshot |
 
-## 数据格式
+## How it works
 
-```json
-{"fetched_at":"2026-03-12","clones":{"count":45,"uniques":23,"clones":[...]}}
-```
+GitHub Traffic API returns a 14-day rolling window with per-day breakdown. The workflow extracts daily entries, deduplicates by date, and appends only new days. This accumulates a permanent history beyond the 14-day API limit.
 
-## 注意
-
-- GitHub Traffic API 只保留最近 14 天数据
-- 本文件通过每日自动 commit 积累历史数据
-- 2026-03-12 之前的数据已丢失（未及时收集）
-
-## 查询示例
+## Query
 
 ```bash
-# 查看总 clone 数
+# Total clones
 cat traffic/clones-history.ndjson | python3 -c "
-import json, sys
+import json,sys
+total=0
 for line in sys.stdin:
-    d = json.loads(line)
-    print(d['fetched_at'], 'clones:', d['clones']['count'], 'uniques:', d['clones']['uniques'])
+    d=json.loads(line)
+    total+=d['count']
+    print(f\"  {d['date']}  {d['count']:4d} clones  {d['uniques']:3d} unique\")
+print(f'Total: {total}')
 "
 ```
