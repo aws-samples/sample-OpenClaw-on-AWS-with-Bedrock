@@ -137,8 +137,4 @@ variable "access_entries" {
   default     = {}
 }
 
-variable "kms_key_admin_roles" {
-  description = "List of IAM Role ARNs for KMS key administration"
-  type        = list(string)
-  default     = []
-}
+# kms_key_admin_roles removed — KMS encryption disabled for workshop

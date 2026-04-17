@@ -23,11 +23,8 @@ module "eks" {
   vpc_id     = var.vpc_id
   subnet_ids = var.subnet_ids
 
-  kms_key_administrators = distinct(concat(
-    ["arn:${var.partition}:iam::${data.aws_caller_identity.current.account_id}:root"],
-    var.kms_key_admin_roles,
-    [data.aws_iam_session_context.current.issuer_arn]
-  ))
+  create_kms_key           = false
+  cluster_encryption_config = {}
 
   cluster_security_group_additional_rules = {
     ingress_nodes_ephemeral_ports_tcp = {
@@ -132,7 +129,7 @@ module "eks" {
 ################################################################################
 
 resource "aws_iam_role" "vpc_cni" {
-  name = "${var.name}-vpc-cni"
+  name_prefix = "${var.name}-vpc-cni-"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -161,7 +158,7 @@ resource "aws_iam_role_policy_attachment" "vpc_cni" {
 ################################################################################
 
 resource "aws_iam_role" "ebs_csi" {
-  name = "${var.name}-ebs-csi-driver"
+  name_prefix = "${var.name}-ebs-csi-"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -190,7 +187,7 @@ resource "aws_iam_role_policy_attachment" "ebs_csi" {
 ################################################################################
 
 resource "aws_iam_role" "efs_csi" {
-  name = "${var.name}-efs-csi-driver"
+  name_prefix = "${var.name}-efs-csi-"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"

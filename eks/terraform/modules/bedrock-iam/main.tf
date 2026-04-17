@@ -73,7 +73,7 @@ module "openclaw_bedrock_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.0"
 
-  role_name = "${var.name}-openclaw-bedrock"
+  role_name_prefix = "${var.name}-bedrock-"
 
   role_policy_arns = {
     bedrock = aws_iam_policy.bedrock_access.arn

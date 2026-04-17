@@ -47,11 +47,7 @@ variable "access_entries" {
   default     = {}
 }
 
-variable "kms_key_admin_roles" {
-  description = "List of ARNs to be added as KMS key administrators"
-  type        = list(string)
-  default     = []
-}
+# kms_key_admin_roles removed — KMS encryption disabled for workshop (create_kms_key = false)
 
 variable "is_china_region" {
   description = "Whether the deployment is in an AWS China region"

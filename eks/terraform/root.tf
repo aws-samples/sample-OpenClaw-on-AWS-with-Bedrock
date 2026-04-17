@@ -45,8 +45,6 @@ module "eks_cluster" {
       }
     }
   })
-  kms_key_admin_roles = var.kms_key_admin_roles
-
   is_china_region = local.is_china_region
   partition       = local.partition
 
