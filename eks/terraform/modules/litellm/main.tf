@@ -157,14 +157,23 @@ resource "helm_release" "litellm" {
     value = var.enable_db ? (var.ecr_host != "" ? "${var.ecr_host}/berriai/litellm-database" : "ghcr.io/berriai/litellm-database") : (var.ecr_host != "" ? "${var.ecr_host}/berriai/litellm" : "ghcr.io/berriai/litellm")
   }
 
+  # db.deployStandalone=false: we deploy PostgreSQL ourselves via helm_release.postgresql
   set {
     name  = "db.deployStandalone"
-    value = var.enable_db ? "true" : "false"
+    value = "false"
   }
 
   set {
     name  = "db.useExisting"
-    value = "false"
+    value = var.enable_db ? "true" : "false"
+  }
+
+  dynamic "set" {
+    for_each = var.enable_db ? [1] : []
+    content {
+      name  = "db.endpoint"
+      value = "litellm-postgresql.${kubernetes_namespace_v1.litellm.metadata[0].name}.svc"
+    }
   }
 
   set {
@@ -175,34 +184,12 @@ resource "helm_release" "litellm" {
   dynamic "set_sensitive" {
     for_each = var.enable_db ? [1] : []
     content {
-      name  = "postgresql.auth.password"
+      name  = "envVars.DATABASE_PASSWORD"
       value = random_password.db_password[0].result
     }
   }
 
-  dynamic "set_sensitive" {
-    for_each = var.enable_db ? [1] : []
-    content {
-      name  = "postgresql.auth.postgres-password"
-      value = random_password.db_admin_password[0].result
-    }
-  }
-
-  dynamic "set" {
-    for_each = var.enable_db ? [1] : []
-    content {
-      name  = "postgresql.primary.persistence.storageClass"
-      value = "ebs-sc"
-    }
-  }
-
-  dynamic "set" {
-    for_each = var.enable_db ? [1] : []
-    content {
-      name  = "global.security.allowInsecureImages"
-      value = "true"
-    }
-  }
+  depends_on = [helm_release.postgresql]
 
   # ------------------------------------------------------------------
   # Default model: Claude Sonnet 4.5 via AWS Bedrock
@@ -239,6 +226,51 @@ resource "helm_release" "litellm" {
   set {
     name  = "serviceMonitor.enabled"
     value = "false"
+  }
+}
+
+################################################################################
+# PostgreSQL (only when enable_db = true)
+# Deployed as a standalone helm_release so the chart source is fully controlled
+# (supports ECR mirror for China). LiteLLM connects via db.useExisting=true.
+################################################################################
+
+resource "helm_release" "postgresql" {
+  count      = var.enable_db ? 1 : 0
+  name       = "litellm-postgresql"
+  repository = var.chart_repository != "" ? "${var.chart_repository}/charts" : "oci://registry-1.docker.io/bitnamicharts"
+  chart      = "postgresql"
+  version    = "18.5.10"
+  namespace  = kubernetes_namespace_v1.litellm.metadata[0].name
+
+  set {
+    name  = "auth.username"
+    value = "litellm"
+  }
+
+  set {
+    name  = "auth.database"
+    value = "litellm"
+  }
+
+  set_sensitive {
+    name  = "auth.password"
+    value = random_password.db_password[0].result
+  }
+
+  set_sensitive {
+    name  = "auth.postgresPassword"
+    value = random_password.db_admin_password[0].result
+  }
+
+  set {
+    name  = "primary.persistence.storageClass"
+    value = "ebs-sc"
+  }
+
+  set {
+    name  = "image.registry"
+    value = var.ecr_host != "" ? var.ecr_host : "docker.io"
   }
 }
 
