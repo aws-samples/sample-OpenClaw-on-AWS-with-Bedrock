@@ -156,10 +156,11 @@ You (WhatsApp/Telegram/Discord)
 You (receive response)
 ```
 
-- **EC2**: Runs OpenClaw gateway (~1GB RAM)
+- **EC2**: Runs OpenClaw gateway (~1GB RAM, c7g.large recommended)
 - **Bedrock**: Model inference via IAM (no API keys)
 - **SSM**: Secure access, no public ports
-- **VPC Endpoints**: Private network to Bedrock (optional, +$22/mo)
+- **VPC Endpoints**: Private network to Bedrock (optional, +$29/mo)
+- **CloudWatch**: Auto-recovery, health monitoring, log shipping (optional, +$4/mo)
 
 ---
 
@@ -188,15 +189,25 @@ Switch models with one CloudFormation parameter — no code changes:
 
 ### Typical Monthly Cost (Light Usage)
 
-| Component | Cost |
-|-----------|------|
-| EC2 (c7g.large, Graviton) | $58 |
-| EBS (30GB gp3) | $2.40 |
-| VPC Endpoints (optional) | $22 |
-| Bedrock (Nova 2 Lite, ~100 conv/day) | $5-8 |
-| **Total** | **$65-90** |
+| Component | Cost | Optional |
+|-----------|------|----------|
+| EC2 (c7g.large, Graviton) | ~$58 | Default |
+| EBS (30GB gp3 x2) | $4.80 | — |
+| VPC Endpoints | $29 | ✅ Disable to save |
+| CloudWatch Monitoring | ~$4 | ✅ Disable to save |
+| Bedrock (Nova 2 Lite, ~100 conv/day) | $5-8 | Pay-per-use |
+| **Total (all options)** | **$96-101** | |
+| **Total (minimal)** | **$63-67** | VPCe + CW off |
 
-> Use `t4g.medium` ($24/mo) to bring total down to ~$31-56 if you don't need the extra CPU headroom.
+> Use `t4g.medium` ($24/mo) or `r7g.medium` ($30/mo, 8GB RAM) to reduce cost.
+
+**Always included at no extra cost:**
+- 2GB swap (prevents OOM crashes)
+- Health check cron (port + HTTP + channel connectivity)
+- OS security patches (unattended-upgrades)
+- IMDSv2 enforcement
+- `openclaw doctor --fix` post-install
+- systemd memory limits (graceful restart before OOM)
 
 ### Save Money
 
@@ -221,12 +232,14 @@ Switch models with one CloudFormation parameter — no code changes:
 
 | Type | Monthly | RAM | Architecture | Use case |
 |------|---------|-----|-------------|----------|
-| t4g.small | $12 | 2GB | Graviton ARM | Personal |
+| t4g.small | $12 | 2GB | Graviton ARM | Personal (minimal) |
 | t4g.medium | $24 | 4GB | Graviton ARM | Small teams |
 | t4g.large | $48 | 8GB | Graviton ARM | Medium teams |
-| **c7g.large** | **$58** | **4GB** | **Graviton ARM** | **Balanced performance (default)** |
-| c7g.xlarge | $108 | 8GB | Graviton ARM | High performance |
-| t3.medium | $30 | 4GB | x86 | x86 compatibility |
+| **c7g.large** | **$58** | **4GB** | **Graviton ARM** | **Recommended (default)** |
+| r7g.medium | $30 | 8GB | Graviton ARM | Memory-optimized alternative |
+| r7g.large | $60 | 16GB | Graviton ARM | Heavy usage / plugins |
+| c7g.large | $58 | 4GB | Graviton ARM | Compute-intensive |
+| r5.large | $91 | 16GB | x86 | x86 + memory |
 
 ### Parameters
 
@@ -234,8 +247,9 @@ Switch models with one CloudFormation parameter — no code changes:
 |-----------|---------|-------------|
 | `OpenClawModel` | Nova 2 Lite | Bedrock model ID |
 | `OpenClawVersion` | 2026.3.24 | `2026.3.24` (default, no model approval needed, WeChat compatible), `2026.4.5` (auto-discovery, embeddings), or `latest` |
-| `InstanceType` | c7g.large | EC2 instance type |
-| `CreateVPCEndpoints` | false | Private networking (+$22/mo) |
+| `InstanceType` | c7g.large | EC2 instance type (compute-optimized, 2 vCPU) |
+| `CreateVPCEndpoints` | false | Private networking (+$29/mo) |
+| `EnableMonitoring` | true | CloudWatch monitoring, auto-recovery, log shipping (+~$4/mo) |
 | `EnableSandbox` | true | Docker isolation for code execution |
 | `EnableDataProtection` | false | Retain EBS volume on stack deletion |
 | `KeyPairName` | none | EC2 key pair (optional, for emergency SSH) |
@@ -365,6 +379,7 @@ Uses SiliconFlow (DeepSeek, Qwen, GLM) instead of Bedrock. Requires a SiliconFlo
 | Layer | What it does |
 |-------|-------------|
 | **IAM Roles** | No API keys — automatic credential rotation |
+| **IMDSv2 Enforced** | Instance metadata requires secure token (no v1 fallback) |
 | **SSM Session Manager** | No public ports, session logging |
 | **VPC Endpoints** | Bedrock traffic stays on private network |
 | **SSM Parameter Store** | Gateway token stored as SecureString, never on disk |
@@ -373,6 +388,33 @@ Uses SiliconFlow (DeepSeek, Qwen, GLM) instead of Bedrock. Requires a SiliconFlo
 | **CloudTrail** | Every Bedrock API call audited |
 
 **[→ Full Security Guide](SECURITY.md)**
+
+---
+
+## Reliability
+
+The stack includes multiple layers of self-healing (always enabled, no extra cost):
+
+| Layer | What it does | Frequency |
+|-------|-------------|----------|
+| **Port health check** | Detects dead gateway process, auto-restarts | Every 5 min |
+| **HTTP health check** | Detects hung/deadlocked gateway, auto-restarts | Every 5 min |
+| **Channel monitoring** | Detects disconnected Telegram/Discord/WhatsApp via `openclaw status`, auto-restarts | Every 30 min |
+| **systemd Restart=always** | Auto-restarts on crash | Immediate |
+| **2GB swap** | Prevents hard OOM kills on low-memory instances | Always on |
+| **systemd MemoryMax** | Graceful restart at 80% memory (before OOM killer) | Always on |
+| **Node.js version pin** | Prevents breakage from bad Node releases (pinned to 22.22.0) | At install |
+| **OS security patches** | Unattended-upgrades for security fixes | Daily |
+| **`openclaw doctor`** | Config validation and auto-repair post-install | At install |
+
+**With `EnableMonitoring=true` (default, +~$4/mo):**
+
+| Layer | What it does |
+|-------|-------------|
+| **EC2 auto-recovery** | Recovers instance on underlying hardware failure |
+| **EC2 reboot alarm** | Reboots on instance status check failure |
+| **CloudWatch metrics** | Memory, disk, swap usage (5-min intervals) |
+| **CloudWatch Logs** | Setup, health check, and update logs shipped to CloudWatch |
 
 ---
 
