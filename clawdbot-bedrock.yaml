@@ -1107,7 +1107,7 @@ Resources:
                           "disk": { "measurement": ["disk_used_percent"], "resources": ["/", "/data"], "metrics_collection_interval": 300 },
                           "swap": { "measurement": ["swap_used_percent"], "metrics_collection_interval": 300 }
                         },
-                        "append_dimensions": { "InstanceId": "$INSTANCE_ID" }
+                        "append_dimensions": { "InstanceId": "${aws:InstanceId}" }
                       },
                       "logs": {
                         "logs_collected": {
