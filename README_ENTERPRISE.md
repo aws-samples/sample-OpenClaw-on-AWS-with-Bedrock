@@ -169,17 +169,17 @@ Every agent uses the same Docker image. Admin chooses deployment mode per positi
 
 ### Screenshots
 
-| Admin Dashboard | Employee Portal + Digital Twin |
+| Admin Dashboard | Agent Factory |
 |:-:|:-:|
-| ![Admin Dashboard](enterprise/demo/images/04-admin-dashboard.jpeg) | ![Portal Chat](enterprise/demo/images/01-portal-chat-permission-denied.jpeg) |
+| ![Dashboard](enterprise/demo/images/new-01-dashboard.png) | ![Agent Factory](enterprise/demo/images/new-02-agent-factory.png) |
 
-| Agent Factory — Configuration | IM Channels — Per-Channel Management |
+| Security Center — 4-Tier Runtime | Employee Portal Chat |
 |:-:|:-:|
-| ![Agent Factory](enterprise/demo/images/03-agent-factory-list.jpeg) | ![SOUL Editor](enterprise/demo/images/05-workspace-manager-soul.jpeg) |
+| ![Security Center](enterprise/demo/images/new-03-security-center.png) | ![Portal Chat](enterprise/demo/images/new-05-portal-chat.png) |
 
-| Usage & Cost — Model Pricing | Security Center — Runtime Management |
+| Usage & Cost | Tools & Skills |
 |:-:|:-:|
-| ![Usage & Cost](enterprise/demo/images/02-usage-cost-dashboard.jpeg) | ![Skill Platform](enterprise/demo/images/08-skill-platform-catalog.jpeg) |
+| ![Usage](enterprise/demo/images/new-04-usage.png) | ![Skills](enterprise/demo/images/new-06-skills.png) |
 
 ---
 
