@@ -1,5 +1,5 @@
 ################################################################################
-# Kata Containers + Karpenter Bare-Metal Autoscaling
+# Kata Containers + gVisor + Karpenter Bare-Metal Autoscaling
 ################################################################################
 
 # --- Kata Namespace -----------------------------------------------------------
@@ -338,4 +338,199 @@ resource "kubectl_manifest" "kata_node_pool" {
   })
 
   depends_on = [kubectl_manifest.kata_node_class]
+}
+
+################################################################################
+# gVisor (runsc) + Karpenter Autoscaling
+################################################################################
+
+# --- gVisor RuntimeClass ------------------------------------------------------
+
+resource "kubectl_manifest" "gvisor_runtime_class" {
+  count = var.enable_gvisor ? 1 : 0
+
+  yaml_body = yamlencode({
+    apiVersion = "node.k8s.io/v1"
+    kind       = "RuntimeClass"
+    metadata = {
+      name = "gvisor"
+    }
+    handler = "runsc"
+    scheduling = {
+      nodeSelector = {
+        "runtime" = "gvisor"
+      }
+      tolerations = [{
+        key      = "gvisor"
+        value    = "true"
+        effect   = "NoSchedule"
+        operator = "Equal"
+      }]
+    }
+  })
+}
+
+# --- Karpenter EC2NodeClass for gVisor Nodes ----------------------------------
+# userData installs runsc + containerd-shim-runsc-v1 and patches containerd
+# config to register the runsc runtime. Works on both x86 and arm64.
+
+resource "kubectl_manifest" "gvisor_node_class" {
+  count = var.enable_gvisor && var.enable_karpenter ? 1 : 0
+
+  yaml_body = <<-YAML
+    apiVersion: karpenter.k8s.aws/v1
+    kind: EC2NodeClass
+    metadata:
+      name: gvisor
+    spec:
+      amiSelectorTerms:
+        - alias: al2023@latest
+      role: ${try(module.karpenter[0].node_iam_role_name, var.node_iam_role_name)}
+      subnetSelectorTerms:
+        - tags:
+            karpenter.sh/discovery: ${var.cluster_name}
+      securityGroupSelectorTerms:
+        - tags:
+            karpenter.sh/discovery: ${var.cluster_name}
+      tags:
+        Name: gvisor-node
+        KarpenterNodeClass: gvisor
+      userData: |
+        MIME-Version: 1.0
+        Content-Type: multipart/mixed; boundary="BOUNDARY"
+
+        --BOUNDARY
+        Content-Type: text/x-shellscript; charset="us-ascii"
+
+        #!/bin/bash
+        # Install gVisor (runsc) for Karpenter-provisioned nodes.
+        # Runs via cloud-init AFTER nodeadm has finished.
+        # Supports both x86_64 and aarch64 architectures.
+        set -eux
+        exec > /var/log/gvisor-install.log 2>&1
+
+        echo "=== gVisor Install ==="
+
+        ARCH=$(uname -m)
+        GVISOR_URL="https://storage.googleapis.com/gvisor/releases/release/latest/$${ARCH}"
+
+        cd /tmp
+        curl -fsSL "$${GVISOR_URL}/runsc" -o runsc
+        curl -fsSL "$${GVISOR_URL}/containerd-shim-runsc-v1" -o containerd-shim-runsc-v1
+        chmod +x runsc containerd-shim-runsc-v1
+        mv runsc /usr/local/bin/
+        mv containerd-shim-runsc-v1 /usr/local/bin/
+
+        # Verify installation
+        /usr/local/bin/runsc --version
+
+        # Wait for containerd to be running (nodeadm starts it)
+        for i in $(seq 1 30); do
+          systemctl is-active containerd && break
+          sleep 1
+        done
+
+        # Patch containerd config to add runsc runtime
+        if ! grep -q runsc /etc/containerd/config.toml; then
+          cat >> /etc/containerd/config.toml << 'EOFCONTAINERD'
+
+        [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc]
+          runtime_type = "io.containerd.runsc.v1"
+        EOFCONTAINERD
+          systemctl restart containerd
+          sleep 3
+          systemctl restart kubelet
+        fi
+
+        echo "=== gVisor Install Complete ==="
+
+        --BOUNDARY
+        Content-Type: application/node.eks.aws
+
+        apiVersion: node.eks.aws/v1alpha1
+        kind: NodeConfig
+        spec:
+          cluster:
+            name: ${var.cluster_name}
+            apiServerEndpoint: ${var.cluster_endpoint}
+            certificateAuthority: ${var.cluster_ca_data}
+            cidr: ${var.vpc_cidr}
+
+        --BOUNDARY--
+  YAML
+
+  depends_on = [helm_release.karpenter]
+}
+
+# --- Karpenter NodePool for gVisor Nodes --------------------------------------
+
+resource "kubectl_manifest" "gvisor_node_pool" {
+  count = var.enable_gvisor && var.enable_karpenter ? 1 : 0
+
+  yaml_body = yamlencode({
+    apiVersion = "karpenter.sh/v1"
+    kind       = "NodePool"
+    metadata = {
+      name = "gvisor"
+    }
+    spec = {
+      template = {
+        metadata = {
+          labels = {
+            "runtime"       = "gvisor"
+            "workload-type" = "gvisor"
+          }
+        }
+        spec = {
+          nodeClassRef = {
+            group = "karpenter.k8s.aws"
+            kind  = "EC2NodeClass"
+            name  = "gvisor"
+          }
+          requirements = [
+            {
+              key      = "kubernetes.io/arch"
+              operator = "In"
+              values   = [var.gvisor_architecture == "arm64" ? "arm64" : "amd64"]
+            },
+            {
+              key      = "karpenter.k8s.aws/instance-category"
+              operator = "In"
+              values   = ["m"]
+            },
+            {
+              key      = "karpenter.k8s.aws/instance-generation"
+              operator = "Gt"
+              values   = ["6"]
+            },
+            {
+              key      = "karpenter.k8s.aws/instance-size"
+              operator = "In"
+              values   = var.gvisor_instance_sizes
+            },
+            {
+              key      = "karpenter.sh/capacity-type"
+              operator = "In"
+              values   = var.gvisor_capacity_types
+            },
+          ]
+          taints = [{
+            key    = "gvisor"
+            value  = "true"
+            effect = "NoSchedule"
+          }]
+        }
+      }
+      limits = {
+        cpu    = tostring(var.gvisor_limits_cpu)
+        memory = "${var.gvisor_limits_memory_gi}Gi"
+      }
+      disruption = {
+        consolidationPolicy = "WhenEmpty"
+        consolidateAfter    = "30m"
+      }
+    }
+  })
+
+  depends_on = [kubectl_manifest.gvisor_node_class]
 }

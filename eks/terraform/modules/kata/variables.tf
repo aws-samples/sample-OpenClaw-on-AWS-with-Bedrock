@@ -116,3 +116,46 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+# --- gVisor -------------------------------------------------------------------
+
+variable "enable_gvisor" {
+  description = "Whether to deploy gVisor (runsc) RuntimeClass and Karpenter NodePool"
+  type        = bool
+  default     = false
+}
+
+variable "gvisor_architecture" {
+  description = "CPU architecture for gVisor nodes (amd64 or arm64)"
+  type        = string
+  default     = "arm64"
+
+  validation {
+    condition     = contains(["amd64", "arm64"], var.gvisor_architecture)
+    error_message = "gvisor_architecture must be one of: amd64, arm64."
+  }
+}
+
+variable "gvisor_instance_sizes" {
+  description = "EC2 instance sizes eligible for gVisor nodes"
+  type        = list(string)
+  default     = ["2xlarge"]
+}
+
+variable "gvisor_capacity_types" {
+  description = "Karpenter capacity types for gVisor nodes (on-demand, spot)"
+  type        = list(string)
+  default     = ["on-demand"]
+}
+
+variable "gvisor_limits_cpu" {
+  description = "Maximum total vCPUs for gVisor NodePool"
+  type        = number
+  default     = 32
+}
+
+variable "gvisor_limits_memory_gi" {
+  description = "Maximum total memory (GiB) for gVisor NodePool"
+  type        = number
+  default     = 128
+}
