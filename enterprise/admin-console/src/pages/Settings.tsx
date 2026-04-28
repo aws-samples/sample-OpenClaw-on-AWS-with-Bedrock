@@ -3,7 +3,7 @@ import {
   User, Globe, MessageSquare, Server,
   Eye, EyeOff, Check, X, RefreshCw, HardDrive,
   Cpu, MemoryStick, Wifi, WifiOff,
-  Terminal, Trash2, RotateCw, Copy, History,
+  Terminal, Trash2, RotateCw, Copy, History, KeyRound,
 } from 'lucide-react';
 import { Card, Badge, Button, PageHeader, Tabs, Select } from '../components/ui';
 import {
@@ -69,7 +69,7 @@ function AccountTab() {
             { label: 'Role', value: 'Administrator' },
             { label: 'Employee ID', value: user?.id || '---' },
             { label: 'Email', value: user?.email || '---' },
-            { label: 'Auth Mode', value: authMode === 'azure' ? 'Microsoft Entra ID' : 'Password' },
+            { label: 'Auth Mode', value: authMode === 'sso' ? 'Single Sign-On (OIDC)' : 'Password' },
           ].map(f => (
             <div key={f.label} className="flex items-center justify-between rounded-xl bg-surface-dim px-4 py-3">
               <span className="text-xs text-text-muted">{f.label}</span>
@@ -79,9 +79,9 @@ function AccountTab() {
         </div>
       </Card>
 
-      {authMode === 'azure' ? (
+      {authMode === 'sso' ? (
         <div className="rounded-xl bg-info/5 border border-info/20 px-4 py-3 text-xs text-info">
-          Authenticated via Microsoft Entra ID. To change your password, visit your organization's Azure AD portal.
+          Authenticated via Single Sign-On (OIDC). To change your password, visit your identity provider's portal.
         </div>
       ) : (
         <Card>
@@ -541,6 +541,211 @@ function SystemTab() {
   );
 }
 
+// ─── SSO Tab ──────────────────────────────────────────────────────────────────
+
+function SsoTab() {
+  const [cfg, setCfg] = useState<any>({
+    enabled: false, issuer: '', clientId: '', scopes: 'openid profile email', autoRedirect: false,
+  });
+  const [testResult, setTestResult] = useState<{ ok: boolean; detail: string } | null>(null);
+  const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+
+  const token = localStorage.getItem('openclaw_token') || '';
+  const authHeader = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  useEffect(() => {
+    fetch('/api/v1/settings/sso', { headers: authHeader })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => setCfg((prev: any) => ({ ...prev, ...data })))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleTest = async () => {
+    if (!cfg.issuer) { setTestResult({ ok: false, detail: 'Fill in Issuer first' }); return; }
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const resp = await fetch('/api/v1/settings/sso/test', {
+        method: 'POST', headers: authHeader,
+        body: JSON.stringify({ issuer: cfg.issuer }),
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        setTestResult({ ok: true, detail: `Reachable. Token endpoint: ${data.tokenEndpoint}` });
+      } else {
+        setTestResult({ ok: false, detail: data.error || 'Unknown error' });
+      }
+    } catch (e: any) {
+      setTestResult({ ok: false, detail: e.message });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaveMsg(null);
+    try {
+      const resp = await fetch('/api/v1/settings/sso', {
+        method: 'PUT', headers: authHeader, body: JSON.stringify(cfg),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || 'Save failed');
+      }
+      const saved = await resp.json();
+      setCfg((prev: any) => ({ ...prev, ...saved }));
+      setSaveMsg({ ok: true, text: 'SSO configuration saved.' });
+    } catch (e: any) {
+      setSaveMsg({ ok: false, text: e.message });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const callbackUrl = `${window.location.origin}/sso/callback`;
+  const initiateUrl = `${window.location.origin}/login`;
+
+  return (
+    <div className="space-y-6 max-w-2xl">
+      <Card>
+        <h3 className="text-sm font-semibold text-text-primary mb-1 flex items-center gap-2">
+          <KeyRound size={16} className="text-primary" /> Single Sign-On (OIDC)
+        </h3>
+        <p className="text-xs text-text-muted mb-5">
+          Connect any OIDC-compatible identity provider: Alibaba Cloud IDaaS, Microsoft Entra ID (Azure AD),
+          Okta, Keycloak, etc. Employees can sign in through your existing IdP without a separate password.
+        </p>
+
+        {/* 必要的回调 URL 提示 */}
+        <div className="rounded-xl bg-surface-dim px-4 py-3 mb-5 space-y-2">
+          <p className="text-xs text-text-muted">When creating the OIDC application in your IdP console, use:</p>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs text-text-muted">Redirect URI</p>
+              <p className="text-xs font-mono text-text-primary truncate">{callbackUrl}</p>
+            </div>
+            <button onClick={() => copyToClipboard(callbackUrl)}
+              className="text-text-muted hover:text-text-primary flex-shrink-0" title="Copy">
+              <Copy size={14} />
+            </button>
+          </div>
+          <div className="flex items-center justify-between gap-2 pt-1 border-t border-dark-border">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs text-text-muted">Initiate Login URI (optional)</p>
+              <p className="text-xs font-mono text-text-primary truncate">{initiateUrl}</p>
+            </div>
+            <button onClick={() => copyToClipboard(initiateUrl)}
+              className="text-text-muted hover:text-text-primary flex-shrink-0" title="Copy">
+              <Copy size={14} />
+            </button>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm text-text-muted mb-1">Issuer URL</label>
+            <input
+              type="text" value={cfg.issuer}
+              onChange={e => setCfg({ ...cfg, issuer: e.target.value })}
+              placeholder="https://xxx.aliyunidaas.com/api/v2/iauths_system/oauth2"
+              className="w-full rounded-lg border border-dark-border bg-dark-bg px-4 py-2.5 text-sm text-text-primary font-mono focus:border-primary focus:outline-none"
+            />
+            <p className="text-xs text-text-muted mt-1">
+              Azure AD example: <span className="font-mono">https://login.microsoftonline.com/{'{tenant_id}'}/v2.0</span>
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm text-text-muted mb-1">Client ID</label>
+            <input
+              type="text" value={cfg.clientId}
+              onChange={e => setCfg({ ...cfg, clientId: e.target.value })}
+              placeholder="app_xxxxxxxxxx"
+              className="w-full rounded-lg border border-dark-border bg-dark-bg px-4 py-2.5 text-sm text-text-primary font-mono focus:border-primary focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm text-text-muted mb-1">Scopes</label>
+            <input
+              type="text" value={cfg.scopes}
+              onChange={e => setCfg({ ...cfg, scopes: e.target.value })}
+              placeholder="openid profile email"
+              className="w-full rounded-lg border border-dark-border bg-dark-bg px-4 py-2.5 text-sm text-text-primary font-mono focus:border-primary focus:outline-none"
+            />
+          </div>
+
+          <label className="flex items-center justify-between rounded-xl bg-surface-dim px-4 py-3 cursor-pointer">
+            <div>
+              <p className="text-sm text-text-primary">Enable SSO</p>
+              <p className="text-xs text-text-muted">Show the "Sign in with SSO" button on the login page.</p>
+            </div>
+            <input type="checkbox" checked={!!cfg.enabled}
+              onChange={e => setCfg({ ...cfg, enabled: e.target.checked })}
+              className="w-4 h-4 accent-primary" />
+          </label>
+
+          <label className="flex items-center justify-between rounded-xl bg-surface-dim px-4 py-3 cursor-pointer">
+            <div>
+              <p className="text-sm text-text-primary">Auto-redirect on login page</p>
+              <p className="text-xs text-text-muted">
+                Automatically trigger SSO login when employees land on <span className="font-mono">/login</span>.
+                Required for IdP-initiated flow (clicking the app icon in IdP workspace).
+              </p>
+            </div>
+            <input type="checkbox" checked={!!cfg.autoRedirect}
+              onChange={e => setCfg({ ...cfg, autoRedirect: e.target.checked })}
+              className="w-4 h-4 accent-primary" />
+          </label>
+        </div>
+
+        {/* 测试连接结果 */}
+        {testResult && (
+          <div className={`mt-4 rounded-lg px-3 py-2 text-sm flex items-start gap-2 ${
+            testResult.ok
+              ? 'bg-success/10 border border-success/20 text-success'
+              : 'bg-danger/10 border border-danger/20 text-danger'
+          }`}>
+            {testResult.ok ? <Check size={16} className="mt-0.5" /> : <X size={16} className="mt-0.5" />}
+            <span className="break-all">{testResult.detail}</span>
+          </div>
+        )}
+
+        {/* 保存结果 */}
+        {saveMsg && (
+          <div className={`mt-4 rounded-lg px-3 py-2 text-sm flex items-start gap-2 ${
+            saveMsg.ok
+              ? 'bg-success/10 border border-success/20 text-success'
+              : 'bg-danger/10 border border-danger/20 text-danger'
+          }`}>
+            {saveMsg.ok ? <Check size={16} className="mt-0.5" /> : <X size={16} className="mt-0.5" />}
+            <span>{saveMsg.text}</span>
+          </div>
+        )}
+
+        <div className="flex gap-3 mt-6">
+          <Button onClick={handleTest} disabled={testing || !cfg.issuer} variant="secondary">
+            {testing ? 'Testing…' : 'Test Connection'}
+          </Button>
+          <Button onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving…' : 'Save'}
+          </Button>
+        </div>
+
+        {cfg.updatedAt && (
+          <p className="text-xs text-text-muted mt-4">
+            Last updated by <span className="font-medium">{cfg.updatedBy}</span> at {new Date(cfg.updatedAt).toLocaleString()}
+          </p>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -560,6 +765,7 @@ export default function Settings() {
           { id: 'fargate', label: 'Fargate' },
           { id: 'interface', label: 'Interface' },
           { id: 'system', label: 'System' },
+          { id: 'sso', label: 'SSO' },
         ]}
         activeTab={tab}
         onChange={setTab}
@@ -601,6 +807,7 @@ export default function Settings() {
           </div>
         )}
         {tab === 'system' && <SystemTab />}
+        {tab === 'sso' && <SsoTab />}
       </div>
     </div>
   );

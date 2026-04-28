@@ -1,8 +1,12 @@
 """
-Authentication module for OpenClaw Enterprise.
-Supports two auth modes:
-  1. Azure AD (RS256) — validated via JWKS, employee looked up by email
-  2. Local JWT (HS256) — self-signed, employee ID in token payload
+统一认证模块。
+
+支持两类 token:
+  1. 通用 OIDC id_token (RS256) —— 任意符合 OIDC 标准的 IdP（阿里云 IDaaS /
+     Azure AD / Okta / Keycloak 等），配置存 DynamoDB `CONFIG#sso`。
+  2. 本地 HS256 JWT —— employeeId + password 登录后自签，存 localStorage。
+
+中间件通过 JWT header 的 `alg` 字段自动分流。
 """
 import os
 import time
@@ -11,39 +15,30 @@ import hmac
 import json
 import base64
 import logging
-from typing import Optional
+import threading
+from typing import Optional, Dict, Tuple
 from dataclasses import dataclass
 
+import httpx
 import jwt
 from jwt import PyJWKClient
 
 logger = logging.getLogger(__name__)
 
-# ── Azure AD configuration ───────────────────────────────────────────────────
-AZURE_TENANT_ID = os.environ.get("AZURE_TENANT_ID", "")
-AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID", "")
-
-_AZURE_ENABLED = bool(AZURE_TENANT_ID and AZURE_CLIENT_ID)
-if not _AZURE_ENABLED:
-    logger.warning("AZURE_TENANT_ID / AZURE_CLIENT_ID not set — Azure AD login disabled")
-
-_JWKS_URI = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/discovery/v2.0/keys"
-_ISSUER = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/v2.0"
-_jwks_client: Optional[PyJWKClient] = None
-
-
-def _get_jwks_client() -> PyJWKClient:
-    global _jwks_client
-    if _jwks_client is None:
-        _jwks_client = PyJWKClient(_JWKS_URI, cache_keys=True, lifespan=3600)
-    return _jwks_client
-
-
-# ── Local JWT configuration ──────────────────────────────────────────────────
+# ── 本地 JWT 配置 ────────────────────────────────────────────────────────────
 JWT_SECRET = os.environ.get("JWT_SECRET", "")
 if not JWT_SECRET:
     JWT_SECRET = "dev-only-" + hashlib.sha256(os.urandom(16)).hexdigest()[:32]
 JWT_EXPIRY_HOURS = 24
+
+# ── OIDC 配置缓存 (60 秒内存缓存,Settings 保存后主动清除) ──────────────────────
+_SSO_CONFIG_TTL = 60
+_sso_config_cache: Dict[str, object] = {"ts": 0.0, "value": None}
+_sso_cache_lock = threading.Lock()
+
+# ── JWKS 客户端缓存 (按 issuer 隔离,1 小时由 PyJWKClient 内置管理) ──────────────
+_jwks_clients: Dict[str, PyJWKClient] = {}
+_jwks_lock = threading.Lock()
 
 
 @dataclass
@@ -57,89 +52,7 @@ class UserContext:
     must_change_password: bool = False
 
 
-# ── Token detection ──────────────────────────────────────────────────────────
-
-def _peek_alg(token: str) -> str:
-    """Read the 'alg' from a JWT header without verifying."""
-    try:
-        header_b64 = token.split(".")[0]
-        padding = 4 - len(header_b64) % 4
-        if padding != 4:
-            header_b64 += "=" * padding
-        header = json.loads(base64.urlsafe_b64decode(header_b64))
-        return header.get("alg", "")
-    except Exception:
-        return ""
-
-
-# ── Azure AD token verification ──────────────────────────────────────────────
-
-def _verify_azure_token(token: str) -> Optional[dict]:
-    """Verify an Azure AD RS256 token and return decoded claims."""
-    if not _AZURE_ENABLED:
-        return None
-    try:
-        signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
-        claims = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=["RS256"],
-            audience=AZURE_CLIENT_ID,
-            issuer=_ISSUER,
-            options={"require": ["exp", "iss", "aud", "sub"]},
-        )
-        return claims
-    except jwt.ExpiredSignatureError:
-        logger.warning("Azure AD token expired")
-        return None
-    except jwt.InvalidTokenError as e:
-        logger.warning("Azure AD token invalid: %s", e)
-        return None
-    except Exception as e:
-        logger.warning("Azure AD token verification failed: %s", e)
-        return None
-
-
-def _user_from_azure_claims(claims: dict) -> Optional[UserContext]:
-    """Map Azure AD claims to a UserContext via DynamoDB email lookup."""
-    email = (
-        claims.get("email")
-        or claims.get("preferred_username")
-        or claims.get("upn")
-        or ""
-    )
-    if not email:
-        logger.warning("Azure AD token has no email/preferred_username claim")
-        return None
-
-    import db
-    emp = db.get_employee_by_email(email)
-
-    # Fallback: extract original email from #EXT# UPN
-    if not emp and "#EXT#" in email:
-        local_part = email.split("#EXT#")[0]
-        last_underscore = local_part.rfind("_")
-        if last_underscore > 0:
-            original_email = local_part[:last_underscore] + "@" + local_part[last_underscore + 1:]
-            emp = db.get_employee_by_email(original_email)
-            if emp:
-                email = original_email
-
-    if not emp:
-        logger.warning("No employee found for Azure AD email: %s", email)
-        return None
-
-    return UserContext(
-        employee_id=emp["id"],
-        name=emp.get("name", claims.get("name", "")),
-        role=emp.get("role", "employee"),
-        department_id=emp.get("departmentId", ""),
-        position_id=emp.get("positionId", ""),
-        email=email,
-    )
-
-
-# ── Local JWT creation / verification ────────────────────────────────────────
+# ── 通用工具 ─────────────────────────────────────────────────────────────────
 
 def _b64encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
@@ -152,8 +65,144 @@ def _b64decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s)
 
 
+def _peek_alg(token: str) -> str:
+    """不验签读取 JWT header 里的 alg 字段,用于分流。"""
+    try:
+        header_b64 = token.split(".")[0]
+        header = json.loads(_b64decode(header_b64))
+        return header.get("alg", "")
+    except Exception:
+        return ""
+
+
+# ── OIDC 配置读取 ────────────────────────────────────────────────────────────
+
+def _get_sso_config() -> Optional[dict]:
+    """从 DynamoDB 读 CONFIG#sso,60 秒内存缓存。"""
+    now = time.time()
+    with _sso_cache_lock:
+        ts = _sso_config_cache["ts"]
+        if isinstance(ts, (int, float)) and now - ts < _SSO_CONFIG_TTL:
+            return _sso_config_cache["value"]  # type: ignore[return-value]
+
+    try:
+        import db
+        cfg = db.get_config("sso")
+    except Exception as e:
+        logger.warning("Read CONFIG#sso failed: %s", e)
+        cfg = None
+
+    with _sso_cache_lock:
+        _sso_config_cache["ts"] = now
+        _sso_config_cache["value"] = cfg
+    return cfg
+
+
+def clear_sso_config_cache() -> None:
+    """Settings PUT 成功后调用,强制下次请求重新读取。"""
+    with _sso_cache_lock:
+        _sso_config_cache["ts"] = 0.0
+        _sso_config_cache["value"] = None
+    with _jwks_lock:
+        _jwks_clients.clear()
+    logger.info("SSO config and JWKS caches cleared")
+
+
+def _get_oidc_jwks_client(issuer: str) -> Optional[PyJWKClient]:
+    """按 issuer 缓存 PyJWKClient。首次调用会拉 .well-known 发现 jwks_uri。"""
+    with _jwks_lock:
+        cached = _jwks_clients.get(issuer)
+        if cached is not None:
+            return cached
+
+    try:
+        disco_url = issuer.rstrip("/") + "/.well-known/openid-configuration"
+        resp = httpx.get(disco_url, timeout=5.0)
+        resp.raise_for_status()
+        jwks_uri = resp.json().get("jwks_uri")
+        if not jwks_uri:
+            logger.warning("OIDC discovery has no jwks_uri: %s", disco_url)
+            return None
+        client = PyJWKClient(jwks_uri, cache_keys=True, lifespan=3600)
+    except Exception as e:
+        logger.warning("Fetch OIDC discovery failed issuer=%s: %s", issuer, e)
+        return None
+
+    with _jwks_lock:
+        _jwks_clients[issuer] = client
+    return client
+
+
+# ── OIDC token 验证 ──────────────────────────────────────────────────────────
+
+def _verify_oidc_token(token: str) -> Optional[dict]:
+    """用 DynamoDB 里配置的 issuer/clientId 验 RS256 id_token。"""
+    cfg = _get_sso_config()
+    if not cfg or not cfg.get("enabled"):
+        return None
+
+    issuer = cfg.get("issuer", "")
+    client_id = cfg.get("clientId", "")
+    if not issuer or not client_id:
+        logger.warning("CONFIG#sso missing issuer or clientId")
+        return None
+
+    jwks = _get_oidc_jwks_client(issuer)
+    if not jwks:
+        return None
+
+    try:
+        signing_key = jwks.get_signing_key_from_jwt(token)
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=client_id,
+            issuer=issuer,
+            options={"require": ["exp", "iss", "aud", "sub"]},
+        )
+        return claims
+    except jwt.ExpiredSignatureError:
+        logger.info("OIDC token expired")
+    except jwt.InvalidTokenError as e:
+        logger.warning("OIDC token invalid: %s", e)
+    except Exception as e:
+        logger.warning("OIDC token verification failed: %s", e)
+    return None
+
+
+def _user_from_oidc_claims(claims: dict) -> Optional[UserContext]:
+    """按 email claim 在 DynamoDB 查找员工。"""
+    email = (
+        claims.get("email")
+        or claims.get("preferred_username")
+        or claims.get("upn")
+        or ""
+    ).strip()
+    if not email:
+        logger.warning("OIDC token has no email/preferred_username/upn claim")
+        return None
+
+    import db
+    emp = db.get_employee_by_email(email)
+    if not emp:
+        logger.warning("No employee matches OIDC email: %s", email)
+        return None
+
+    return UserContext(
+        employee_id=emp["id"],
+        name=emp.get("name", claims.get("name", "")),
+        role=emp.get("role", "employee"),
+        department_id=emp.get("departmentId", ""),
+        position_id=emp.get("positionId", ""),
+        email=email,
+    )
+
+
+# ── 本地 JWT 签发与验证 ──────────────────────────────────────────────────────
+
 def create_token(employee: dict, must_change_password: bool = False) -> str:
-    """Create a local HS256 JWT from an employee record."""
+    """employeeId + password 登录成功后签发本地 HS256 JWT。"""
     header = _b64encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
     payload_data = {
         "sub": employee.get("id", ""),
@@ -165,20 +214,23 @@ def create_token(employee: dict, must_change_password: bool = False) -> str:
         "exp": int(time.time()) + JWT_EXPIRY_HOURS * 3600,
     }
     payload = _b64encode(json.dumps(payload_data).encode())
-    signature = hmac.new(JWT_SECRET.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest()
+    signature = hmac.new(
+        JWT_SECRET.encode(), f"{header}.{payload}".encode(), hashlib.sha256
+    ).digest()
     sig = _b64encode(signature)
     return f"{header}.{payload}.{sig}"
 
 
 def _verify_local_token(token: str) -> Optional[UserContext]:
-    """Verify a local HS256 JWT and return UserContext."""
     try:
         parts = token.split(".")
         if len(parts) != 3:
             return None
         header, payload, sig = parts
 
-        expected = hmac.new(JWT_SECRET.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest()
+        expected = hmac.new(
+            JWT_SECRET.encode(), f"{header}.{payload}".encode(), hashlib.sha256
+        ).digest()
         actual = _b64decode(sig)
         if not hmac.compare_digest(expected, actual):
             return None
@@ -199,11 +251,10 @@ def _verify_local_token(token: str) -> Optional[UserContext]:
         return None
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── 对外入口 ─────────────────────────────────────────────────────────────────
 
 def get_user_from_request(authorization: str = "") -> Optional[UserContext]:
-    """Extract user from Authorization header. Auto-detects token type:
-    RS256 → Azure AD, HS256 → local JWT."""
+    """从 Authorization header 提取用户上下文。按 alg 自动分流: RS256 → OIDC,HS256 → 本地。"""
     if not authorization:
         return None
     token = authorization.replace("Bearer ", "").strip()
@@ -213,10 +264,10 @@ def get_user_from_request(authorization: str = "") -> Optional[UserContext]:
     alg = _peek_alg(token)
 
     if alg == "RS256":
-        claims = _verify_azure_token(token)
+        claims = _verify_oidc_token(token)
         if not claims:
             return None
-        return _user_from_azure_claims(claims)
-    else:
-        # HS256 or unknown → try local JWT
-        return _verify_local_token(token)
+        return _user_from_oidc_claims(claims)
+
+    # 其余情况(HS256 或未知)尝试作为本地 token
+    return _verify_local_token(token)

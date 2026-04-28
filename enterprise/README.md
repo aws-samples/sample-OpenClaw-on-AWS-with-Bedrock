@@ -27,7 +27,7 @@ Then follow Steps 4-6 in [README_ENTERPRISE.md](../README_ENTERPRISE.md) to depl
 | Test plan (62+ cases) | [TESTING.md](TESTING.md) |
 | Deployment script | [deploy.sh](deploy.sh) |
 | Environment config | [.env.example](.env.example) |
-| Azure AD SSO setup | [AZURE_AD_SETUP.md](AZURE_AD_SETUP.md) |
+| OIDC SSO setup | [docs/OIDC_SSO_SETUP.md](docs/OIDC_SSO_SETUP.md) |
 
 ## Architecture
 
