@@ -110,7 +110,8 @@ function AppRoutes() {
       {/* Catch-all */}
       {/* Public route — no authentication required */}
       <Route path="/twin/:token" element={<TwinChat />} />
-      <Route path="/sso/callback" element={<SsoCallback />} />
+      {/* SSO success landing page — backend /api/v1/auth/sso/callback redirects here */}
+      <Route path="/login/sso-success" element={<SsoCallback />} />
 
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>

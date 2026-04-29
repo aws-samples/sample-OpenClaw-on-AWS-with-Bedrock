@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { getSsoConfig } from '../config/oidcClient';
 import { AlertCircle, LogIn, KeyRound } from 'lucide-react';
 import ClawForgeLogo from '../components/ClawForgeLogo';
 
@@ -18,19 +17,33 @@ export default function Login() {
   const [ssoChecked, setSsoChecked] = useState(false);
   const autoTriggered = useRef(false);
 
-  // Callback 页可能带 error query 回到 /login,显示给用户
+  // 处理后端回调带的 error 参数,显示给用户
   useEffect(() => {
     const err = searchParams.get('error');
-    if (err === 'email_not_found') {
-      const email = searchParams.get('email') || '';
-      setError(
-        email
-          ? `SSO 登录成功,但未找到邮箱为 ${email} 的员工。请联系管理员。`
-          : 'SSO 登录成功,但未找到对应员工。请联系管理员。'
-      );
-    } else if (err === 'sso_failed') {
-      setError('SSO 登录失败。请重试或使用密码登录。');
-    }
+    if (!err) return;
+
+    const emailParam = searchParams.get('email') || '';
+    const idpErr = searchParams.get('idp_error') || '';
+    const messages: Record<string, string> = {
+      sso_disabled: 'SSO is not enabled. Contact your administrator.',
+      sso_misconfigured: 'SSO is misconfigured. Contact your administrator.',
+      idp_unreachable: 'Identity provider is unreachable. Please try again later.',
+      missing_params: 'SSO callback missing required parameters.',
+      session_expired: 'SSO session expired. Please try again.',
+      state_mismatch: 'Security check failed. Please try logging in again.',
+      token_exchange_failed: 'Failed to exchange authorization code. Check IdP configuration.',
+      no_id_token: 'Identity provider did not return an id_token.',
+      id_token_invalid: 'Identity token signature or claims invalid.',
+      email_not_found: emailParam
+        ? `SSO 登录成功,但未找到邮箱为 ${emailParam} 的员工。请联系管理员。`
+        : 'SSO succeeded but no matching employee found.',
+      idp_error: idpErr
+        ? `Identity provider returned error: ${idpErr}`
+        : 'Identity provider reported an error.',
+      no_token: 'SSO callback missing token.',
+      invalid_token: 'SSO token is malformed.',
+    };
+    setError(messages[err] || `SSO error: ${err}`);
   }, [searchParams]);
 
   // 已登录自动跳走
@@ -43,14 +56,14 @@ export default function Login() {
   // 拉公开 SSO 配置,决定是否显示按钮 + 是否自动触发
   useEffect(() => {
     let cancelled = false;
-    getSsoConfig()
+    fetch('/api/v1/public/sso/config')
+      .then(r => r.ok ? r.json() : Promise.reject())
       .then(cfg => {
         if (cancelled) return;
         const enabled = !!cfg?.enabled;
         setSsoEnabled(enabled);
         setSsoChecked(true);
         // IdP-Initiated: URL 带 ?sso=idp 参数时自动触发 SSO
-        // (通过 IdP 应用配置的 initiate_login_uri=https://.../login?sso=idp 触发)
         const idpInitiated = searchParams.get('sso') === 'idp';
         if (
           enabled &&
@@ -69,15 +82,11 @@ export default function Login() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleSsoLogin = async () => {
+  const handleSsoLogin = () => {
     setSsoLoading(true);
     setError('');
-    try {
-      await loginWithSso();
-    } catch (e: any) {
-      setError(e.message || 'SSO sign-in failed');
-      setSsoLoading(false);
-    }
+    loginWithSso();
+    // 注意: loginWithSso 会整页跳转到后端 /api/v1/auth/sso/login,此处无需 await
   };
 
   const handlePasswordLogin = async () => {
@@ -120,7 +129,6 @@ export default function Login() {
             </div>
           )}
 
-          {/* SSO 登录按钮 (配置启用时显示) */}
           {ssoEnabled && (
             <>
               <button
@@ -143,7 +151,6 @@ export default function Login() {
             </>
           )}
 
-          {/* 本地密码登录 */}
           <div className="space-y-4">
             <div>
               <label className="block text-sm text-text-muted mb-1">Employee ID</label>

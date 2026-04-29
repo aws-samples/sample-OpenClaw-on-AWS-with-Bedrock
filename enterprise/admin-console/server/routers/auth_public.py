@@ -16,13 +16,12 @@ router = APIRouter(prefix="/api/v1/public", tags=["public"])
 
 @router.get("/sso/config")
 def get_sso_public_config():
-    """返回前端所需的 SSO 公开配置 (不含任何机密字段)。"""
+    """返回前端所需的 SSO 公开信息 (极简,所有 OAuth 细节都在后端)。
+    BFF 模式下,前端只需要知道 enabled 是否开启,以便决定是否渲染 SSO 按钮。
+    """
     cfg = db.get_config("sso") or {}
     payload = {
         "enabled": bool(cfg.get("enabled")),
-        "issuer": cfg.get("issuer", ""),
-        "clientId": cfg.get("clientId", ""),
-        "scopes": cfg.get("scopes", "openid profile email"),
     }
     return JSONResponse(
         content=payload,

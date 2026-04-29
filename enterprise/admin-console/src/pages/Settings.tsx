@@ -545,7 +545,7 @@ function SystemTab() {
 
 function SsoTab() {
   const [cfg, setCfg] = useState<any>({
-    enabled: false, issuer: '', clientId: '',
+    enabled: false, issuer: '', clientId: '', clientSecret: '',
     scopes: 'openid profile email',
     autoCreateEnabled: true, defaultPositionId: '', defaultRole: 'employee',
   });
@@ -614,7 +614,7 @@ function SsoTab() {
     }
   };
 
-  const callbackUrl = `${window.location.origin}/sso/callback`;
+  const callbackUrl = `${window.location.origin}/api/v1/auth/sso/callback`;
   const initiateUrl = `${window.location.origin}/login?sso=idp`;
 
   return (
@@ -675,6 +675,20 @@ function SsoTab() {
               placeholder="app_xxxxxxxxxx"
               className="w-full rounded-lg border border-dark-border bg-dark-bg px-4 py-2.5 text-sm text-text-primary font-mono focus:border-primary focus:outline-none"
             />
+          </div>
+
+          <div>
+            <label className="block text-sm text-text-muted mb-1">Client Secret</label>
+            <input
+              type="password"
+              value={cfg.clientSecret || ''}
+              onChange={e => setCfg({ ...cfg, clientSecret: e.target.value })}
+              placeholder={cfg.clientSecret === '***' ? '••• (already set, paste new value to change)' : 'Paste IdP client secret'}
+              className="w-full rounded-lg border border-dark-border bg-dark-bg px-4 py-2.5 text-sm text-text-primary font-mono focus:border-primary focus:outline-none"
+            />
+            <p className="text-xs text-text-muted mt-1">
+              Generated in your IdP console when creating the OIDC application. Leave as <span className="font-mono">***</span> to keep the existing value unchanged.
+            </p>
           </div>
 
           <div>

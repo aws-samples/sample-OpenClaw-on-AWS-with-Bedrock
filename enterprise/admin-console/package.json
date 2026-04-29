@@ -14,7 +14,6 @@
     "apexcharts": "^5.10.4",
     "clsx": "^2.1.1",
     "lucide-react": "^0.577.0",
-    "oidc-client-ts": "^3.1.0",
     "react": "^19.0.0",
     "react-apexcharts": "^2.1.0",
     "react-dom": "^19.0.0",

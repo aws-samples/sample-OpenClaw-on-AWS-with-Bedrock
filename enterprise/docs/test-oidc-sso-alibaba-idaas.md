@@ -52,8 +52,8 @@ https://eiam.aliyun.com/
 在应用详情页 → **登录访问** / **SSO 配置**:
 
 1. **协议类型** 选 **OIDC**
-2. **客户端类型** 选 **应用端公共客户端**(Public Client)
-   > 一定不要选"Web 应用机密客户端",否则会要求 client_secret
+2. **客户端类型** 选 **应用端机密客户端**(Confidential Client)
+   > BFF 架构要求 Confidential Client,OpenClaw 后端用 client_secret 鉴权
 3. **授权模式** 勾选 `authorization_code`
 4. **PKCE** 勾选(强制启用,方法选 `S256`)
 5. **Token 签名算法** 选 `RS256`(默认)
@@ -63,7 +63,7 @@ https://eiam.aliyun.com/
 从 OpenClaw 管理后台 **Settings → SSO tab** 复制以下两个 URL:
 
 ```
-Redirect URI:         https://portal.example.com/sso/callback
+Redirect URI:         https://portal.example.com/api/v1/auth/sso/callback
 Initiate Login URI:   https://portal.example.com/login?sso=idp
 ```
 
@@ -71,10 +71,14 @@ Initiate Login URI:   https://portal.example.com/login?sso=idp
 
 - **登录回调地址 / Redirect URI**:填上面第一个
   > 必须**完全一致**(协议、域名、端口、路径、尾斜杠)
+  > 注意这是后端路径 `/api/v1/auth/sso/callback`,不是前端 `/sso/callback`
 - **登录发起地址 / Initiate Login URI**:填上面第二个
   > 可选,但**IdP-Initiated 流程必需**
 - **登出回调地址 / Post Logout Redirect URI**(可选):
   填 `https://portal.example.com/login`
+
+记得**复制 Client Secret**,后面填到 OpenClaw Settings 里。
+Secret 通常只在创建时显示一次,丢了要重新生成。
 
 ### 1.5 配置 Scope
 
@@ -174,7 +178,7 @@ https://portal.example.com/login
 | 1 | 点击 **Sign in with SSO** 按钮 | 浏览器跳到 IDaaS 登录页 | [ ] |
 | 2 | URL 里包含 `client_id=app_xxx` `code_challenge=xxx` `state=xxx` | 说明 PKCE 生效 | [ ] |
 | 3 | 在 IDaaS 登录页输入 `测试员工 A` 的账号密码 | 登录成功 | [ ] |
-| 4 | 浏览器自动回到 `/sso/callback?code=...&state=...` | 短暂显示 loading | [ ] |
+| 4 | 浏览器自动回到 `/api/v1/auth/sso/callback?code=...&state=...` (后端端点) | 后端处理完 302 到 `/login/sso-success` | [ ] |
 | 5 | 最终落到 `/portal` 或 `/dashboard`(按 role) | 已登录员工身份 | [ ] |
 | 6 | 右上角显示 `测试员工 A` 的姓名 | 姓名来自 DynamoDB | [ ] |
 | 7 | **Settings → Account tab** 里 `Auth Mode` 显示 `Single Sign-On (OIDC)` | 确认是 SSO 登录 | [ ] |
@@ -223,7 +227,7 @@ https://portal.example.com/login
 |---|---|---|---|
 | 1 | 退出登录,点 **Sign in with SSO** | | [ ] |
 | 2 | 用 `临时员工 B` 账号在 IDaaS 登录 | | [ ] |
-| 3 | 回调到 `/sso/callback`,然后跳回 `/login` | | [ ] |
+| 3 | 后端 `/api/v1/auth/sso/callback` 处理后,302 到 `/login?error=email_not_found&email=xxx` | | [ ] |
 | 4 | 页面顶部红色错误框显示:`SSO 登录成功,但未找到邮箱为 t**b@example.com 的员工。请联系管理员。` | 邮箱能看到完整 | [ ] |
 
 ### 3.5 测试场景 5:本地密码登录仍然可用(兜底)
@@ -318,8 +322,9 @@ https://portal.example.com/login
 
 **排查**:
 1. 浏览器开发者工具 → Network → 找到跳转到 IDaaS 的请求,看 URL 里的 `redirect_uri=...` 参数
-2. IDaaS 应用配置里"登录回调地址"是否**完全一致**(含 `https://`、域名、`/sso/callback`)
-3. 特别注意**尾斜杠**:`/sso/callback` ≠ `/sso/callback/`
+2. IDaaS 应用配置里"登录回调地址"是否**完全一致**(含 `https://`、域名、`/api/v1/auth/sso/callback`)
+3. 特别注意**尾斜杠**:`/api/v1/auth/sso/callback` ≠ `/api/v1/auth/sso/callback/`
+4. 注意路径必须是后端 `/api/v1/auth/sso/callback`(不是前端 `/sso/callback`)
 
 ### 4.2 "SSO 登录成功,但未找到邮箱为 xxx 的员工"
 

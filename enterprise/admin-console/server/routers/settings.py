@@ -818,13 +818,15 @@ def restart_service(body: dict, authorization: str = Header(default="")):
 
 @router.get("/api/v1/settings/sso")
 def get_sso_config(authorization: str = Header(default="")):
-    """读取当前 SSO 配置。"""
+    """读取当前 SSO 配置。clientSecret 脱敏返回 (已设置则返回 '***',未设置返回空)。"""
     require_role(authorization, roles=["admin"])
     cfg = db.get_config("sso") or {}
+    has_secret = bool(cfg.get("clientSecret"))
     return {
         "enabled": bool(cfg.get("enabled")),
         "issuer": cfg.get("issuer", ""),
         "clientId": cfg.get("clientId", ""),
+        "clientSecret": "***" if has_secret else "",
         "scopes": cfg.get("scopes", "openid profile email"),
         "autoCreateEnabled": bool(cfg.get("autoCreateEnabled", True)),
         "defaultPositionId": cfg.get("defaultPositionId", ""),
@@ -836,21 +838,38 @@ def get_sso_config(authorization: str = Header(default="")):
 
 @router.put("/api/v1/settings/sso")
 def update_sso_config(body: dict, authorization: str = Header(default="")):
-    """保存 SSO 配置,同时清除后端验证缓存。"""
+    """保存 SSO 配置,同时清除后端验证缓存。
+
+    clientSecret 的特殊处理: 如果前端传入 '***' 或空串,保留现有值不动。
+    只有传入非 '***' 的具体值才更新。
+    """
     user = require_role(authorization, roles=["admin"])
 
     issuer = (body.get("issuer") or "").strip()
     client_id = (body.get("clientId") or "").strip()
+    client_secret_input = body.get("clientSecret", "")
     scopes = (body.get("scopes") or "openid profile email").strip()
     enabled = bool(body.get("enabled"))
     auto_create_enabled = bool(body.get("autoCreateEnabled", True))
     default_position_id = (body.get("defaultPositionId") or "").strip()
     default_role = (body.get("defaultRole") or "employee").strip()
 
-    # 基础校验: 启用状态下 issuer 和 clientId 不能空
+    # 读现有配置 (用于保留 clientSecret 的情况)
+    existing = db.get_config("sso") or {}
+    existing_secret = existing.get("clientSecret", "")
+
+    # clientSecret 保留策略: 空串或 '***' → 保留旧值(存量不丢);否则采用新值
+    if not client_secret_input or client_secret_input == "***":
+        client_secret = existing_secret
+    else:
+        client_secret = client_secret_input.strip()
+
+    # 基础校验: 启用状态下 issuer/clientId/clientSecret 不能空
     if enabled:
         if not issuer or not client_id:
             raise HTTPException(400, "issuer and clientId are required when SSO is enabled")
+        if not client_secret:
+            raise HTTPException(400, "clientSecret is required when SSO is enabled")
         if not issuer.startswith("https://") and not issuer.startswith("http://localhost"):
             raise HTTPException(400, "issuer must be HTTPS (only localhost allowed for HTTP)")
 
@@ -867,6 +886,7 @@ def update_sso_config(body: dict, authorization: str = Header(default="")):
         "enabled": enabled,
         "issuer": issuer,
         "clientId": client_id,
+        "clientSecret": client_secret,
         "scopes": scopes,
         "autoCreateEnabled": auto_create_enabled,
         "defaultPositionId": default_position_id,
@@ -876,10 +896,15 @@ def update_sso_config(body: dict, authorization: str = Header(default="")):
     }
     db.set_config("sso", cfg)
 
-    # 保存后主动清除 auth.py 的 OIDC 配置和 JWKS 缓存
+    # 保存后主动清除 auth.py 的 OIDC 配置和 JWKS 缓存 + auth_sso 的 discovery 缓存
     try:
         import auth as authmod
         authmod.clear_sso_config_cache()
+    except Exception:
+        pass
+    try:
+        from routers.auth_sso import clear_discovery_cache
+        clear_discovery_cache()
     except Exception:
         pass
 

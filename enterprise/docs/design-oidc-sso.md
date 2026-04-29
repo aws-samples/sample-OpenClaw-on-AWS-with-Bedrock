@@ -635,9 +635,80 @@ enterprise/docs/
 
 ---
 
-## 11. 附录
+## 11. Phase 3: BFF 架构重构 (2026-04-29)
 
-### 11.1 术语
+### 11.1 动机
+
+Phase 1 和 Phase 2 采用 **SPA + PKCE 前端直通模式**(基于 `oidc-client-ts`),
+前端直接和 IdP 交互换 token,后端只做验签。这在 Azure AD 下能工作,但真实
+部署到阿里云 IDaaS 时发现两个根本性问题:
+
+1. **CORS 限制** — 阿里云 IDaaS 的 `.well-known/openid-configuration` 和
+   `/token` 端点都不设置 `Access-Control-Allow-Origin`,浏览器 fetch 失败。
+   这是大多数企业 IdP 的默认行为(OIDC 规范不要求 CORS)。
+2. **客户端类型限制** — 阿里云 IDaaS 默认创建 Confidential Client,
+   `token_endpoint_auth_methods_supported` 不支持 `none`(PKCE-only),
+   强制要求 `client_secret_basic`。
+
+### 11.2 决策:全面转向 BFF 模式
+
+BFF (Backend-for-Frontend) 即所有 OAuth 交互由后端完成,浏览器只在最开始
+点登录按钮时跳一次,最后拿本地 JWT。这是 RFC 9700 (OAuth 2.0 Security Best
+Current Practice, 2024) 推荐的企业 SSO 主流做法。
+
+**关键变化**:
+
+| 维度 | SPA+PKCE (Phase 1-2) | BFF (Phase 3) |
+|---|---|---|
+| 客户端类型 | Public Client | Confidential Client |
+| client_secret | 不用 | **必需**,存 DynamoDB |
+| code→token 交换 | 浏览器 fetch | 后端 httpx |
+| 前端 OIDC 库 | `oidc-client-ts` | **移除** |
+| state/PKCE 存储 | browser sessionStorage | 后端 HttpOnly Cookie |
+| IdP 需要 CORS 配置 | 需要 | **不需要** |
+| Redirect URI | `/sso/callback` (前端) | `/api/v1/auth/sso/callback` (后端) |
+
+### 11.3 实施
+
+**新增后端**:
+
+- `routers/auth_sso.py` — `/login` + `/callback` 两个端点,封装完整 OAuth 流程
+- `_exchange_code_for_token` 用 `client_secret_basic` 鉴权 + PKCE verifier
+- `_origin()` 多层降级策略(`?origin=` 参数 → `portalUrl` 配置 →
+  `X-Forwarded-Host` → `Host` header),解决 CloudFront/ALB 反向代理下的
+  Host header 不一致问题
+
+**删除前端**:
+
+- `config/oidcClient.ts` 整个文件删除
+- `package.json` 移除 `oidc-client-ts`
+- `AuthContext.tsx` 大幅简化,只保留本地 JWT 管理
+- `Login.tsx` SSO 按钮改为直接 `window.location.href = '/api/v1/auth/sso/login?origin=...'`
+
+**新增 Settings 字段**:
+
+- `clientSecret` (password 输入,GET 时返回 `***` 脱敏)
+- 保存时"空值或 `***`"策略保留旧 secret,避免误清
+
+### 11.4 被否决的方案(留档)
+
+- **保留 Public Client 选项** — 曾短暂加过 `clientType` 下拉(Confidential/Public),
+  但 Azure AD 的 SPA platform 限制使得 Public+BFF 天然不兼容(AADSTS9002327:
+  "SPA client-type may only be redeemed via cross-origin requests")。
+  且 95% 企业 IdP 使用 Confidential 模式,保留 Public 选项只会误导用户。
+  最终**移除 Client Type 下拉**,BFF 模式只支持 Confidential Client。
+
+### 11.5 3.2 节 "核心设计决策" 表的更新说明
+
+Phase 1 表格里 "客户端类型 = Public Client + PKCE" 的决策在 Phase 3 被
+**翻转为 Confidential Client + PKCE**。其它决策(email 匹配键、DynamoDB
+配置存储、本地 JWT 兜底)不变。
+
+---
+
+## 12. 附录
+
+### 12.1 术语
 
 | 术语 | 说明 |
 |---|---|
@@ -651,7 +722,7 @@ enterprise/docs/
 | JWKS | JSON Web Key Set，IdP 发布的公钥集合，用于验 RS256 签名 |
 | id_token | OIDC 定义的用户身份令牌，JWT 格式，IdP 签名 |
 
-### 11.2 参考
+### 12.2 参考
 
 - [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html)
 - [RFC 6749 - OAuth 2.0](https://tools.ietf.org/html/rfc6749)
@@ -660,7 +731,7 @@ enterprise/docs/
 - [oidc-client-ts 文档](https://github.com/authts/oidc-client-ts)
 - [阿里云 IDaaS OIDC 集成文档](https://help.aliyun.com/zh/idaas/developer-reference/api-eiam-2021-12-01-oauth2-oidc-api/)
 
-### 11.3 演进历史
+### 12.3 演进历史
 
 | 方案 | 评估结果 |
 |---|---|
@@ -669,4 +740,5 @@ enterprise/docs/
 | C: 邮箱命名规则反解 | ❌ 脆弱，有重名/误绑风险 |
 | D: 按 email 统一映射，env 存配置 | ⚠️ env 改动要重启 + 重新构建 |
 | D+: 双路由分流 Azure/IDaaS | ⚠️ 保留历史包袱 |
-| **D+1: 完全通用 OIDC，Settings 配置** | ✅ 最终采用 |
+| D+1: 完全通用 OIDC，Settings 配置(SPA+PKCE) | ⚠️ Phase 1-2 采用,阿里 IDaaS CORS 问题暴露 |
+| **Phase 3: BFF 重构(Confidential Client)** | ✅ 最终采用,通吃所有企业 IdP |
