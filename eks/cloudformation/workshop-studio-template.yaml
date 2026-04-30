@@ -266,7 +266,7 @@ Resources:
               commands:
                 - echo "=== Installing Terraform ${TerraformVersion} ==="
                 - ARCH=$(uname -m | sed 's/aarch64/arm64/' | sed 's/x86_64/amd64/')
-                - curl -fsSL "https://releases.hashicorp.com/terraform/${TerraformVersion}/terraform_${TerraformVersion}_linux_$${ARCH}.zip" -o /tmp/terraform.zip
+                - curl -fsSL "https://releases.hashicorp.com/terraform/${TerraformVersion}/terraform_${TerraformVersion}_linux_${!ARCH}.zip" -o /tmp/terraform.zip
                 - unzip -q /tmp/terraform.zip -d /usr/local/bin/ && rm /tmp/terraform.zip
                 - terraform version
             pre_build:
@@ -970,7 +970,7 @@ Resources:
                 - ARCH_ALT=$(uname -m | sed 's/aarch64/arm64/' | sed 's/x86_64/amd64/')
                 - echo "=== Installing kubectl ==="
                 - !Sub |
-                  curl -fsSL "https://dl.k8s.io/release/v1.35.0/bin/linux/$${ARCH}/kubectl" -o /usr/local/bin/kubectl
+                  curl -fsSL "https://dl.k8s.io/release/v1.35.0/bin/linux/${!ARCH}/kubectl" -o /usr/local/bin/kubectl
                   chmod +x /usr/local/bin/kubectl
                   kubectl version --client
                 - echo "=== Installing helm ==="
@@ -978,7 +978,7 @@ Resources:
                 - helm version --short
                 - echo "=== Installing terraform ==="
                 - !Sub |
-                  curl -fsSL "https://releases.hashicorp.com/terraform/${TerraformVersion}/terraform_${TerraformVersion}_linux_$${ARCH}.zip" -o /tmp/terraform.zip
+                  curl -fsSL "https://releases.hashicorp.com/terraform/${TerraformVersion}/terraform_${TerraformVersion}_linux_${!ARCH}.zip" -o /tmp/terraform.zip
                   unzip -q /tmp/terraform.zip -d /usr/local/bin/ && rm /tmp/terraform.zip
                   terraform version
                 - echo "=== Installing eksctl ==="
