@@ -54,7 +54,7 @@ echo ">>> Phase 2: Building admin console frontend..."
 # create root-owned files that the ubuntu user can't manage later.
 ADMIN_CONSOLE_DIR="$(pwd)/enterprise/admin-console"
 chown -R ubuntu:ubuntu "$ADMIN_CONSOLE_DIR"
-su - ubuntu -c "source /home/ubuntu/.nvm/nvm.sh && cd '$ADMIN_CONSOLE_DIR' && npm install --no-audit --no-fund && VITE_AZURE_CLIENT_ID='${AZURE_CLIENT_ID:-}' VITE_AZURE_TENANT_ID='${AZURE_TENANT_ID:-}' npx vite build"
+su - ubuntu -c "source /home/ubuntu/.nvm/nvm.sh && cd '$ADMIN_CONSOLE_DIR' && npm install --no-audit --no-fund && npx vite build"
 
 # ── Phase 3: Set up Python venv ──────────────────────────────────────────────
 

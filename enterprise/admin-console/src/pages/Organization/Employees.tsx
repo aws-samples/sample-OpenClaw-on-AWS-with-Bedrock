@@ -61,6 +61,7 @@ export default function Employees() {
   const [showCreate, setShowCreate] = useState(false);
   const [selected, setSelected] = useState<Employee | null>(null);
   const [newName, setNewName] = useState('');
+  const [newEmail, setNewEmail] = useState('');
   const [newNo, setNewNo] = useState('');
   const [newPos, setNewPos] = useState('');
   const [newChannels, setNewChannels] = useState<string[]>(['slack']);
@@ -243,7 +244,7 @@ export default function Employees() {
                 <div>
                   <h2 className="text-lg font-semibold text-text-primary">{selected.name}</h2>
                   <p className="text-sm text-text-secondary">{selected.positionName} · {selected.departmentName}</p>
-                  <p className="text-xs text-text-muted">{selected.employeeNo}</p>
+                  <p className="text-xs text-text-muted">{selected.employeeNo}{selected.email ? ` · ${selected.email}` : ''}</p>
                 </div>
               </div>
 
@@ -374,10 +375,10 @@ export default function Employees() {
       {/* Edit Employee Modal */}
       <Modal open={!!editingEmp} title={editingEmp ? `Edit: ${editingEmp.name}` : ''} onClose={() => setEditingEmp(null)} footer={
         <><Button variant="ghost" onClick={() => setEditingEmp(null)}>Cancel</Button>
-        <Button variant="primary" disabled={updateEmployee.isPending} onClick={() => {
+        <Button variant="primary" disabled={updateEmployee.isPending || !editingEmp?.name?.trim()} onClick={() => {
           if (!editingEmp) return;
           const pos = POSITIONS.find(p => p.id === editingEmp.positionId);
-          updateEmployee.mutate({ id: editingEmp.id, name: editingEmp.name, positionId: editingEmp.positionId,
+          updateEmployee.mutate({ id: editingEmp.id, name: editingEmp.name, email: editingEmp.email, positionId: editingEmp.positionId,
             positionName: pos?.name || editingEmp.positionName, departmentId: pos?.departmentId || editingEmp.departmentId,
             departmentName: pos?.departmentName || editingEmp.departmentName, channels: editingEmp.channels, role: editingEmp.role },
             { onSuccess: () => setEditingEmp(null) });
@@ -385,6 +386,9 @@ export default function Employees() {
       }>
         {editingEmp && <div className="space-y-4">
           <Input label="Name" value={editingEmp.name} onChange={v => setEditingEmp({ ...editingEmp, name: v })} />
+          <Input label="Email (optional)" value={editingEmp.email || ''} onChange={v => setEditingEmp({ ...editingEmp, email: v })}
+            placeholder="jane.doe@company.com" />
+          <p className="text-[10px] text-text-muted -mt-2">Required for SSO login — must match the identity in your IdP. Leave empty for non-SSO employees.</p>
           <Select label="Position" value={editingEmp.positionId} onChange={v => {
             const pos = POSITIONS.find(p => p.id === v);
             setEditingEmp({ ...editingEmp, positionId: v, positionName: pos?.name || '', departmentId: pos?.departmentId || '', departmentName: pos?.departmentName || '' });
@@ -477,21 +481,23 @@ export default function Employees() {
       {/* Create Modal */}
       <Modal
         open={showCreate} onClose={() => setShowCreate(false)} title="Add Employee"
-        footer={<div className="flex justify-end gap-3"><Button variant="default" onClick={() => setShowCreate(false)}>Cancel</Button><Button variant="primary" onClick={() => {
+        footer={<div className="flex justify-end gap-3"><Button variant="default" onClick={() => setShowCreate(false)}>Cancel</Button><Button variant="primary" disabled={!newName.trim() || !newPos} onClick={() => {
           if (newName && newPos) {
             const pos = POSITIONS.find(p => p.id === newPos);
             createEmployee.mutate({
-              name: newName, employeeNo: newNo || `EMP-${Date.now()}`,
+              name: newName, email: newEmail.trim() || undefined, employeeNo: newNo || `EMP-${Date.now()}`,
               positionId: newPos, positionName: pos?.name || '',
               departmentId: pos?.departmentId || '', departmentName: pos?.departmentName || '',
               channels: newChannels, agentId: null, agentStatus: 'idle',
             } as any);
           }
-          setShowCreate(false); setNewName(''); setNewNo(''); setNewPos(''); setNewChannels(['slack']);
+          setShowCreate(false); setNewName(''); setNewEmail(''); setNewNo(''); setNewPos(''); setNewChannels(['slack']);
         }}>Add & Auto-Provision</Button></div>}
       >
         <div className="space-y-4">
           <Input label="Name" value={newName} onChange={setNewName} />
+          <Input label="Email (optional)" value={newEmail} onChange={setNewEmail} placeholder="jane.doe@company.com" />
+          <p className="text-[10px] text-text-muted -mt-2">Required for SSO login — must match the identity in your IdP. Leave empty for non-SSO employees.</p>
           <Input label="Employee No" value={newNo} onChange={setNewNo} placeholder="EMP-022" />
           <Select label="Position" value={newPos} onChange={setNewPos} options={posOptions} placeholder="Select position" />
           <div>

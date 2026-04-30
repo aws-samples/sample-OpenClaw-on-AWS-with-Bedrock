@@ -87,8 +87,11 @@ def seed(table_name: str, region: str):
         ("emp-peter",  "Peter Wu",      "EMP-031", "pos-exec",  "Executive",                   "dept-eng",          "Engineering",       ["discord"],           "agent-exec-peter", "active"),
     ]
     for eid, name, eno, pid, pname, did, dname, chs, aid, ast in employees:
+        # 按 {id去prefix}@acme.com 规则自动生成 demo 邮箱,用于 SSO 登录 email 匹配
+        email = f"{eid.removeprefix('emp-')}@acme.com"
         item = {"PK": ORG, "SK": f"EMP#{eid}", "GSI1PK": "TYPE#emp", "GSI1SK": f"EMP#{eid}",
-            "id": eid, "name": name, "employeeNo": eno, "positionId": pid, "positionName": pname,
+            "id": eid, "name": name, "employeeNo": eno, "email": email,
+            "positionId": pid, "positionName": pname,
             "departmentId": did, "departmentName": dname, "channels": chs, "agentStatus": ast, "createdAt": "2026-01-20T00:00:00Z"}
         if aid:
             item["agentId"] = aid

@@ -809,3 +809,137 @@ def restart_service(body: dict, authorization: str = Header(default="")):
         return {"restarted": True, "service": service}
     except Exception as e:
         raise HTTPException(500, str(e))
+
+# =========================================================================
+# SSO (通用 OIDC) 配置
+# =========================================================================
+# 管理员在 Settings → SSO tab 填写 IdP 应用信息,存 DynamoDB CONFIG#sso。
+# 前端不经此端点拉取 (那是 /public/sso/config),此处仅供管理员管理。
+
+@router.get("/api/v1/settings/sso")
+def get_sso_config(authorization: str = Header(default="")):
+    """读取当前 SSO 配置。clientSecret 脱敏返回 (已设置则返回 '***',未设置返回空)。"""
+    require_role(authorization, roles=["admin"])
+    cfg = db.get_config("sso") or {}
+    has_secret = bool(cfg.get("clientSecret"))
+    return {
+        "enabled": bool(cfg.get("enabled")),
+        "issuer": cfg.get("issuer", ""),
+        "clientId": cfg.get("clientId", ""),
+        "clientSecret": "***" if has_secret else "",
+        "scopes": cfg.get("scopes", "openid profile email"),
+        "autoCreateEnabled": bool(cfg.get("autoCreateEnabled", True)),
+        "defaultPositionId": cfg.get("defaultPositionId", ""),
+        "defaultRole": cfg.get("defaultRole", "employee"),
+        "updatedAt": cfg.get("updatedAt", ""),
+        "updatedBy": cfg.get("updatedBy", ""),
+    }
+
+
+@router.put("/api/v1/settings/sso")
+def update_sso_config(body: dict, authorization: str = Header(default="")):
+    """保存 SSO 配置,同时清除后端验证缓存。
+
+    clientSecret 的特殊处理: 如果前端传入 '***' 或空串,保留现有值不动。
+    只有传入非 '***' 的具体值才更新。
+    """
+    user = require_role(authorization, roles=["admin"])
+
+    issuer = (body.get("issuer") or "").strip()
+    client_id = (body.get("clientId") or "").strip()
+    client_secret_input = body.get("clientSecret", "")
+    scopes = (body.get("scopes") or "openid profile email").strip()
+    enabled = bool(body.get("enabled"))
+    auto_create_enabled = bool(body.get("autoCreateEnabled", True))
+    default_position_id = (body.get("defaultPositionId") or "").strip()
+    default_role = (body.get("defaultRole") or "employee").strip()
+
+    # 读现有配置 (用于保留 clientSecret 的情况)
+    existing = db.get_config("sso") or {}
+    existing_secret = existing.get("clientSecret", "")
+
+    # clientSecret 保留策略: 空串或 '***' → 保留旧值(存量不丢);否则采用新值
+    if not client_secret_input or client_secret_input == "***":
+        client_secret = existing_secret
+    else:
+        client_secret = client_secret_input.strip()
+
+    # 基础校验: 启用状态下 issuer/clientId/clientSecret 不能空
+    if enabled:
+        if not issuer or not client_id:
+            raise HTTPException(400, "issuer and clientId are required when SSO is enabled")
+        if not client_secret:
+            raise HTTPException(400, "clientSecret is required when SSO is enabled")
+        if not issuer.startswith("https://") and not issuer.startswith("http://localhost"):
+            raise HTTPException(400, "issuer must be HTTPS (only localhost allowed for HTTP)")
+
+    # Auto-create 启用时需要合法的 defaultPositionId 和 defaultRole
+    if enabled and auto_create_enabled:
+        if not default_position_id:
+            raise HTTPException(400, "defaultPositionId is required when auto-create is enabled")
+        if not db.get_position(default_position_id):
+            raise HTTPException(400, f"defaultPositionId '{default_position_id}' not found")
+        if default_role not in ("employee", "manager", "admin"):
+            raise HTTPException(400, "defaultRole must be one of: employee, manager, admin")
+
+    cfg = {
+        "enabled": enabled,
+        "issuer": issuer,
+        "clientId": client_id,
+        "clientSecret": client_secret,
+        "scopes": scopes,
+        "autoCreateEnabled": auto_create_enabled,
+        "defaultPositionId": default_position_id,
+        "defaultRole": default_role,
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+        "updatedBy": user.employee_id,
+    }
+    db.set_config("sso", cfg)
+
+    # 保存后主动清除 auth.py 的 OIDC 配置和 JWKS 缓存 + auth_sso 的 discovery 缓存
+    try:
+        import auth as authmod
+        authmod.clear_sso_config_cache()
+    except Exception:
+        pass
+    try:
+        from routers.auth_sso import clear_discovery_cache
+        clear_discovery_cache()
+    except Exception:
+        pass
+
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change",
+        "actorId": user.employee_id, "actorName": user.name,
+        "targetType": "sso_config", "targetId": "CONFIG#sso",
+        "detail": f"Updated SSO config: enabled={enabled}, issuer={issuer[:60]}",
+        "status": "success",
+    })
+    return cfg
+
+
+@router.post("/api/v1/settings/sso/test")
+def test_sso_connection(body: dict, authorization: str = Header(default="")):
+    """测试 Issuer 是否可达 (拉 .well-known/openid-configuration)。"""
+    require_role(authorization, roles=["admin"])
+    issuer = (body.get("issuer") or "").strip().rstrip("/")
+    if not issuer:
+        raise HTTPException(400, "issuer is required")
+
+    import httpx
+    try:
+        resp = httpx.get(f"{issuer}/.well-known/openid-configuration", timeout=5.0)
+        resp.raise_for_status()
+        doc = resp.json()
+        return {
+            "ok": True,
+            "authorizationEndpoint": doc.get("authorization_endpoint", ""),
+            "tokenEndpoint": doc.get("token_endpoint", ""),
+            "jwksUri": doc.get("jwks_uri", ""),
+            "scopesSupported": doc.get("scopes_supported", []),
+        }
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": f"HTTP error: {e}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

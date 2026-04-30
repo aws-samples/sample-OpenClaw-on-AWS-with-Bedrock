@@ -8,6 +8,7 @@ import ClawForgeLogo from './components/ClawForgeLogo';
 
 // Pages
 import Login from './pages/Login';
+import SsoCallback from './pages/SsoCallback';
 import Dashboard from './pages/Dashboard';
 import DeptTree from './pages/Organization/DeptTree';
 import Positions from './pages/Organization/Positions';
@@ -109,6 +110,8 @@ function AppRoutes() {
       {/* Catch-all */}
       {/* Public route — no authentication required */}
       <Route path="/twin/:token" element={<TwinChat />} />
+      {/* SSO success landing page — backend /api/v1/auth/sso/callback redirects here */}
+      <Route path="/login/sso-success" element={<SsoCallback />} />
 
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>

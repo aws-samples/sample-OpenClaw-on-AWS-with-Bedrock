@@ -1,7 +1,6 @@
-import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
-import { useMsal, useIsAuthenticated } from '@azure/msal-react';
-import { InteractionStatus } from '@azure/msal-browser';
-import { tokenRequest } from '../config/msalConfig';
+import {
+  createContext, useContext, useState, useEffect, useCallback, ReactNode,
+} from 'react';
 
 export interface AuthUser {
   id: string;
@@ -17,13 +16,13 @@ export interface AuthUser {
   mustChangePassword?: boolean;
 }
 
-type AuthMode = 'azure' | 'local' | null;
+type AuthMode = 'sso' | 'local' | null;
 
 interface AuthContextType {
   user: AuthUser | null;
   loading: boolean;
   authMode: AuthMode;
-  loginWithMicrosoft: () => Promise<void>;
+  loginWithSso: () => void;
   loginWithPassword: (employeeId: string, password: string) => Promise<void>;
   logout: () => void;
   updateToken: (newToken: string) => void;
@@ -35,110 +34,84 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType>({
   user: null, loading: true, authMode: null,
-  loginWithMicrosoft: async () => {}, loginWithPassword: async () => {},
-  logout: () => {}, updateToken: () => {},
+  loginWithSso: () => {},
+  loginWithPassword: async () => {},
+  logout: () => {},
+  updateToken: () => {},
   getAccessToken: async () => null,
   isAdmin: false, isManager: false, isEmployee: false,
 });
 
 export function useAuth() { return useContext(AuthContext); }
 
+async function fetchMe(token: string): Promise<AuthUser | null> {
+  try {
+    const resp = await fetch('/api/v1/auth/me', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (resp.ok) return await resp.json() as AuthUser;
+  } catch { /* ignore */ }
+  return null;
+}
+
+/**
+ * 尝试从 JWT payload 的 "iss" 字段判断它是 SSO 登录得到的还是密码登录得到的。
+ * 目前后端签发的本地 JWT 不带 "iss"(兼容旧行为),所以此处用 "ssoLogin" 标记兜底。
+ *
+ * 两种登录最终都是同一把 HS256 JWT,只是 authMode 显示语义不同 (Settings/Account tab)。
+ * 所以这里的判断结果不影响任何安全边界,只是 UI 展示语义。
+ */
+function detectAuthMode(): AuthMode {
+  const marker = localStorage.getItem('openclaw_auth_mode');
+  if (marker === 'sso' || marker === 'local') return marker;
+  return 'local';  // 默认语义 (密码登录是历史基线)
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const { instance, accounts, inProgress } = useMsal();
-  const isMsalAuthenticated = useIsAuthenticated();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [authMode, setAuthMode] = useState<AuthMode>(null);
 
-  // ── Azure AD token acquisition ────────────────────────────────────────
-  const getAzureToken = useCallback(async (): Promise<string | null> => {
-    if (accounts.length === 0) return null;
-    try {
-      const response = await instance.acquireTokenSilent({
-        ...tokenRequest,
-        account: accounts[0],
-      });
-      return response.idToken;
-    } catch {
-      try {
-        const response = await instance.acquireTokenPopup(tokenRequest);
-        return response.idToken;
-      } catch {
-        return null;
-      }
-    }
-  }, [instance, accounts]);
-
-  // ── Unified token getter (used by api/client.ts) ─────────────────────
   const getAccessToken = useCallback(async (): Promise<string | null> => {
-    if (authMode === 'azure') {
-      return getAzureToken();
-    }
-    // Local JWT — read from localStorage
     return localStorage.getItem('openclaw_token');
-  }, [authMode, getAzureToken]);
+  }, []);
 
-  // Expose globally for the API client
   useEffect(() => {
     (window as any).__openclaw_getToken = getAccessToken;
     return () => { delete (window as any).__openclaw_getToken; };
   }, [getAccessToken]);
 
-  // ── Fetch user profile from backend ───────────────────────────────────
-  const fetchMe = useCallback(async (token: string): Promise<AuthUser | null> => {
-    try {
-      const resp = await fetch('/api/v1/auth/me', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (resp.ok) return await resp.json() as AuthUser;
-    } catch { /* ignore */ }
-    return null;
-  }, []);
-
-  // ── Restore session: check Azure AD first, then localStorage ──────────
   useEffect(() => {
-    if (inProgress !== InteractionStatus.None) return;
-
     let cancelled = false;
     (async () => {
-      // Try Azure AD
-      if (isMsalAuthenticated && accounts.length > 0) {
-        const token = await getAzureToken();
-        if (token && !cancelled) {
-          const me = await fetchMe(token);
-          if (me && !cancelled) {
-            setUser(me);
-            setAuthMode('azure');
-            setLoading(false);
-            return;
-          }
-        }
-      }
-
-      // Try local JWT
       const saved = localStorage.getItem('openclaw_token');
-      if (saved && !cancelled) {
+      if (saved) {
         const me = await fetchMe(saved);
         if (me && !cancelled) {
           setUser(me);
-          setAuthMode('local');
+          setAuthMode(detectAuthMode());
           setLoading(false);
           return;
         }
         localStorage.removeItem('openclaw_token');
+        localStorage.removeItem('openclaw_auth_mode');
       }
-
       if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [isMsalAuthenticated, accounts, inProgress, getAzureToken, fetchMe]);
+  }, []);
 
-  // ── Login: Microsoft ──────────────────────────────────────────────────
-  const loginWithMicrosoft = async () => {
-    await instance.loginRedirect(tokenRequest);
+  /** SSO 登录 — 浏览器直接跳转到后端,由后端完成 OAuth 流程后带本地 JWT 回来
+   *
+   * 传 ?origin= 参数给后端,是为了在 CloudFront/ALB 等反向代理场景下确保
+   * redirect_uri 使用浏览器实际可达的域名(而不是后端猜测出来的内部域名)。
+   */
+  const loginWithSso = () => {
+    localStorage.setItem('openclaw_auth_mode', 'sso');
+    const origin = encodeURIComponent(window.location.origin);
+    window.location.href = `/api/v1/auth/sso/login?origin=${origin}`;
   };
 
-  // ── Login: Password ───────────────────────────────────────────────────
   const loginWithPassword = async (employeeId: string, password: string) => {
     const resp = await fetch('/api/v1/auth/login', {
       method: 'POST',
@@ -151,11 +124,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     const data = await resp.json();
     localStorage.setItem('openclaw_token', data.token);
+    localStorage.setItem('openclaw_auth_mode', 'local');
     setUser({ ...data.employee as AuthUser, mustChangePassword: data.mustChangePassword ?? false });
     setAuthMode('local');
   };
 
-  // ── Update token (after password change) ──────────────────────────────
   const updateToken = (newToken: string) => {
     localStorage.setItem('openclaw_token', newToken);
     try {
@@ -164,21 +137,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch { /* ignore */ }
   };
 
-  // ── Logout ────────────────────────────────────────────────────────────
   const logout = () => {
+    localStorage.removeItem('openclaw_token');
+    localStorage.removeItem('openclaw_auth_mode');
     setUser(null);
-    if (authMode === 'azure') {
-      setAuthMode(null);
-      instance.logoutRedirect({ postLogoutRedirectUri: window.location.origin });
-    } else {
-      localStorage.removeItem('openclaw_token');
-      setAuthMode(null);
-    }
+    setAuthMode(null);
+    window.location.href = '/login';
   };
 
   return (
     <AuthContext.Provider value={{
-      user, loading, authMode, loginWithMicrosoft, loginWithPassword,
+      user, loading, authMode,
+      loginWithSso, loginWithPassword,
       logout, updateToken, getAccessToken,
       isAdmin: user?.role === 'admin',
       isManager: user?.role === 'manager',

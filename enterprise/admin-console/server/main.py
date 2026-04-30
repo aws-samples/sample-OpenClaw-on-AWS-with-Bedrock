@@ -47,6 +47,8 @@ app.add_middleware(CORSMiddleware, allow_origins=_ALLOWED_ORIGINS, allow_methods
 
 _AUTH_PUBLIC_PATHS = {
     "/api/v1/auth/login",
+    "/api/v1/auth/sso/login",
+    "/api/v1/auth/sso/callback",
     "/api/v1/bindings/pair-pending",
     "/api/v1/bindings/pair-complete",
 }
@@ -123,6 +125,8 @@ from routers.admin_im import router as _admin_im_router
 from routers.admin_ai import router as _admin_ai_router
 from routers.admin_always_on import router as _admin_always_on_router
 from routers.twin import router as _twin_router
+from routers.auth_public import router as _auth_public_router
+from routers.auth_sso import router as _auth_sso_router
 
 app.include_router(_gateway_proxy_router)
 app.include_router(_org_router)
@@ -140,6 +144,8 @@ app.include_router(_admin_im_router)
 app.include_router(_admin_ai_router)
 app.include_router(_admin_always_on_router)
 app.include_router(_twin_router)
+app.include_router(_auth_public_router)
+app.include_router(_auth_sso_router)
 
 # =========================================================================
 # Auth — Login + change password + current user

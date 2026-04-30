@@ -19,6 +19,41 @@ from shared import (
 router = APIRouter(prefix="/api/v1/org", tags=["org"])
 
 
+# ── Email 校验(用于员工 CRUD,SSO 登录匹配键) ────────────────────────────────
+import re as _re
+_EMAIL_RE = _re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+
+def _validate_email_field(body: dict, exclude_emp_id: str | None = None) -> None:
+    """
+    Email 是可选的;但如果 body 里有 email 字段,必须合法且在组织内唯一。
+    成功时将 email 规范化为小写写回 body。
+
+    exclude_emp_id: 更新场景下,传入当前被更新员工的 id,允许其保留自己的 email
+                    不被判为重复。
+    """
+    if "email" not in body:
+        return
+    email_raw = body.get("email")
+    if email_raw is None:
+        return
+    email = str(email_raw).strip().lower()
+    if not email:
+        # 允许 PUT 清空 email(员工不再做 SSO 登录)
+        body["email"] = ""
+        return
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(400, f"email format is invalid: {email}")
+    # 唯一性检查
+    existing = db.get_employee_by_email(email)
+    if existing and existing.get("id") != exclude_emp_id:
+        raise HTTPException(
+            409,
+            f"email '{email}' is already used by employee {existing.get('id')}",
+        )
+    body["email"] = email  # 规范化为小写
+
+
 def _get_current_user(authorization: str):
     """Extract current user, returns None if not authenticated."""
     try:
@@ -150,7 +185,11 @@ def get_employees(authorization: str = Header(default="")):
 @router.post("/employees")
 def create_employee(body: dict):
     """Create or update an employee. Auto-provisions agent + bindings if
-    the employee has a positionId but no agentId (new hire flow)."""
+    the employee has a positionId but no agentId (new hire flow).
+
+    Email is optional but,if provided,必须合法且在组织内唯一(用于 SSO 登录匹配)。
+    """
+    _validate_email_field(body, exclude_emp_id=None)
     body.setdefault("mustChangePassword", True)
     result = db.create_employee(body)
     if body.get("positionId") and not body.get("agentId"):
@@ -170,6 +209,7 @@ def update_employee(emp_id: str, body: dict, authorization: str = Header(default
     require_role(authorization, roles=["admin"])
     body.pop("id", None)
     body.pop("passwordHash", None)
+    _validate_email_field(body, exclude_emp_id=emp_id)
 
     # Detect position change — if employee has always-on, warn about restart needed
     old_emp = db.get_employee(emp_id)
