@@ -14,13 +14,11 @@ Metadata:
           - OpenClawModel
           - OpenClawVersion
           - InstanceType
-          - KeyPairName
       - Label:
           default: "Network Configuration"
         Parameters:
           - CreateVPCEndpoints
           - EnableMonitoring
-          - AllowedSSHCIDR
 
 Parameters:
   OpenClawModel:
@@ -65,16 +63,6 @@ Parameters:
       - "r5.large"
       - "r5.xlarge"
 
-  KeyPairName:
-    Type: String
-    Default: "none"
-    Description: "EC2 key pair for emergency SSH access (optional - set to 'none' to skip)"
-
-  AllowedSSHCIDR:
-    Type: String
-    Default: ""
-    Description: "CIDR for SSH access (optional - leave empty for no inbound rules. SSM Session Manager is used for access. If SSH is needed, set to your IP/32 - find your IP at checkip.amazonaws.com)"
-
   CreateVPCEndpoints:
     Type: String
     Default: "true"
@@ -90,12 +78,13 @@ Parameters:
 
   OpenClawVersion:
     Type: String
-    Default: "2026.3.24"
+    Default: "2026.4.27"
     AllowedValues:
       - "2026.3.24"
       - "2026.4.5"
+      - "2026.4.27"
       - "latest"
-    Description: "OpenClaw version. 2026.3.24 (default, no model approval needed, WeChat compatible). 2026.4.5+ (auto-discovery, embeddings)."
+    Description: "OpenClaw version. 2026.3.24 (no model approval needed, WeChat compatible). 2026.4.5+ (auto-discovery, embeddings)."
 
   EnableMonitoring:
     Type: String
@@ -113,12 +102,37 @@ Parameters:
       - "true"
       - "false"
 
+  EnablePublicAccess:
+    Type: String
+    Default: "false"
+    Description: "Enable public access via ALB + CloudFront"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  EnableWAF:
+    Type: String
+    Default: "true"
+    Description: "Enable AWS WAF for CloudFront (Layer 7 DDoS protection, SQL injection, XSS). WAF must be created in us-east-1."
+    AllowedValues:
+      - "true"
+      - "false"
+
+  AllowedCountries:
+    Type: CommaDelimitedList
+    Default: "AU"
+    Description: "IMPORTANT: Default restricts CloudFront access to Australia (AU) only. Change before deployment to add other countries (e.g., AU,US,CN,GB,JP) or leave empty to allow all countries. ISO 3166-1 alpha-2 codes."
+
 Conditions:
   CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
-  HasKeyPair: !Not [!Equals [!Ref KeyPairName, "none"]]
-  AllowSSH: !And
-    - !Not [!Equals [!Ref AllowedSSHCIDR, ""]]
-    - !Not [!Equals [!Ref KeyPairName, "none"]]
+  CreateWAF: !And
+    - !Equals [!Ref EnableWAF, "true"]
+    - !Equals [!Ref EnablePublicAccess, "true"]
+    - !Equals [!Ref "AWS::Region", "us-east-1"]
+  HasGeoRestriction: !Not
+    - !Equals
+      - !Join [",", !Ref AllowedCountries]
+      - ""
   # Bedrock Mantle supported regions: https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html#bedrock-mantle-supported
   IsUsEast1: !Equals [ !Ref "AWS::Region", "us-east-1" ]
   IsUsEast2: !Equals [ !Ref "AWS::Region", "us-east-2" ]
@@ -147,11 +161,12 @@ Conditions:
       - Condition: IsEuSouth1
       - Condition: IsEuNorth1
       - Condition: IsSaEast1
-  CreateMantleEndpoint: !And [ Condition: CreateEndpoints, Condition: IsMantleSupportedRegion ]     
-  EnableDocker: !Equals [!Ref EnableSandbox, "true"]
+  CreateMantleEndpoint: !And [ Condition: CreateEndpoints, Condition: IsMantleSupportedRegion ]
   EnableCW: !Equals [!Ref EnableMonitoring, "true"]
   ProtectData: !Equals [!Ref EnableDataProtection, "true"]
   DeleteData: !Not [!Equals [!Ref EnableDataProtection, "true"]]
+  EnablePublic: !Equals [!Ref EnablePublicAccess, "true"]
+  DisablePublic: !Not [!Equals [!Ref EnablePublicAccess, "true"]]
 
 Mappings:
   ArchitectureMap:
@@ -211,6 +226,25 @@ Resources:
       VpcId: !Ref OpenClawVPC
       InternetGatewayId: !Ref OpenClawInternetGateway
 
+  # NAT Gateway for private subnet internet access
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-nat-eip"
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-nat-gateway"
+
   PublicSubnet:
     Type: AWS::EC2::Subnet
     Properties:
@@ -220,7 +254,19 @@ Resources:
       AvailabilityZone: !Select [0, !GetAZs '']
       Tags:
         - Key: Name
-          Value: !Sub "${AWS::StackName}-public-subnet"
+          Value: !Sub "${AWS::StackName}-public-subnet-az1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Condition: EnablePublic
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.4.0/24"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-subnet-az2"
 
   PrivateSubnet:
     Type: AWS::EC2::Subnet
@@ -264,6 +310,166 @@ Resources:
     Properties:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref PublicRouteTable
+
+  SubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: EnablePublic
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # Private Route Table for private subnets
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-rtb"
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateEndpoints
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ==================== Network ACLs for Private Subnet Security ====================
+  PrivateNetworkAcl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-nacl"
+
+  # Inbound Rules
+  PrivateNetworkAclInboundHTTP:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkAcl
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: 10.0.0.0/16
+      PortRange:
+        From: 80
+        To: 80
+
+  PrivateNetworkAclInboundHTTPS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkAcl
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: 10.0.0.0/16
+      PortRange:
+        From: 443
+        To: 443
+
+  PrivateNetworkAclInboundOpenClaw:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkAcl
+      RuleNumber: 120
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: 10.0.0.0/16
+      PortRange:
+        From: 18789
+        To: 18789
+
+  PrivateNetworkAclInboundEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkAcl
+      RuleNumber: 130
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535
+
+  # Outbound Rules - Restrictive (only HTTPS + DNS)
+  PrivateNetworkAclOutboundHTTPS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkAcl
+      RuleNumber: 100
+      Protocol: 6
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 443
+        To: 443
+
+  PrivateNetworkAclOutboundHTTP:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkAcl
+      RuleNumber: 110
+      Protocol: 6
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 80
+        To: 80
+
+  PrivateNetworkAclOutboundDNS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkAcl
+      RuleNumber: 120
+      Protocol: 17
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 53
+        To: 53
+
+  PrivateNetworkAclOutboundEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkAcl
+      RuleNumber: 130
+      Protocol: 6
+      Egress: true
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535
+
+  PrivateSubnetNetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      NetworkAclId: !Ref PrivateNetworkAcl
+
+  PrivateSubnetNetworkAclAssociation2:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Condition: CreateEndpoints
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      NetworkAclId: !Ref PrivateNetworkAcl
 
   # VPC Endpoint Security Group
   VPCEndpointSecurityGroup:
@@ -355,6 +561,63 @@ Resources:
       SecurityGroupIds:
         - !Ref VPCEndpointSecurityGroup
 
+  # S3 Gateway VPC Endpoint (no additional cost, for S3 API access)
+  S3GatewayVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !Ref PrivateRouteTable
+
+  # CloudWatch Logs VPC Endpoint (for log shipping)
+  CloudWatchLogsVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # CloudFormation VPC Endpoint (for stack signaling)
+  CloudFormationVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.cloudformation'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # EC2 VPC Endpoint (for describe-tags API calls)
+  EC2VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
   # ==================== IAM Role ====================
   OpenClawInstanceRole:
     Type: AWS::IAM::Role
@@ -430,6 +693,20 @@ Resources:
                   - 'cloudformation:DescribeStackResource'
                   - 'cloudformation:SignalResource'
                 Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+        - PolicyName: S3BucketAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                Resource:
+                  - !GetAtt OpenClawS3Bucket.Arn
+                  - !Sub '${OpenClawS3Bucket.Arn}/*'
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance-role"
@@ -441,19 +718,38 @@ Resources:
         - !Ref OpenClawInstanceRole
 
   # ==================== Security Group ====================
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: EnablePublic
+    Properties:
+      GroupDescription: "ALB security group - CloudFront managed prefix list only"
+      VpcId: !Ref OpenClawVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: pl-82a045eb
+          Description: "HTTP from CloudFront managed prefix list"
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb-sg"
+
   OpenClawSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: "OpenClaw instance security group"
+      GroupDescription: "OpenClaw instance security group - SSM Session Manager only (no SSH)"
       VpcId: !Ref OpenClawVPC
       SecurityGroupIngress:
         - !If
-          - AllowSSH
+          - EnablePublic
           - IpProtocol: tcp
-            FromPort: 22
-            ToPort: 22
-            CidrIp: !Ref AllowedSSHCIDR
-            Description: "SSH access (fallback)"
+            FromPort: 18789
+            ToPort: 18789
+            SourceSecurityGroupId: !Ref ALBSecurityGroup
+            Description: "OpenClaw from ALB"
           - !Ref AWS::NoValue
       SecurityGroupEgress:
         - IpProtocol: -1
@@ -461,6 +757,33 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-sg"
+
+  # ==================== S3 Bucket ====================
+  OpenClawS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "openclaw-${AWS::StackName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-data-bucket"
 
   # ==================== Data Volume ====================
   OpenClawDataVolumeRetained:
@@ -508,10 +831,12 @@ Resources:
                   "gateway": {
                     "mode": "local",
                     "port": 18789,
-                    "bind": "loopback",
+                    "bind": "BIND_ADDRESS_PLACEHOLDER",
+                    "trustedProxies": ["10.0.0.0/16"],
                     "controlUi": {
                       "enabled": true,
-                      "allowInsecureAuth": true
+                      "dangerouslyDisableDeviceAuth": true,
+                      "allowedOrigins": "ALLOWED_ORIGINS_PLACEHOLDER"
                     },
                     "auth": {
                       "mode": "token",
@@ -553,10 +878,12 @@ Resources:
                   "gateway": {
                     "mode": "local",
                     "port": 18789,
-                    "bind": "loopback",
+                    "bind": "BIND_ADDRESS_PLACEHOLDER",
+                    "trustedProxies": ["10.0.0.0/16"],
                     "controlUi": {
                       "enabled": true,
-                      "allowInsecureAuth": true
+                      "dangerouslyDisableDeviceAuth": true,
+                      "allowedOrigins": "ALLOWED_ORIGINS_PLACEHOLDER"
                     },
                     "auth": {
                       "mode": "token",
@@ -885,8 +1212,36 @@ Resources:
                     cp /opt/openclaw/openclaw-config-modern.json "$STATE_DIR/openclaw.json"
                   fi
                   chown ubuntu:ubuntu "$STATE_DIR/openclaw.json"
+
+                  # Configure bind address and allowed origins based on public access
+                  if [ "${EnablePublicAccess}" = "true" ]; then
+                    BIND_ADDRESS="0.0.0.0"
+                    echo "Public access enabled - binding to 0.0.0.0"
+
+                    # Get CloudFront domain from stack outputs
+                    CLOUDFRONT_DOMAIN=$(aws cloudformation describe-stacks \
+                      --stack-name "${AWS::StackName}" \
+                      --region "${AWS::Region}" \
+                      --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontURL`].OutputValue' \
+                      --output text 2>/dev/null | grep -oP 'https://[^/]+' || echo "")
+
+                    if [ -n "$CLOUDFRONT_DOMAIN" ]; then
+                      ALLOWED_ORIGINS="[\"$CLOUDFRONT_DOMAIN\"]"
+                      echo "Configuring allowedOrigins: $ALLOWED_ORIGINS"
+                    else
+                      ALLOWED_ORIGINS="[]"
+                      echo "CloudFront domain not found, allowedOrigins will be empty"
+                    fi
+                  else
+                    BIND_ADDRESS="loopback"
+                    ALLOWED_ORIGINS="[]"
+                    echo "Private access only - binding to loopback"
+                  fi
+
+                  sed -i "s/BIND_ADDRESS_PLACEHOLDER/$BIND_ADDRESS/g" "$STATE_DIR/openclaw.json"
                   sed -i "s/GATEWAY_TOKEN_PLACEHOLDER/$GATEWAY_TOKEN/g" "$STATE_DIR/openclaw.json"
                   sed -i "s|MODEL_ID_PLACEHOLDER|${OpenClawModel}|g" "$STATE_DIR/openclaw.json"
+                  sed -i "s|\"ALLOWED_ORIGINS_PLACEHOLDER\"|$ALLOWED_ORIGINS|g" "$STATE_DIR/openclaw.json"
 
                   # Install and start gateway
                   for i in $(seq 1 15); do
@@ -904,6 +1259,17 @@ Resources:
                   export NVM_DIR="$HOME/.nvm"
                   [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
                   openclaw gateway install || echo "Gateway install failed"
+
+                  # Fix systemd service to include OPENCLAW_STATE_DIR
+                  SERVICE_FILE="$HOME/.config/systemd/user/openclaw-gateway.service"
+                  if [ -f "$SERVICE_FILE" ]; then
+                    if ! grep -q "OPENCLAW_STATE_DIR" "$SERVICE_FILE"; then
+                      sed -i "/^Environment=OPENCLAW_GATEWAY_PORT/a Environment=OPENCLAW_STATE_DIR=$STATE_DIR" "$SERVICE_FILE"
+                      systemctl --user daemon-reload
+                      echo "Added OPENCLAW_STATE_DIR to systemd service"
+                    fi
+                  fi
+
                   systemctl --user start openclaw-gateway.service || { openclaw gateway & } || echo "Gateway start failed"
                   '
 
@@ -1107,7 +1473,7 @@ Resources:
                           "disk": { "measurement": ["disk_used_percent"], "resources": ["/", "/data"], "metrics_collection_interval": 300 },
                           "swap": { "measurement": ["swap_used_percent"], "metrics_collection_interval": 300 }
                         },
-                        "append_dimensions": { "InstanceId": "${aws:InstanceId}" }
+                        "append_dimensions": { "InstanceId": "${!aws:InstanceId}" }
                       },
                       "logs": {
                         "logs_collected": {
@@ -1145,11 +1511,10 @@ Resources:
               command: "/opt/openclaw/setup.sh"
               ignoreErrors: false
     Properties:
-      ImageId: !Sub 
+      ImageId: !Sub
         - '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/${Arch}/hvm/ebs-gp3/ami-id}}'
         - Arch: !FindInMap [ArchitectureMap, !Ref InstanceType, Arch]
       InstanceType: !Ref InstanceType
-      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
       IamInstanceProfile: !Ref OpenClawInstanceProfile
       Monitoring: !If [EnableCW, true, false]
       MetadataOptions:
@@ -1160,11 +1525,11 @@ Resources:
         - Device: /dev/sdf
           VolumeId: !If [ProtectData, !Ref OpenClawDataVolumeRetained, !Ref OpenClawDataVolumeNotRetained]
       NetworkInterfaces:
-        - AssociatePublicIpAddress: true
+        - AssociatePublicIpAddress: false
           DeviceIndex: 0
           GroupSet:
             - !Ref OpenClawSecurityGroup
-          SubnetId: !Ref PublicSubnet
+          SubnetId: !Ref PrivateSubnet
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -1193,6 +1558,223 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance"
+
+  # ==================== Load Balancer ====================
+  OpenClawALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: EnablePublic
+    Properties:
+      Name: !Sub "${AWS::StackName}-alb"
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets:
+        - !Ref PublicSubnet
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb"
+
+  OpenClawTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: EnablePublic
+    Properties:
+      Name: !Sub "${AWS::StackName}-tg"
+      Port: 18789
+      Protocol: HTTP
+      VpcId: !Ref OpenClawVPC
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Targets:
+        - Id: !Ref OpenClawInstance
+          Port: 18789
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-tg"
+
+  OpenClawALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: EnablePublic
+    Properties:
+      LoadBalancerArn: !Ref OpenClawALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "403"
+            ContentType: "text/plain"
+            MessageBody: "Access Denied"
+
+  OpenClawALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: EnablePublic
+    Properties:
+      ListenerArn: !Ref OpenClawALBListener
+      Priority: 1
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: X-Custom-Header
+            Values:
+              - !Ref AWS::StackId
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref OpenClawTargetGroup
+
+  # ==================== WAF (Web Application Firewall) ====================
+  # WAF for CloudFront must be created in us-east-1 (global CloudFront service requirement)
+  OpenClawWAFWebACL:
+    Type: AWS::WAFv2::WebACL
+    Condition: CreateWAF
+    Properties:
+      Name: !Sub "${AWS::StackName}-waf"
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      Rules:
+        # AWS Managed Rule: Core Rule Set (CRS)
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSetMetric
+
+        # AWS Managed Rule: Known Bad Inputs
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesKnownBadInputsRuleSetMetric
+
+        # AWS Managed Rule: SQL Injection Protection
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 3
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesSQLiRuleSetMetric
+
+        # AWS Managed Rule: Linux Operating System Protection
+        - Name: AWSManagedRulesLinuxRuleSet
+          Priority: 4
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesLinuxRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesLinuxRuleSetMetric
+
+        # Rate Limiting Rule (1000 requests per 5 minutes per IP)
+        - Name: RateLimitRule
+          Priority: 5
+          Action:
+            Block:
+              CustomResponse:
+                ResponseCode: 429
+          Statement:
+            RateBasedStatement:
+              Limit: 1000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitRuleMetric
+
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${AWS::StackName}-waf"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-waf"
+
+  # ==================== CloudFront ====================
+  OpenClawCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: EnablePublic
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: "OpenClaw - Secured with Shield Standard DDoS Protection + Custom Header + WAF"
+        WebACLId: !If
+          - CreateWAF
+          - !GetAtt OpenClawWAFWebACL.Arn
+          - !Ref AWS::NoValue
+        DefaultCacheBehavior:
+          TargetOriginId: alb-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: true
+            Headers:
+              - '*'
+            Cookies:
+              Forward: all
+          MinTTL: 0
+          DefaultTTL: 0
+          MaxTTL: 0
+        Origins:
+          - Id: alb-origin
+            DomainName: !GetAtt OpenClawALB.DNSName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+            OriginCustomHeaders:
+              - HeaderName: X-Custom-Header
+                HeaderValue: !Ref AWS::StackId
+        Restrictions:
+          GeoRestriction:
+            RestrictionType: !If
+              - HasGeoRestriction
+              - whitelist
+              - none
+            Locations: !If
+              - HasGeoRestriction
+              - !Ref AllowedCountries
+              - !Ref AWS::NoValue
 
   # ==================== CloudWatch Alarms ====================
   EC2AutoRecoveryAlarm:
@@ -1234,22 +1816,42 @@ Resources:
         - !Sub "arn:aws:automate:${AWS::Region}:ec2:reboot"
 
 Outputs:
+  CloudFrontURL:
+    Condition: EnablePublic
+    Description: "PUBLIC ACCESS URL (HTTPS) - IP-restricted at ALB security group to 203.220.180.180/32"
+    Value: !Sub
+      - "https://${Domain}/?token=${Token}"
+      - Domain: !GetAtt OpenClawCloudFrontDistribution.DomainName
+        Token: !Select [3, !Split ['"', !GetAtt OpenClawWaitCondition.Data]]
+
+  ALBURL:
+    Condition: EnablePublic
+    Description: "ALB URL (HTTP) - inbound is restricted to cloudfront prefix list via security group"
+    Value: !Sub
+      - "http://${Domain}/?token=${Token}"
+      - Domain: !GetAtt OpenClawALB.DNSName
+        Token: !Select [3, !Split ['"', !GetAtt OpenClawWaitCondition.Data]]
+
   Step1InstallSSMPlugin:
+    Condition: DisablePublic
     Description: "STEP 1: Install SSM Session Manager Plugin on your local computer (Option 2: go to EC2 Console > right-click instance > Connect > Session Manager to get a shell, then run 'sudo su - ubuntu && openclaw gateway status' to set up IM channels)"
     Value: "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
 
   Step2PortForwarding:
+    Condition: DisablePublic
     Description: "STEP 2: Run this command on LOCAL computer (keep terminal open)"
     Value: !Sub |
       aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 
   Step3AccessURL:
+    Condition: DisablePublic
     Description: "STEP 3: Open this URL in browser"
     Value: !Sub
       - "http://localhost:18789/?token=${Token}"
       - Token: !Select [3, !Split ['"', !GetAtt OpenClawWaitCondition.Data]]
 
   Step4StartChatting:
+    Condition: DisablePublic
     Description: "STEP 4: Start using OpenClaw!"
     Value: "Connect WhatsApp, Telegram, Discord. See README: https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock"
 
@@ -1267,17 +1869,25 @@ Outputs:
       - |
         EC2 (${InstanceType}): ~$50-60 (c7g.large ~$58, Graviton 20% cheaper than x86)
         EBS (30GB x2): ~$4.80
+        NAT Gateway: ~$33 ($0.045/hour + $0.045/GB data transfer)
         VPC Endpoints: ${EndpointCost}
         Monitoring: ${MonitoringCost}
+        Public Access: ${PublicCost}
+        WAF: ${WAFCost}
         Bedrock: Pay-per-use
         Total: ~${TotalCost}/month
-        Note: Compute-optimized (c7g, 2 vCPU) recommended for running Node.js + Docker sandbox concurrently. Swap, health checks, and OS security patches are always enabled at no extra cost.
-      - EndpointCost: !If [CreateEndpoints, "~$29 ($0.01/hour x 5 endpoints)", "$0 (disabled)"]
+        Note: EC2 in private subnet (NAT Gateway required for internet). Compute-optimized (c7g, 2 vCPU) for Node.js + Docker sandbox. Swap, health checks, OS patches always enabled.
+      - EndpointCost: !If [CreateEndpoints, "~$51 ($0.01/hour x 9 interface endpoints: Bedrock Runtime, Bedrock Mantle, SSM, SSM Messages, EC2 Messages, CloudWatch Logs, CloudFormation, EC2. S3 Gateway free)", "$0 (disabled)"]
         MonitoringCost: !If [EnableCW, "~$4 (CloudWatch Agent + detailed monitoring + alarms + logs)", "$0 (disabled)"]
-        TotalCost: !If 
-          - CreateEndpoints
-          - !If [EnableCW, "$91-96", "$87-92"]
-          - !If [EnableCW, "$63-67", "$58-63"]
+        PublicCost: !If [EnablePublic, "~$25 (ALB ~$22/mo + CloudFront $0.085/GB)", "$0 (SSM only)"]
+        WAFCost: !If [CreateWAF, "~$10 (WebACL $5/mo + 5 rules x $1/mo + requests $0.60/million)", "$0 (disabled or not us-east-1)"]
+        TotalCost: !If
+          - EnablePublic
+          - !If [CreateWAF, "~$180-190", "~$170-180"]
+          - !If
+            - CreateEndpoints
+            - !If [EnableCW, "$146-151", "$142-147"]
+            - !If [EnableCW, "$96-100", "$91-96"]
 
   InstanceArchitecture:
     Description: "Instance architecture"
@@ -1292,3 +1902,27 @@ Outputs:
     Condition: DeleteData
     Description: "Data volume ID (deleted with stack)"
     Value: !Ref OpenClawDataVolumeNotRetained
+
+  S3BucketArn:
+    Description: "S3 bucket ARN"
+    Value: !GetAtt OpenClawS3Bucket.Arn
+
+  SecurityFeatures:
+    Condition: EnablePublic
+    Description: "Security protections enabled"
+    Value: !Sub
+      - |
+        1.AWS Shield Standard (automatic DDoS protection - Layer 3/4)
+        ${WAFStatus}
+        2.CloudFront managed prefix list (only CloudFront IPs can reach ALB)
+        3.Custom header validation (CloudFront → ALB, secret stack ID)
+        4.Direct ALB access blocked (returns 403 without header)
+        5.All traffic via HTTPS (CloudFront enforced)
+        6.EC2 in private subnet (no public IP)
+        7.NAT Gateway for controlled outbound (${NATGatewayEIP})
+        8.VPC Endpoints (S3, Bedrock, CloudWatch - all AWS traffic private)
+        9.No public SSH (SSM Session Manager via VPC endpoints only)
+      - WAFStatus: !If
+          - CreateWAF
+          - "✅ AWS WAF enabled (SQL injection, XSS, rate limiting, bad inputs)"
+          - "⚠️  WAF disabled (only available in us-east-1 region)"
