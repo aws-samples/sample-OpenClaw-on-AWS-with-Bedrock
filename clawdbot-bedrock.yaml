@@ -82,6 +82,7 @@ Parameters:
     AllowedValues:
       - "2026.3.24"
       - "2026.4.5"
+      - "2026.4.10"
       - "2026.4.27"
       - "latest"
     Description: "OpenClaw version. 2026.3.24 (no model approval needed, WeChat compatible). 2026.4.5+ (auto-discovery, embeddings)."
@@ -97,7 +98,7 @@ Parameters:
   EnableDataProtection:
     Type: String
     Default: "false"
-    Description: "Retain data volume when stack is deleted (protects against accidental data loss)"
+    Description: "If retain both EBS volume and S3 bucket on stack deletion,set to true. Data will be deleted if set to false."
     AllowedValues:
       - "true"
       - "false"
@@ -744,8 +745,14 @@ Resources:
                   - 's3:ListBucket'
                   - 's3:GetBucketLocation'
                 Resource:
-                  - !GetAtt OpenClawS3Bucket.Arn
-                  - !Sub '${OpenClawS3Bucket.Arn}/*'
+                  - !If
+                    - ProtectData
+                    - !GetAtt OpenClawS3BucketRetained.Arn
+                    - !GetAtt OpenClawS3BucketNotRetained.Arn
+                  - !If
+                    - ProtectData
+                    - !Sub '${OpenClawS3BucketRetained.Arn}/*'
+                    - !Sub '${OpenClawS3BucketNotRetained.Arn}/*'
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance-role"
@@ -798,10 +805,39 @@ Resources:
           Value: !Sub "${AWS::StackName}-sg"
 
   # ==================== S3 Bucket ====================
-  OpenClawS3Bucket:
+  # Two conditional S3 buckets to match EnableDataProtection parameter behavior (same pattern as EBS volumes)
+  OpenClawS3BucketRetained:
     Type: AWS::S3::Bucket
+    Condition: ProtectData
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "openclaw-${AWS::StackName}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-data-bucket"
+
+  OpenClawS3BucketNotRetained:
+    Type: AWS::S3::Bucket
+    Condition: DeleteData
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     Properties:
       BucketName: !Sub "openclaw-${AWS::StackName}-${AWS::AccountId}"
       BucketEncryption:
@@ -1064,12 +1100,22 @@ Resources:
                       echo "$DATA_DEVICE /data ext4 defaults,nofail 0 2" >> /etc/fstab
                     mkdir -p /data/openclaw
                     chown ubuntu:ubuntu /data/openclaw
-                    # Keep ~/.openclaw symlink for CLI convenience (e.g. 'ls ~/.openclaw').
+
+                    # Create ~/.openclaw symlink for CLI convenience (e.g. 'ls ~/.openclaw').
                     # Set OPENCLAW_STATE_DIR to the real path so OpenClaw's exec approval
-                    # boundary check never traverses the symlink.
-                    [ -L /home/ubuntu/.openclaw ] || ln -sf /data/openclaw /home/ubuntu/.openclaw
+                    # boundary check never traverses the symlink (security boundary requirement).
+                    # Remove existing file/dir/symlink to ensure clean state on re-runs.
+                    if [ -e /home/ubuntu/.openclaw ] || [ -L /home/ubuntu/.openclaw ]; then
+                      rm -rf /home/ubuntu/.openclaw
+                    fi
+                    mkdir -p /home/ubuntu/.openclaw
+                    chown -h ubuntu:ubuntu /home/ubuntu/.openclaw
+
+                    # Set OPENCLAW_STATE_DIR environment variable to point to real path
+                    # (not the symlink) for OpenClaw's security boundary checks
                     mkdir -p /home/ubuntu/.config/environment.d
-                    echo "OPENCLAW_STATE_DIR=/data/openclaw" >> /home/ubuntu/.config/environment.d/openclaw.conf
+                    echo "OPENCLAW_STATE_DIR=/data/openclaw" > /home/ubuntu/.config/environment.d/openclaw.conf
+                    chown ubuntu:ubuntu /home/ubuntu/.config/environment.d/openclaw.conf
                   else
                     echo "FATAL: no data volume found — expected an EBS volume attached at /dev/nvme1n1, /dev/xvdf, or /dev/sdf"
                     exit 1
@@ -1867,7 +1913,6 @@ Outputs:
       - "https://${Domain}/?token=<token>"
       - Domain: !GetAtt OpenClawCloudFrontDistribution.DomainName
 
-
   ALBURL:
     Condition: EnablePublic
     Description: "ALB URL (HTTP) - Replace <token> with the value from the output 'GetToken'. Not secured, for testing/debugging only (bypasses CloudFront)."
@@ -1944,26 +1989,16 @@ Outputs:
     Description: "Data volume ID (deleted with stack)"
     Value: !Ref OpenClawDataVolumeNotRetained
 
-  S3BucketArn:
-    Description: "S3 bucket ARN"
-    Value: !GetAtt OpenClawS3Bucket.Arn
+  S3BucketNameRetained:
+    Condition: ProtectData
+    Description: "S3 bucket name (retained on stack delete)"
+    Value: !Ref OpenClawS3BucketRetained
+
+  S3BucketNameNotRetained:
+    Condition: DeleteData
+    Description: "S3 bucket name (deleted with stack)"
+    Value: !Ref OpenClawS3BucketNotRetained
 
   SecurityFeatures:
-    Condition: EnablePublic
-    Description: "Security protections enabled"
-    Value: !Sub
-      - |
-        1.AWS Shield Standard (automatic DDoS protection - Layer 3/4)
-        ${WAFStatus}
-        2.CloudFront managed prefix list (only CloudFront IPs can reach ALB)
-        3.Custom header validation (CloudFront → ALB, secret stack ID)
-        4.Direct ALB access blocked (returns 403 without header)
-        5.All traffic via HTTPS (CloudFront enforced)
-        6.EC2 in private subnet (no public IP)
-        7.NAT Gateway for controlled outbound (${NATGatewayEIP})
-        8.VPC Endpoints (S3, Bedrock, CloudWatch - all AWS traffic private)
-        9.No public SSH (SSM Session Manager via VPC endpoints only)
-      - WAFStatus: !If
-          - CreateWAF
-          - "✅ AWS WAF enabled (SQL injection, XSS, rate limiting, bad inputs)"
-          - "⚠️  WAF disabled (only available in us-east-1 region)"
+    Description: "Security protections available in this deployment"
+    Value: "See the SECURITY.md document athttps://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/blob/main/SECURITY.md"

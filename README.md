@@ -271,7 +271,7 @@ Switch models with one CloudFormation parameter — no code changes:
 | `EnableMonitoring` | `true` | Enable CloudWatch monitoring, health checks, auto-recovery, and log shipping (+~$4/mo) |
 | `EnableSandbox` | `true` | Install Docker for sandboxed execution (recommended for group chats) |
 | `EnableDataProtection` | `false` | Retain data volume when stack is deleted (protects against accidental data loss) |
-| `EnablePublicAccess` | `false` | Enable public access via ALB + CloudFront (~$25/mo). When disabled, access via SSM Session Manager only |
+| `EnablePublicAccess` | `false` | Enable public access via ALB + CloudFront (~$25/mo). When disabled, access via SSM Session Manager only. **⚠️ Security Note**: CloudFront → ALB connection uses HTTP (not HTTPS), meaning origin traffic is unencrypted. This is an accepted tradeoff for simplicity. For full end-to-end encryption, add ACM certificate + HTTPS ALB listener (see SECURITY.md). |
 | `EnableWAF` | `true` | Enable AWS WAF for CloudFront (Layer 7 DDoS protection, SQL injection, XSS, rate limiting, ~$10/mo). **⚠️ IMPORTANT: WAF only works in us-east-1.** If you deploy in other regions (e.g., us-west-2, ap-northeast-1, eu-west-1), the WAF will be silently skipped and you won't get Layer 7 protection. Deploy in us-east-1 to enable WAF, or accept that other regions only get Shield Standard (Layer 3/4 DDoS protection). |
 | `AllowedCountries` | _(empty)_ | CloudFront geographic restrictions. Leave empty (default) to allow worldwide access, or specify comma-separated ISO 3166-1 alpha-2 country codes to restrict access to specific countries (e.g., `AU,US,GB,JP`) |
 
