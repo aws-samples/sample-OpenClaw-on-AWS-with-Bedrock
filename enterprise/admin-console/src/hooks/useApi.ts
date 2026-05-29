@@ -261,10 +261,11 @@ export function useMonitorAgentActivity() {
 
 // === Audit ===
 
-export function useAuditEntries(params?: { limit?: number; eventType?: string }) {
+export function useAuditEntries(params?: { limit?: number; eventType?: string; includeSystem?: boolean }) {
   const qs = new URLSearchParams();
   if (params?.limit) qs.set('limit', String(params.limit));
   if (params?.eventType && params.eventType !== 'all') qs.set('eventType', params.eventType);
+  if (params?.includeSystem) qs.set('includeSystem', 'true');
   return useQuery<AuditEntry[]>({
     queryKey: ['audit', params],
     queryFn: () => api.get(`/audit/entries?${qs}`),

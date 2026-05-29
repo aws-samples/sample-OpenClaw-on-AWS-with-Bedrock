@@ -44,12 +44,17 @@ def get_audit_entries(
     eventType: Optional[str] = None,
     since: Optional[str] = None,
     before: Optional[str] = None,
+    includeSystem: bool = False,
     authorization: str = Header(default=""),
 ):
-    """Audit event timeline with filtering by type, time range, and department scope."""
+    """Audit event timeline with filtering by type, time range, and department scope.
+
+    By default, internal warmup/heartbeat events (ACTI scheduler, actor "a") are
+    excluded so the timeline shows real employee/admin activity. Pass
+    includeSystem=true to surface them too."""
     user = require_auth(authorization)
     limit = min(limit, 500)
-    entries = db.get_audit_entries(limit=limit)
+    entries = db.get_audit_entries(limit=limit, include_system=includeSystem)
 
     if eventType:
         entries = [e for e in entries if e.get("eventType") == eventType]

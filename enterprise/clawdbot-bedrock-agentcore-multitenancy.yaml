@@ -1232,7 +1232,11 @@ Resources:
                   - !Sub "${TenantWorkspaceBucket.Arn}/*"
               - Sid: DynamoDBReadOnly
                 Effect: Allow
-                Action: [dynamodb:GetItem, dynamodb:Query]
+                # PutItem/UpdateItem are required so the restricted tier can write
+                # its own audit trail (agent_invocation, guardrail_block, usage).
+                # Without them, guardrail blocks are silently dropped (AccessDenied)
+                # and never appear in the Audit Center.
+                Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:PutItem, dynamodb:UpdateItem]
                 Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AWS::StackName}*"
               - Sid: SSMRead
                 Effect: Allow

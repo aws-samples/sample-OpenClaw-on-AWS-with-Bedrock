@@ -55,10 +55,11 @@ export default function AuditLog() {
   const [beforeDate, setBeforeDate] = useState('');
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
   const [analyzeResult, setAnalyzeResult] = useState<Record<string, any>>({});
+  const [includeSystem, setIncludeSystem] = useState(false);
   const pageSize = 10;
   const navigate = useNavigate();
 
-  const { data: AUDIT_ENTRIES = [] } = useAuditEntries({ limit: 50, eventType: eventType !== 'all' ? eventType : undefined });
+  const { data: AUDIT_ENTRIES = [] } = useAuditEntries({ limit: 50, eventType: eventType !== 'all' ? eventType : undefined, includeSystem });
   const { data: insightsData, refetch: refetchInsights } = useAuditInsights();
   const { data: guardrailData } = useGuardrailEvents(50);
   const { data: reviewsData, refetch: refetchReviews } = useAuditReviews();
@@ -365,6 +366,13 @@ export default function AuditLog() {
                       className="text-xs text-primary-light hover:underline">Clear</button>
                   )}
                 </div>
+                <label className="flex items-center gap-2 cursor-pointer select-none ml-auto"
+                  title="Include internal warmup/heartbeat (ACTI) events">
+                  <input type="checkbox" checked={includeSystem}
+                    onChange={e => { setIncludeSystem(e.target.checked); setCurrentPage(1); }}
+                    className="h-4 w-4 rounded border-dark-border bg-dark-bg accent-primary cursor-pointer" />
+                  <span className="text-xs text-text-muted">Show system events</span>
+                </label>
               </div>
 
               {/* Timeline View */}

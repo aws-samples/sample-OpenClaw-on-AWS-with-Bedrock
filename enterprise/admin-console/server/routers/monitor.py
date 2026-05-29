@@ -179,6 +179,13 @@ def get_sessions(authorization: str = Header(default="")):
 
     enriched = []
     for s in db_sessions:
+        # Playground (pgnd__) and internal scheduled-task (acti__) sessions are not
+        # real monitored conversations: Playground is read-only by design and never
+        # persists CONV# turns (agent-container server.py), so they would always open
+        # to an empty "No conversation history" view and mislead operators.
+        sid = s.get("id", "") or s.get("sessionId", "")
+        if sid.startswith("pgnd__") or sid.startswith("acti__"):
+            continue
         eid = s.get("employeeId", "")
         if not eid or eid == "unknown":
             continue

@@ -45,12 +45,26 @@ def _clean(item: dict) -> dict:
 
 
 def _query(sk_prefix: str) -> list[dict]:
-    """Query all items with given SK prefix under ORG#acme."""
+    """Query ALL items with given SK prefix under ORG#acme, following pagination.
+
+    A single DynamoDB Query returns at most 1MB of items; without paginating,
+    high-volume prefixes like AUDIT# (thousands of rows) only returned their
+    first page — and since Query defaults to ascending key order, that page held
+    the OLDEST records, so recent-window views (e.g. Agent Activity last 24h)
+    came back empty. We now loop on LastEvaluatedKey to fetch every page."""
     try:
-        resp = _get_table().query(
-            KeyConditionExpression=Key("PK").eq(ORG_PK) & Key("SK").begins_with(sk_prefix)
-        )
-        return [_clean(item) for item in resp.get("Items", [])]
+        table = _get_table()
+        kce = Key("PK").eq(ORG_PK) & Key("SK").begins_with(sk_prefix)
+        items: list = []
+        kwargs: dict = {"KeyConditionExpression": kce}
+        while True:
+            resp = table.query(**kwargs)
+            items.extend(resp.get("Items", []))
+            lek = resp.get("LastEvaluatedKey")
+            if not lek:
+                break
+            kwargs["ExclusiveStartKey"] = lek
+        return [_clean(item) for item in items]
     except ClientError as e:
         print(f"[db] DynamoDB query error: {e}")
         return []
@@ -385,8 +399,24 @@ def create_binding(data: dict) -> dict:
 
 # === Audit Entries ===
 
-def get_audit_entries(limit: int = 50) -> list[dict]:
+def _is_system_audit_event(e: dict) -> bool:
+    """Internal warmup / heartbeat / scheduled-task events that are not real
+    business activity. These come from the ACTI scheduler (session warmup pings,
+    HEARTBEAT.md reads) under the synthetic actor "a" and would otherwise drown
+    out real employee/admin events in the timeline (they are ~93% of all audit
+    rows). Identified by the dedicated ACTI channel, with actor "a" as a fallback."""
+    if e.get("channel") == "ACTI":
+        return True
+    if e.get("actorId") == "a" or e.get("actorName") == "a":
+        return True
+    detail = (e.get("detail") or "")
+    return detail.startswith("ACTI chat:") or "[SYSTEM] Session warmup" in detail
+
+
+def get_audit_entries(limit: int = 50, include_system: bool = False) -> list[dict]:
     items = _query("AUDIT#")
+    if not include_system:
+        items = [e for e in items if not _is_system_audit_event(e)]
     items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
     return items[:limit]
 
