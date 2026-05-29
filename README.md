@@ -4,6 +4,8 @@
 
 English | [简体中文](README_CN.md)
 
+> 🔱 **Sister project:** Prefer a self-improving Python agent? See **[Hermes Agent on AWS with Bedrock](https://github.com/JiaDe-Wu/sample-hermes-agent-on-aws-with-bedrock)** — same one-click CloudFormation + Bedrock deploy, built around an auto-learning agent loop.
+
 [![License](https://img.shields.io/badge/License-MIT--0-yellow?style=for-the-badge)](https://opensource.org/licenses/MIT)
 [![Amazon Bedrock](https://img.shields.io/badge/Powered_by-Amazon_Bedrock-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white)](https://aws.amazon.com/bedrock/)
 [![CloudFormation](https://img.shields.io/badge/IaC-CloudFormation-232F3E?style=for-the-badge&logo=amazonaws&logoColor=white)](https://aws.amazon.com/cloudformation/)

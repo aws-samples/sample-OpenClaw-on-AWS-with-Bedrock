@@ -4,6 +4,8 @@
 
 [English](README.md) | 简体中文
 
+> 🔱 **姊妹项目：** 想要一个会自我进化的 Python 智能体？看看 **[Hermes Agent on AWS with Bedrock](https://github.com/JiaDe-Wu/sample-hermes-agent-on-aws-with-bedrock)** —— 同样的一键 CloudFormation + Bedrock 部署，核心是一个自动学习的 Agent 循环。
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![AWS](https://img.shields.io/badge/AWS-Bedrock-orange.svg)](https://aws.amazon.com/bedrock/)
 [![CloudFormation](https://img.shields.io/badge/IaC-CloudFormation-blue.svg)](https://aws.amazon.com/cloudformation/)
