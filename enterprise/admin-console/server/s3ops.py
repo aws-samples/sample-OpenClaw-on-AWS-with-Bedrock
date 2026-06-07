@@ -4,6 +4,7 @@ Centralizes all S3 access with proper error handling and caching.
 """
 import os
 import json
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -60,13 +61,29 @@ def _efs_path_for_key(key: str) -> Optional[str]:
     # Only personal workspace keys; shared layers (_shared/...) always live on S3.
     if not rest.startswith("workspace/"):
         return None
-    if not emp_id.startswith("emp-"):
+    # Strict allowlist sanitization to prevent path traversal: every path segment of
+    # the key must match a safe pattern (no "..", no absolute parts, no NUL or other
+    # separators). This rejects the input outright rather than relying on a
+    # post-join realpath check, so the value reaching os.path.join is constrained.
+    if not re.fullmatch(r"emp-[a-z0-9-]+", emp_id):
         return None
+    segments = rest.split("/")
+    for seg in segments:
+        if seg in ("", ".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", seg):
+            return None
     if not _is_always_on_employee(emp_id):
         return None
-    if not os.path.isdir(os.path.join(EFS_ROOT, emp_id, "workspace")):
+    workspace_root = os.path.join(EFS_ROOT, emp_id, "workspace")
+    if not os.path.isdir(workspace_root):
         return None
-    return os.path.join(EFS_ROOT, emp_id, rest)
+    # Build the target from sanitized segments only. Defense-in-depth: also confirm
+    # the resolved real path stays within the employee workspace.
+    target = os.path.join(EFS_ROOT, emp_id, *segments)
+    real_root = os.path.realpath(workspace_root)
+    real_target = os.path.realpath(target)
+    if real_target != real_root and not real_target.startswith(real_root + os.sep):
+        return None
+    return target
 
 
 def _client():
