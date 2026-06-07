@@ -14,6 +14,60 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 _s3 = None
 _bucket = None
 
+# === EFS redirection for always-on ECS agents ===
+# Always-on ECS containers persist their workspace on EFS (mounted at /mnt/efs on
+# this box), NOT S3 — the container's watchdog skips S3 sync in EFS mode. So admin
+# edits to an always-on employee's personal workspace must go to EFS to be visible
+# to the running container (and vice versa). Shared layers (_shared/...) stay on S3.
+EFS_ROOT = os.environ.get("EFS_ROOT", "/mnt/efs")
+_always_on_cache: dict = {}   # emp_id -> bool, short-lived
+_always_on_cache_ts: dict = {}
+
+
+def _is_always_on_employee(emp_id: str) -> bool:
+    """Return True if this employee runs an always-on ECS agent (workspace on EFS).
+    Cached for 30s to avoid a DynamoDB read on every file op."""
+    if not emp_id:
+        return False
+    import time as _t
+    now = _t.time()
+    ts = _always_on_cache_ts.get(emp_id, 0)
+    if now - ts < 30 and emp_id in _always_on_cache:
+        return _always_on_cache[emp_id]
+    result = False
+    try:
+        import db as _db
+        emp = _db.get_employee(emp_id)
+        if emp and emp.get("alwaysOnEnabled"):
+            result = True
+    except Exception:
+        result = False
+    _always_on_cache[emp_id] = result
+    _always_on_cache_ts[emp_id] = now
+    return result
+
+
+def _efs_path_for_key(key: str) -> Optional[str]:
+    """Map an S3 personal-workspace key to its EFS path, IF the owning employee runs
+    always-on. Returns None for non-personal keys or serverless employees (→ use S3).
+
+    Personal key format: '{emp_id}/workspace/...'  →  '/mnt/efs/{emp_id}/workspace/...'
+    """
+    parts = key.split("/", 1)
+    if len(parts) != 2:
+        return None
+    emp_id, rest = parts[0], parts[1]
+    # Only personal workspace keys; shared layers (_shared/...) always live on S3.
+    if not rest.startswith("workspace/"):
+        return None
+    if not emp_id.startswith("emp-"):
+        return None
+    if not _is_always_on_employee(emp_id):
+        return None
+    if not os.path.isdir(os.path.join(EFS_ROOT, emp_id, "workspace")):
+        return None
+    return os.path.join(EFS_ROOT, emp_id, rest)
+
 
 def _client():
     global _s3
@@ -37,7 +91,14 @@ def bucket():
 
 
 def read_file(key: str) -> Optional[str]:
-    """Read a text file from S3."""
+    """Read a text file. Always-on personal workspace → EFS; otherwise S3."""
+    efs = _efs_path_for_key(key)
+    if efs is not None:
+        try:
+            with open(efs, encoding="utf-8") as f:
+                return f.read()
+        except (OSError, FileNotFoundError):
+            return None
     try:
         obj = _client().get_object(Bucket=bucket(), Key=key)
         return obj["Body"].read().decode("utf-8")
@@ -46,7 +107,18 @@ def read_file(key: str) -> Optional[str]:
 
 
 def write_file(key: str, content: str, metadata: Optional[dict] = None) -> bool:
-    """Write a text file to S3. S3 versioning handles history automatically."""
+    """Write a text file. Always-on personal workspace → EFS (live to container);
+    otherwise S3 (versioning handles history)."""
+    efs = _efs_path_for_key(key)
+    if efs is not None:
+        try:
+            os.makedirs(os.path.dirname(efs), exist_ok=True)
+            with open(efs, "w", encoding="utf-8") as f:
+                f.write(content)
+            return True
+        except OSError as e:
+            print(f"[s3ops] EFS write error: {e}")
+            return False
     try:
         extra = {}
         if metadata:
@@ -64,7 +136,31 @@ def write_file(key: str, content: str, metadata: Optional[dict] = None) -> bool:
 
 
 def list_files(prefix: str) -> list[dict]:
-    """List files under a prefix."""
+    """List files under a prefix. Always-on personal workspace → EFS; otherwise S3."""
+    # EFS redirect: prefix like 'emp-x/workspace/...' for an always-on employee.
+    efs_dir = _efs_path_for_key(prefix.rstrip("/") + "/_") if prefix else None
+    if efs_dir is not None:
+        efs_base = os.path.dirname(efs_dir)  # strip the '_' sentinel
+        files = []
+        if os.path.isdir(efs_base):
+            for root, _dirs, fnames in os.walk(efs_base):
+                for fname in fnames:
+                    fpath = os.path.join(root, fname)
+                    rel = os.path.relpath(fpath, efs_base)
+                    # Reconstruct the S3-style key so callers see a consistent shape
+                    key = prefix + rel
+                    try:
+                        st = os.stat(fpath)
+                        files.append({
+                            "key": key,
+                            "name": rel,
+                            "size": st.st_size,
+                            "lastModified": datetime.fromtimestamp(
+                                st.st_mtime, timezone.utc).isoformat(),
+                        })
+                    except OSError:
+                        pass
+        return files
     files = []
     try:
         paginator = _client().get_paginator("list_objects_v2")

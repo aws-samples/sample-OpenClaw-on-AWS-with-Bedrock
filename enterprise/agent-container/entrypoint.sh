@@ -49,12 +49,22 @@ export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--dns-result-order=ipv4first
 # On first start (empty EFS dir), bootstrap from S3. No watchdog needed.
 EFS_MODE=false
 if [ "${EFS_ENABLED:-}" = "true" ] && [ -d "/mnt/efs" ]; then
-    EFS_WORKSPACE="/mnt/efs/${BASE_TENANT_ID}/workspace"
+    # Path layout depends on how the EFS volume is mounted:
+    #  - Access-point mode (EFS_ACCESS_POINT=true): the access point root is already
+    #    scoped to /{employee} on EFS, so /mnt/efs IS the employee's directory. Do NOT
+    #    append BASE_TENANT_ID again or we get /emp-x/emp-x/workspace (double-prefix),
+    #    which diverges from the admin console (root-mount → /emp-x/workspace).
+    #  - Root mode (no access point): /mnt/efs is the EFS root, so scope by employee.
+    if [ "${EFS_ACCESS_POINT:-}" = "true" ]; then
+        EFS_WORKSPACE="/mnt/efs/workspace"
+    else
+        EFS_WORKSPACE="/mnt/efs/${BASE_TENANT_ID}/workspace"
+    fi
     mkdir -p "$EFS_WORKSPACE" "$EFS_WORKSPACE/memory" "$EFS_WORKSPACE/skills"
     WORKSPACE="$EFS_WORKSPACE"
     export OPENCLAW_WORKSPACE="$WORKSPACE"
     EFS_MODE=true
-    echo "[entrypoint] EFS mode: workspace=${WORKSPACE}"
+    echo "[entrypoint] EFS mode: workspace=${WORKSPACE} (access_point=${EFS_ACCESS_POINT:-false})"
 
     # Bootstrap from S3 if this employee's EFS directory is empty (first start)
     if [ -z "$(ls -A "$EFS_WORKSPACE" 2>/dev/null)" ]; then
@@ -84,6 +94,18 @@ echo "$BASE_TENANT_ID" > /tmp/base_tenant_id
 OPENCLAW_CONFIG_DIR="$HOME/.openclaw"
 mkdir -p "$OPENCLAW_CONFIG_DIR"
 
+# In EFS mode, the OpenClaw Gateway reads its workspace from the default path
+# ($HOME/.openclaw/workspace), NOT from OPENCLAW_WORKSPACE. The assembled SOUL/memory
+# live on the persistent EFS workspace ($WORKSPACE). Symlink the Gateway's default
+# workspace path to the EFS workspace so the Gateway (and thus the Discord/IM path,
+# which talks to the Gateway directly and never hits server.py) reads the assembled
+# SOUL + persists memory durably on EFS across restarts.
+if [ "$EFS_MODE" = "true" ] && [ "$WORKSPACE" != "$OPENCLAW_CONFIG_DIR/workspace" ]; then
+    rm -rf "$OPENCLAW_CONFIG_DIR/workspace" 2>/dev/null
+    ln -sfn "$WORKSPACE" "$OPENCLAW_CONFIG_DIR/workspace"
+    echo "[entrypoint] Gateway workspace symlinked to EFS: $OPENCLAW_CONFIG_DIR/workspace -> $WORKSPACE"
+fi
+
 # Generate a random gateway token for this container instance
 # This token is stored in SSM so the admin console proxy can inject it
 GATEWAY_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
@@ -111,9 +133,20 @@ fi
 # Only runs if SHARED_AGENT_ID or SESSION_ID is set (i.e., we know the employee).
 # =============================================================================
 if [ "$EFS_MODE" = "true" ] || [ -n "${SHARED_AGENT_ID:-}" ]; then
-    # Quick S3 sync to get latest personal SOUL + workspace files before assembly
-    aws s3 sync "${S3_BASE}/workspace/" "$WORKSPACE/" \
-        --quiet --region "$AWS_REGION" 2>/dev/null || true
+    # Quick S3 sync to get latest personal SOUL + workspace files before assembly.
+    # In EFS mode the EFS copy is authoritative for memory/user-owned files (admin
+    # edits land there directly, and the container's own memory writes persist there).
+    # S3 is only the initial seed, so exclude those files to avoid clobbering EFS with
+    # a stale S3 version on every cold start.
+    if [ "$EFS_MODE" = "true" ]; then
+        aws s3 sync "${S3_BASE}/workspace/" "$WORKSPACE/" \
+            --exclude "MEMORY.md" --exclude "memory/*" --exclude "USER.md" \
+            --exclude "PERSONAL_SOUL.md" --exclude "HEARTBEAT.md" --exclude "output/*" \
+            --quiet --region "$AWS_REGION" 2>/dev/null || true
+    else
+        aws s3 sync "${S3_BASE}/workspace/" "$WORKSPACE/" \
+            --quiet --region "$AWS_REGION" 2>/dev/null || true
+    fi
     # Run workspace_assembler synchronously (will get SOUL from S3 + assemble)
     if [ -f "/app/workspace_assembler.py" ] && [ "$BASE_TENANT_ID" != "unknown" ]; then
         timeout 25 python3 /app/workspace_assembler.py \
@@ -154,6 +187,15 @@ dc_token = os.environ.get('DISCORD_BOT_TOKEN', '')
 if dc_token:
     c['channels'].setdefault('discord', {})
     c['channels']['discord']['token'] = dc_token
+    # Pre-authorize Discord user IDs via allowFrom so approved users skip the
+    # interactive DM pairing flow. DISCORD_ALLOW_FROM is a comma-separated list
+    # of Discord user IDs (per-employee, set on the ECS task definition).
+    allow_raw = os.environ.get('DISCORD_ALLOW_FROM', '').strip()
+    if allow_raw:
+        allow = [x.strip() for x in allow_raw.split(',') if x.strip()]
+        if allow:
+            c['channels']['discord']['allowFrom'] = allow
+            print('[entrypoint] Discord allowFrom pre-authorized: %d id(s)' % len(allow))
     print('[entrypoint] Discord bot token injected')
 
 with open(config_path, 'w') as f:
@@ -295,7 +337,16 @@ echo "[entrypoint] server.py PID=${SERVER_PID}"
 # =============================================================================
 (
     echo "[bg] Pulling workspace from S3..."
-    aws s3 sync "${S3_BASE}/workspace/" "$WORKSPACE/" --exclude "output/*" --quiet 2>/dev/null || true
+    # In EFS mode, EFS is authoritative for memory/user files — exclude them so the
+    # S3 seed doesn't clobber admin edits or the container's own persisted memory.
+    if [ "$EFS_MODE" = "true" ]; then
+        aws s3 sync "${S3_BASE}/workspace/" "$WORKSPACE/" \
+            --exclude "MEMORY.md" --exclude "memory/*" --exclude "USER.md" \
+            --exclude "PERSONAL_SOUL.md" --exclude "HEARTBEAT.md" --exclude "output/*" \
+            --quiet 2>/dev/null || true
+    else
+        aws s3 sync "${S3_BASE}/workspace/" "$WORKSPACE/" --exclude "output/*" --quiet 2>/dev/null || true
+    fi
 
     # Detect shared agent: if tenant_id starts with "shared_" or matches a shared agent pattern
     # The tenant router sets SHARED_AGENT_ID env var for shared agents

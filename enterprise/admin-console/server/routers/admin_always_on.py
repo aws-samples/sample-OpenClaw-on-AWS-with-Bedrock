@@ -87,6 +87,12 @@ def _build_agent_env(agent: dict, agent_id: str, stack: str, bucket: str,
 
     model, guardrail, _, _ = _TIER_DEFAULTS.get(tier, _TIER_DEFAULTS["standard"])
 
+    # Pre-authorized Discord user IDs (skip interactive DM pairing). Stored on the
+    # agent record as discordAllowFrom (list or comma-separated string).
+    allow_from = agent.get("discordAllowFrom", "")
+    if isinstance(allow_from, list):
+        allow_from = ",".join(str(x) for x in allow_from)
+
     return [
         {"name": "SESSION_ID",         "value": session_id},
         {"name": "SHARED_AGENT_ID",    "value": agent_id},
@@ -102,6 +108,7 @@ def _build_agent_env(agent: dict, agent_id: str, stack: str, bucket: str,
         {"name": "FARGATE_TIER",       "value": tier},
         {"name": "TELEGRAM_BOT_TOKEN", "value": telegram_token},
         {"name": "DISCORD_BOT_TOKEN",  "value": discord_token},
+        {"name": "DISCORD_ALLOW_FROM", "value": allow_from},
     ]
 
 
@@ -271,6 +278,14 @@ def start_always_on_agent(agent_id: str, authorization: str = Header(default="")
                 access_point_id = _create_access_point(efs_id, emp_id)
         except Exception as e:
             print(f"[always-on] Access Point creation failed (non-fatal): {e}")
+
+        # Tell the container whether EFS is mounted via an access point. The access
+        # point root is already scoped to /{employee}, so the entrypoint must NOT
+        # append the employee id again (avoids /emp-x/emp-x/workspace double-prefix
+        # that diverges from the admin console's root-mounted /emp-x/workspace view).
+        env_vars = [e for e in env_vars if e.get("name") != "EFS_ACCESS_POINT"]
+        env_vars.append({"name": "EFS_ACCESS_POINT",
+                         "value": "true" if access_point_id else "false"})
 
         # Check if service already exists
         service_exists = False
@@ -523,9 +538,17 @@ def reload_always_on_agent(agent_id: str, body: dict, authorization: str = Heade
     ecs_cfg = _get_ecs_config()
     service_name = _ecs_service_name(agent_id)
 
+    # Resolve per-tier config so reload preserves the employee's tier (model, CPU,
+    # memory, task role) instead of silently regressing to base/standard defaults.
+    emp_id = agent.get("employeeId", agent_id)
+    tier = _resolve_tier(emp_id)
+    _, _, tier_cpu, tier_memory = _TIER_DEFAULTS.get(tier, _TIER_DEFAULTS["standard"])
+    tier_role_arn = _get_tier_role_arn(stack, tier)
+
     telegram_token, discord_token = _resolve_bot_tokens(stack, agent_id)
     env_vars = _build_agent_env(agent, agent_id, stack, bucket,
-                                ddb_table, ddb_region, telegram_token, discord_token)
+                                ddb_table, ddb_region, telegram_token, discord_token,
+                                tier=tier)
 
     try:
         ecs = boto3.client("ecs", region_name=GATEWAY_REGION)
@@ -544,14 +567,14 @@ def reload_always_on_agent(agent_id: str, body: dict, authorization: str = Heade
         agent_family = f"{stack}-ao-{service_name}"
         agent_td = ecs.register_task_definition(
             family=agent_family,
-            taskRoleArn=base_td["taskRoleArn"],
+            taskRoleArn=tier_role_arn,
             executionRoleArn=base_td["executionRoleArn"],
             networkMode="awsvpc",
             containerDefinitions=clean_containers,
             volumes=base_td.get("volumes", []),
             requiresCompatibilities=["FARGATE"],
-            cpu=base_td.get("cpu", "512"),
-            memory=base_td.get("memory", "1024"),
+            cpu=tier_cpu,
+            memory=tier_memory,
             runtimePlatform={"cpuArchitecture": "ARM64", "operatingSystemFamily": "LINUX"},
         )
         agent_td_arn = agent_td["taskDefinition"]["taskDefinitionArn"]
