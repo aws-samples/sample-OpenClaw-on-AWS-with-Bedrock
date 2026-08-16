@@ -79,15 +79,18 @@ Parameters:
 
   OpenClawVersion:
     Type: String
-    Default: "2026.6.9"
+    Default: "2026.6.34"
     AllowedValues:
       - "2026.3.24"
       - "2026.4.5"
       - "2026.4.10"
       - "2026.4.27"
       - "2026.6.9"
+      - "2026.6.34"
+      - "2026.7.1"
+      - "extended-stable"
       - "latest"
-    Description: "OpenClaw version (pinned). 2026.3.24 (no model approval needed, WeChat compatible). 2026.4.5+ (auto-discovery, embeddings). 2026.6.9 (current stable; requires system Node, handled by this template). Avoid 'latest' in production — pin to a tested version."
+    Description: "OpenClaw version. Default 2026.6.34 tracks OpenClaw's 'extended-stable' channel (the maintained production line). Use the 'extended-stable' dist-tag to auto-follow that channel, or '2026.7.1' for the latest release. 2026.3.24 (no model approval, WeChat compatible); 2026.4.5+ (auto-discovery, embeddings). Avoid 'latest' in production — prefer a pinned version or 'extended-stable'."
 
   EnableMonitoring:
     Type: String
