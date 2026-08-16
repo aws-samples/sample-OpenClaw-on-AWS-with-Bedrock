@@ -79,14 +79,15 @@ Parameters:
 
   OpenClawVersion:
     Type: String
-    Default: "2026.4.27"
+    Default: "2026.6.9"
     AllowedValues:
       - "2026.3.24"
       - "2026.4.5"
       - "2026.4.10"
       - "2026.4.27"
+      - "2026.6.9"
       - "latest"
-    Description: "OpenClaw version. 2026.3.24 (no model approval needed, WeChat compatible). 2026.4.5+ (auto-discovery, embeddings)."
+    Description: "OpenClaw version (pinned). 2026.3.24 (no model approval needed, WeChat compatible). 2026.4.5+ (auto-discovery, embeddings). 2026.6.9 (current stable; requires system Node, handled by this template). Avoid 'latest' in production — pin to a tested version."
 
   EnableMonitoring:
     Type: String
@@ -1104,25 +1105,21 @@ Resources:
                     echo "[4/9] Skipping Docker (EnableSandbox=false)..."
                   fi
 
-                  # Install Node.js
-                  echo "[5/9] Installing Node.js..."
-                  sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
-                  cd ~
-                  NVM_VERSION="v0.40.1"
+                  # Install Node.js — SYSTEM-level via NodeSource (NOT a version manager).
+                  # OpenClaw 2026.6.x audits the gateway service runtime: a Node managed by
+                  # NVM/fnm/asdf etc. is flagged "gateway-runtime-node-version-manager" and the
+                  # updater migrates it on upgrade, which breaks the systemd unit ("Unit file
+                  # not found"). A system Node at /usr/bin/node avoids that migration entirely.
+                  echo "[5/9] Installing Node.js 22 LTS (system, via NodeSource)..."
                   for i in 1 2 3; do
-                    curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${!NVM_VERSION}/install.sh" -o /tmp/nvm-install.sh && break
-                    echo "NVM download attempt $i failed, retrying in 5s..."
+                    curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh && break
+                    echo "NodeSource download attempt $i failed, retrying in 5s..."
                     sleep 5
                   done
-                  bash /tmp/nvm-install.sh
-                  rm -f /tmp/nvm-install.sh
-
-                  export NVM_DIR="$HOME/.nvm"
-                  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-
-                  nvm install 22.22.0
-                  nvm use 22.22.0
-                  nvm alias default 22.22.0
+                  bash /tmp/nodesource_setup.sh
+                  rm -f /tmp/nodesource_setup.sh
+                  apt-get install -y nodejs
+                  echo "Node: $(node --version)  npm: $(npm --version)"
 
                   npm config set registry https://registry.npmjs.org/
                   OPENCLAW_VERSION="${OpenClawVersion}"
@@ -1134,22 +1131,17 @@ Resources:
                     IGNORE_FLAG="--ignore-scripts"
                     echo "ARM64 + 3.24: installing with --ignore-scripts"
                   fi
+                  # Global install goes to system path (/usr/lib/node_modules) — runs as root (UserData)
                   npm install -g openclaw@$OPENCLAW_VERSION --timeout=300000 $IGNORE_FLAG || {
                     npm cache clean --force
                     npm install -g openclaw@$OPENCLAW_VERSION --timeout=300000 $IGNORE_FLAG
                   }
 
-                  if ! grep -q 'NVM_DIR' ~/.bashrc; then
-                      echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc
-                      echo '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> ~/.bashrc
-                  fi
-                  UBUNTU_SCRIPT
-
-                  # Create openclaw wrapper
-                  OPENCLAW_MJS=$(find /home/ubuntu/.nvm -path "*/node_modules/openclaw/openclaw.mjs" 2>/dev/null | head -1)
-                  NODE_BIN=$(find /home/ubuntu/.nvm -name node -type f 2>/dev/null | head -1)
-                  if [ -z "$OPENCLAW_MJS" ] || [ -z "$NODE_BIN" ]; then
-                    echo "FATAL: openclaw or node not found"
+                  # Create openclaw wrapper (system node + system global openclaw)
+                  NODE_BIN=$(command -v node)
+                  OPENCLAW_MJS="$(npm root -g)/openclaw/openclaw.mjs"
+                  if [ ! -f "$OPENCLAW_MJS" ] || [ -z "$NODE_BIN" ]; then
+                    echo "FATAL: openclaw or node not found (OPENCLAW_MJS=$OPENCLAW_MJS NODE_BIN=$NODE_BIN)"
                     exit 1
                   fi
                   echo "#!/bin/bash" > /usr/local/bin/openclaw
@@ -1258,8 +1250,6 @@ Resources:
                   sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus OPENCLAW_STATE_DIR="$STATE_DIR" bash -c '
                   export HOME=/home/ubuntu
                   export OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR
-                  export NVM_DIR="$HOME/.nvm"
-                  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
                   openclaw gateway install || echo "Gateway install failed"
 
                   # Fix systemd service to include OPENCLAW_STATE_DIR
@@ -1290,8 +1280,6 @@ Resources:
                     echo "WARNING: Gateway did not start, trying fallback..."
                     sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -c '
                     export HOME=/home/ubuntu
-                    export NVM_DIR="$HOME/.nvm"
-                    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
                     systemctl --user restart openclaw-gateway.service || openclaw gateway &
                     '
                     sleep 5
@@ -1301,15 +1289,27 @@ Resources:
                   echo "[8.5/9] Enabling messaging channels..."
                   sudo -H -u ubuntu bash -c '
                   export HOME=/home/ubuntu
-                  export NVM_DIR="$HOME/.nvm"
-                  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
                   openclaw plugins enable whatsapp || echo "WhatsApp plugin enable failed"
                   openclaw plugins enable telegram || echo "Telegram plugin enable failed"
                   openclaw plugins enable discord || echo "Discord plugin enable failed"
                   openclaw plugins enable slack || echo "Slack plugin enable failed"
+                  '
+                  # Community plugins install into the system global node_modules (needs root)
                   npm install -g openclaw-feishu@latest --timeout=60000 2>/dev/null || echo "Feishu plugin install skipped"
                   npm install -g openclaw-wechat@latest --timeout=60000 2>/dev/null || echo "WeChat plugin install skipped"
-                  '
+
+                  # Safety net (issue #168): repoint extension "openclaw" peer links to the
+                  # current global install so they never go stale across Node/openclaw upgrades.
+                  # With system Node these paths are already stable; this guards residual/legacy
+                  # links (e.g. left over from an nvm-based deploy that was upgraded in place).
+                  GLOBAL_OPENCLAW="$(npm root -g)/openclaw"
+                  sudo -H -u ubuntu GLOBAL_OPENCLAW="$GLOBAL_OPENCLAW" bash -c '
+                  export HOME=/home/ubuntu
+                  shopt -s nullglob
+                  for link in /home/ubuntu/.openclaw/extensions/*/node_modules/openclaw; do
+                    ln -sfn "$GLOBAL_OPENCLAW" "$link" && echo "repointed peer link: $link"
+                  done
+                  ' || echo "peer-link repoint skipped"
 
                   # Copy SOUL.md
                   cp /opt/openclaw/SOUL.md "$STATE_DIR/SOUL.md"
@@ -1392,8 +1392,6 @@ Resources:
                   echo "[post] Running openclaw doctor..."
                   sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash -c '
                   export HOME=/home/ubuntu
-                  export NVM_DIR="$HOME/.nvm"
-                  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
                   openclaw doctor --fix 2>&1 || echo "openclaw doctor completed with warnings"
                   '
 
@@ -1445,8 +1443,6 @@ Resources:
                     echo "$(date) Running channel connectivity check..." >> $LOG
                     CHANNEL_STATUS=$(sudo -H -u ubuntu bash -c '
                       export HOME=/home/ubuntu
-                      export NVM_DIR="$HOME/.nvm"
-                      [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
                       export XDG_RUNTIME_DIR=/run/user/1000
                       export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
                       timeout 30 openclaw status 2>&1
