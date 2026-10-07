@@ -653,6 +653,16 @@ def assemble_workspace(
     except Exception as e:
         logger.warning("SESSION_CONTEXT.md generation failed (non-fatal): %s", e)
 
+    # Sync MCP servers into openclaw.json
+    try:
+        sys_path = os.path.dirname(os.path.abspath(__file__))
+        if sys_path not in sys.path:
+            sys.path.insert(0, sys_path)
+        from server import _sync_mcp_servers_config
+        _sync_mcp_servers_config()
+    except Exception as e:
+        logger.debug("MCP servers sync from workspace assembler skipped: %s", e)
+
     # Enforce workspace budget (100MB) — clean old output files if over
     _enforce_workspace_budget(workspace)
 

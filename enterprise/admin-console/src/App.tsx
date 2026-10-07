@@ -97,7 +97,7 @@ function AppRoutes() {
       <Route path="/workspace" element={user && user.role !== 'employee' ? <Layout><Workspace /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/skills" element={user && user.role !== 'employee' ? <Layout><ToolsSkills /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/skills/:itemId" element={user && user.role !== 'employee' ? <Layout><ToolsSkillsDetail /></Layout> : <Navigate to="/login" replace />} />
-      <Route path="/mcp" element={user && user.role !== 'employee' ? <Layout><MCPConnections /></Layout> : <Navigate to="/login" replace />} />
+      <Route path="/mcp" element={user && user.role === 'admin' ? <Layout><MCPConnections /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/knowledge" element={user && user.role !== 'employee' ? <Layout><KnowledgeBase /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/bindings" element={user && user.role !== 'employee' ? <Layout><Bindings /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/channels" element={user && user.role !== 'employee' ? <Layout><IMChannels /></Layout> : <Navigate to="/login" replace />} />

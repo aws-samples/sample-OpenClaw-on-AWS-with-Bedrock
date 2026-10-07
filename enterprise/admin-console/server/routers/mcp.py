@@ -1,59 +1,66 @@
 """
-MCP Connections — Validate & connect GitHub / ADO / Jira MCP servers.
+MCP Connections — Validate & record GitHub / ADO / Jira MCP server bindings.
 
-Secrets are stored in AWS Secrets Manager.
-The backend validates the secret exists and starts the MCP subprocess.
+Credentials are kept in AWS Secrets Manager under openclaw/mcp/*.
+The admin console validates secret existence and records bindings in DynamoDB.
+At container start / reload, agent containers read bindings and resolve tokens
+directly into their OpenClaw configuration (mcpServers).
 
 Endpoints: /api/v1/mcp/*
 """
 
 import os
-import subprocess
-import threading
-import time
 import logging
 from typing import Dict, List, Optional
+from datetime import datetime, timezone
 
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 
-from shared import require_role
+import db
+from shared import require_role, bump_config_version
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["mcp"])
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Config & Definitions ──────────────────────────────────────────────────────
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 STACK_NAME = os.environ.get("STACK_NAME", "openclaw")
+SECRET_PREFIX = "openclaw/mcp/"
 
-# MCP server commands: provider_id → (command_args, required_env_keys)
-MCP_SERVER_COMMANDS: Dict[str, dict] = {
+# Supported MCP server specs with pinned packages and strictly allowed env vars
+MCP_PROVIDERS: Dict[str, dict] = {
     "github": {
-        "cmd": ["npx", "-y", "@modelcontextprotocol/server-github"],
-        "required_env": ["GITHUB_TOKEN"],
+        "name": "GitHub",
+        "cmd": ["npx", "-y", "@modelcontextprotocol/server-github@2025.4.8"],
+        "required_env": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
     },
     "ado": {
-        "cmd": ["npx", "-y", "@azure-devops/mcp-server"],
-        "required_env": ["ADO_TOKEN", "ADO_ORG_URL"],
+        "name": "Azure DevOps",
+        "cmd": ["npx", "-y", "@azure-devops/mcp@2.10.0"],
+        "required_env": ["AZURE_DEVOPS_TOKEN", "AZURE_DEVOPS_ORG_URL"],
+    },
+    "azure-devops": {
+        "name": "Azure DevOps",
+        "cmd": ["npx", "-y", "@azure-devops/mcp@2.10.0"],
+        "required_env": ["AZURE_DEVOPS_TOKEN", "AZURE_DEVOPS_ORG_URL"],
     },
     "jira": {
-        "cmd": ["uvx", "mcp-atlassian"],
-        "required_env": ["JIRA_URL", "JIRA_USER_EMAIL", "JIRA_API_TOKEN"],
+        "name": "Jira",
+        "cmd": ["uvx", "--from", "mcp-atlassian==0.23.1", "mcp-atlassian"],
+        "required_env": ["JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"],
     },
 }
 
-# In-memory process registry: provider_id → subprocess.Popen
-_mcp_processes: Dict[str, subprocess.Popen] = {}
-_lock = threading.Lock()
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
 class SecretMapping(BaseModel):
-    key: str          # env var name, e.g. GITHUB_TOKEN
-    secretName: str   # secret path in AWS Secrets Manager, e.g. /openclaw/mcp/GITHUB_TOKEN
+    key: str          # env var name, restricted to provider's required_env
+    secretName: str   # secret name in AWS Secrets Manager, must start with openclaw/mcp/
 
 
 class ConnectRequest(BaseModel):
@@ -69,222 +76,261 @@ class TestRequest(BaseModel):
     provider: str
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Security & Validation Helpers ─────────────────────────────────────────────
 
-def _get_secret(secret_name: str) -> str:
-    """Fetch a secret value from AWS Secrets Manager."""
+def _validate_and_normalize_secret_name(secret_name: str) -> str:
+    """Enforce fixed secret prefix openclaw/mcp/ without leading slash."""
+    s = secret_name.strip()
+    if s.startswith("/"):
+        s = s.lstrip("/")
+    if not s.startswith(SECRET_PREFIX):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Secret name must start with '{SECRET_PREFIX}' (e.g. openclaw/mcp/github_token)"
+        )
+    if ".." in s or "\\" in s or any(c.isspace() for c in s):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid secret name format."
+        )
+    return s
+
+
+def _check_secret_exists(secret_name: str) -> None:
+    """Validate that the secret exists and is accessible in AWS Secrets Manager.
+    Logs errors server-side and returns generic sanitized client messages."""
     client = boto3.client("secretsmanager", region_name=AWS_REGION)
     try:
-        resp = client.get_secret_value(SecretId=secret_name)
-        return resp.get("SecretString", "")
+        # describe_secret checks existence and permissions without pulling the secret payload
+        client.describe_secret(SecretId=secret_name)
     except ClientError as e:
-        code = e.response["Error"]["Code"]
+        code = e.response.get("Error", {}).get("Code", "")
         if code in ("ResourceNotFoundException", "NoSuchEntityException"):
+            logger.warning("Secret not found: %s", secret_name)
             raise HTTPException(
                 status_code=404,
-                detail=f"Secret not found: {secret_name}. Create it in AWS Secrets Manager first."
+                detail=f"Secret not found in AWS Secrets Manager: {secret_name}. Create it first."
             )
         if code == "AccessDeniedException":
+            logger.warning("Access denied to secret: %s", secret_name)
             raise HTTPException(
                 status_code=403,
-                detail=f"Access denied to secret {secret_name}. Check IAM permissions for secretsmanager:GetSecretValue."
+                detail="Access denied to secret in AWS Secrets Manager. Check IAM permissions."
             )
-        raise HTTPException(status_code=500, detail=f"AWS error: {e.response['Error']['Message']}")
-
-
-def _resolve_secrets(secret_mappings: List[SecretMapping]) -> Dict[str, str]:
-    """Resolve all secret names → actual values from Secrets Manager."""
-    resolved: Dict[str, str] = {}
-    for mapping in secret_mappings:
-        if not mapping.secretName.strip():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Secret name for {mapping.key} cannot be empty."
-            )
-        value = _get_secret(mapping.secretName.strip())
-        if not value:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Secret {mapping.secretName} exists but is empty."
-            )
-        resolved[mapping.key] = value
-    return resolved
-
-
-def _kill_process(provider: str) -> None:
-    """Stop a running MCP subprocess."""
-    with _lock:
-        proc = _mcp_processes.pop(provider, None)
-    if proc:
-        try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        logger.info("MCP process for %s terminated", provider)
-
-
-def _spawn_mcp_process(provider: str, env: Dict[str, str]) -> subprocess.Popen:
-    """Start the MCP server subprocess with resolved env vars injected."""
-    config = MCP_SERVER_COMMANDS.get(provider)
-    if not config:
-        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
-
-    # Build environment: inherit current + inject secrets
-    child_env = os.environ.copy()
-    child_env.update(env)
-
-    logger.info("Spawning MCP server for provider=%s cmd=%s", provider, config["cmd"])
-    proc = subprocess.Popen(
-        config["cmd"],
-        env=child_env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        # MCP servers communicate over stdio; we leave stdin open
-    )
-    # Brief check to catch immediate startup failures
-    time.sleep(0.8)
-    if proc.poll() is not None:
-        stderr_out = proc.stderr.read(512).decode(errors="replace")
+        logger.error("AWS Secrets Manager error for %s: %s", secret_name, code)
         raise HTTPException(
             status_code=500,
-            detail=f"MCP server for {provider} exited immediately. stderr: {stderr_out}"
+            detail="Failed to validate secret in AWS Secrets Manager."
         )
-    return proc
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Unexpected error validating secret %s: %s", secret_name, e)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to validate secret."
+        )
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@router.post("/mcp/connect")
+@router.post("/api/v1/mcp/connect")
 async def mcp_connect(
     body: ConnectRequest,
     authorization: Optional[str] = Header(None),
 ):
     """
-    Validate secrets in AWS Secrets Manager and start the MCP server subprocess.
-    Returns 200 if connected successfully.
+    Validate secrets in AWS Secrets Manager and record binding in DynamoDB.
+    Restricted to admin role only.
+    Enforces fixed secret prefix and strictly whitelisted provider env keys.
+    Triggers config version bump to notify running agent containers.
     """
-    require_role(authorization, ["admin", "manager"])
+    user = require_role(authorization, ["admin"])
 
     provider = body.provider.lower()
-    if provider not in MCP_SERVER_COMMANDS:
+    if provider not in MCP_PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
-    # Kill any existing process for this provider
-    _kill_process(provider)
+    spec = MCP_PROVIDERS[provider]
+    allowed_keys = set(spec["required_env"])
 
-    # Resolve secrets from Secrets Manager (will raise HTTPException on failure)
-    resolved_env = _resolve_secrets(body.secretNames)
+    # Validate secret mappings against strict provider env keys
+    secret_map: Dict[str, str] = {}
+    for mapping in body.secretNames:
+        key = mapping.key.strip()
+        if key not in allowed_keys:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid env key '{key}' for provider '{provider}'. Allowed keys: {sorted(allowed_keys)}"
+            )
+        sec_name = _validate_and_normalize_secret_name(mapping.secretName)
+        _check_secret_exists(sec_name)
+        secret_map[key] = sec_name
 
-    # Verify all required env keys are present
-    required = MCP_SERVER_COMMANDS[provider]["required_env"]
-    missing = [k for k in required if k not in resolved_env]
+    # Ensure all required keys for the provider are supplied
+    missing = [k for k in spec["required_env"] if k not in secret_map]
     if missing:
         raise HTTPException(
             status_code=400,
             detail=f"Missing required secret mappings for {provider}: {missing}"
         )
 
-    # Spawn the MCP server
-    proc = _spawn_mcp_process(provider, resolved_env)
+    # Record binding in DynamoDB CONFIG#mcp-servers
+    current_config = db.get_config("mcp-servers") or {}
+    servers = current_config.get("servers", {})
+    now_iso = datetime.now(timezone.utc).isoformat()
 
-    with _lock:
-        _mcp_processes[provider] = proc
+    servers[provider] = {
+        "enabled": True,
+        "provider": provider,
+        "secrets": secret_map,
+        "updatedAt": now_iso,
+        "updatedBy": user.employee_id,
+    }
+    # Keep ado and azure-devops keys in sync
+    if provider == "ado":
+        servers["azure-devops"] = {
+            "enabled": True,
+            "provider": "azure-devops",
+            "secrets": secret_map,
+            "updatedAt": now_iso,
+            "updatedBy": user.employee_id,
+        }
+    elif provider == "azure-devops":
+        servers["ado"] = {
+            "enabled": True,
+            "provider": "ado",
+            "secrets": secret_map,
+            "updatedAt": now_iso,
+            "updatedBy": user.employee_id,
+        }
 
-    logger.info("MCP connected: provider=%s pid=%d", provider, proc.pid)
+    db.set_config("mcp-servers", {"servers": servers, "updatedAt": now_iso})
+
+    # Propagate config change to agent containers
+    bump_config_version()
+
+    # Record audit entry
+    db.create_audit_entry({
+        "timestamp": now_iso,
+        "eventType": "mcp_connect",
+        "actorId": user.employee_id,
+        "actorName": user.name,
+        "targetType": "mcp_server",
+        "targetId": provider,
+        "detail": f"Connected MCP server for {provider} with secret keys: {sorted(secret_map.keys())}",
+        "status": "success",
+    })
+
+    logger.info("MCP server configured: provider=%s by=%s", provider, user.employee_id)
     return {
         "status": "connected",
         "provider": provider,
-        "pid": proc.pid,
-        "message": f"{provider.upper()} MCP server started (PID {proc.pid})",
+        "message": f"{provider.upper()} MCP server binding recorded and configured ✓",
     }
 
 
-@router.post("/mcp/disconnect")
+@router.post("/api/v1/mcp/disconnect")
 async def mcp_disconnect(
     body: DisconnectRequest,
     authorization: Optional[str] = Header(None),
 ):
-    """Stop a running MCP server subprocess."""
-    require_role(authorization, ["admin", "manager"])
+    """Disable MCP server binding and notify running agent containers."""
+    user = require_role(authorization, ["admin"])
 
     provider = body.provider.lower()
-    was_running = provider in _mcp_processes
-    _kill_process(provider)
+    current_config = db.get_config("mcp-servers") or {}
+    servers = current_config.get("servers", {})
 
+    was_connected = False
+    providers_to_update = [provider]
+    if provider == "ado":
+        providers_to_update.append("azure-devops")
+    elif provider == "azure-devops":
+        providers_to_update.append("ado")
+
+    for p in providers_to_update:
+        if p in servers and servers[p].get("enabled"):
+            was_connected = True
+            servers[p]["enabled"] = False
+            servers[p]["updatedAt"] = datetime.now(timezone.utc).isoformat()
+            servers[p]["updatedBy"] = user.employee_id
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    db.set_config("mcp-servers", {"servers": servers, "updatedAt": now_iso})
+
+    bump_config_version()
+
+    # Record audit entry
+    db.create_audit_entry({
+        "timestamp": now_iso,
+        "eventType": "mcp_disconnect",
+        "actorId": user.employee_id,
+        "actorName": user.name,
+        "targetType": "mcp_server",
+        "targetId": provider,
+        "detail": f"Disconnected MCP server for {provider}",
+        "status": "success",
+    })
+
+    logger.info("MCP server disconnected: provider=%s by=%s", provider, user.employee_id)
     return {
         "status": "disconnected",
         "provider": provider,
-        "wasRunning": was_running,
+        "wasRunning": was_connected,
     }
 
 
-@router.post("/mcp/test")
+@router.post("/api/v1/mcp/test")
 async def mcp_test(
     body: TestRequest,
     authorization: Optional[str] = Header(None),
 ):
-    """Send a lightweight list_tools ping to verify the MCP process is healthy."""
-    require_role(authorization, ["admin", "manager"])
+    """Validate that the configured secret mappings for the provider still exist and are accessible."""
+    user = require_role(authorization, ["admin"])
 
     provider = body.provider.lower()
-    with _lock:
-        proc = _mcp_processes.get(provider)
+    if provider not in MCP_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
-    if not proc:
+    current_config = db.get_config("mcp-servers") or {}
+    servers = current_config.get("servers", {})
+    entry = servers.get(provider)
+
+    if not entry or not entry.get("enabled"):
         raise HTTPException(
             status_code=409,
-            detail=f"No MCP server running for {provider}. Connect first."
+            detail=f"No active MCP server binding for {provider}. Connect first."
         )
 
-    if proc.poll() is not None:
-        with _lock:
-            _mcp_processes.pop(provider, None)
-        raise HTTPException(
-            status_code=500,
-            detail=f"MCP server for {provider} has stopped unexpectedly (exit code {proc.returncode})."
-        )
+    secrets = entry.get("secrets", {})
+    for _, sec_name in secrets.items():
+        _check_secret_exists(sec_name)
 
     return {
         "status": "ok",
         "provider": provider,
-        "pid": proc.pid,
-        "message": f"{provider.upper()} MCP server is running (PID {proc.pid}) ✓",
+        "message": f"{provider.upper()} MCP configuration and secrets verified ✓",
     }
 
 
-@router.get("/mcp/status")
+@router.get("/api/v1/mcp/status")
 async def mcp_status(authorization: Optional[str] = Header(None)):
-    """Return the live status of all MCP server processes."""
-    require_role(authorization, ["admin", "manager"])
+    """Return configured status of all MCP server providers."""
+    user = require_role(authorization, ["admin"])
+
+    current_config = db.get_config("mcp-servers") or {}
+    servers = current_config.get("servers", {})
 
     result = {}
-    stale = []
-
-    with _lock:
-        snapshot = list(_mcp_processes.items())
-
-    for provider, proc in snapshot:
-        alive = proc.poll() is None
-        if not alive:
-            stale.append(provider)
-        result[provider] = {
-            "connected": alive,
-            "pid": proc.pid if alive else None,
+    for p in ["github", "ado", "azure-devops", "jira"]:
+        entry = servers.get(p, {})
+        connected = bool(entry.get("enabled", False))
+        result[p] = {
+            "connected": connected,
+            "secrets": entry.get("secrets", {}),
+            "updatedAt": entry.get("updatedAt", ""),
+            "updatedBy": entry.get("updatedBy", ""),
         }
-
-    # Clean up stale entries outside the snapshot loop
-    if stale:
-        with _lock:
-            for provider in stale:
-                _mcp_processes.pop(provider, None)
-
-    # Fill in not-connected providers
-    for provider in MCP_SERVER_COMMANDS:
-        if provider not in result:
-            result[provider] = {"connected": False, "pid": None}
 
     return result

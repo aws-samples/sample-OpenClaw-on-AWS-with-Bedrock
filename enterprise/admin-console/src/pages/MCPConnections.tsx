@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   Github, GitBranch, LifeBuoy, Check, X, Loader,
   KeyRound, ChevronDown, ChevronUp, Unplug, Plug, AlertCircle, ShieldCheck, Zap, ExternalLink,
@@ -12,7 +12,7 @@ type MCPProvider = 'github' | 'ado' | 'jira';
 type ConnectionStatus = 'idle' | 'validating' | 'connected' | 'error';
 
 interface SecretField {
-  key: string;      // env var name, e.g. GITHUB_TOKEN
+  key: string;      // env var name, e.g. GITHUB_PERSONAL_ACCESS_TOKEN
   label: string;
   placeholder: string;
   hint: string;
@@ -53,12 +53,12 @@ const PROVIDERS: ProviderConfig[] = [
     gradientFrom: '#1f2937',
     gradientTo: '#111827',
     iconBg: 'rgba(255,255,255,0.08)',
-    mcpServer: 'npx @modelcontextprotocol/server-github',
+    mcpServer: 'npx -y @modelcontextprotocol/server-github@2025.4.8',
     secretFields: [
       {
-        key: 'GITHUB_TOKEN',
+        key: 'GITHUB_PERSONAL_ACCESS_TOKEN',
         label: 'GitHub Personal Access Token',
-        placeholder: 'e.g. /openclaw/mcp/GITHUB_TOKEN',
+        placeholder: 'e.g. openclaw/mcp/GITHUB_PERSONAL_ACCESS_TOKEN',
         hint: 'Secret name in AWS Secrets Manager. Needs repo, read:org scopes.',
       },
     ],
@@ -72,18 +72,18 @@ const PROVIDERS: ProviderConfig[] = [
     gradientFrom: '#1e3a5f',
     gradientTo: '#111827',
     iconBg: 'rgba(96,165,250,0.1)',
-    mcpServer: 'npx @azure-devops/mcp-server',
+    mcpServer: 'npx -y @azure-devops/mcp@2.10.0',
     secretFields: [
       {
-        key: 'ADO_TOKEN',
+        key: 'AZURE_DEVOPS_TOKEN',
         label: 'ADO Personal Access Token',
-        placeholder: 'e.g. /openclaw/mcp/ADO_TOKEN',
+        placeholder: 'e.g. openclaw/mcp/AZURE_DEVOPS_TOKEN',
         hint: 'Secret name in AWS Secrets Manager. Needs Code (Read & Write), Work Items scopes.',
       },
       {
-        key: 'ADO_ORG_URL',
+        key: 'AZURE_DEVOPS_ORG_URL',
         label: 'Organization URL',
-        placeholder: 'e.g. /openclaw/mcp/ADO_ORG_URL',
+        placeholder: 'e.g. openclaw/mcp/AZURE_DEVOPS_ORG_URL',
         hint: 'Secret holding your ADO org URL like https://dev.azure.com/myorg',
         isUrl: true,
       },
@@ -98,25 +98,25 @@ const PROVIDERS: ProviderConfig[] = [
     gradientFrom: '#1a2d4a',
     gradientTo: '#111827',
     iconBg: 'rgba(96,165,250,0.1)',
-    mcpServer: 'uvx mcp-atlassian',
+    mcpServer: 'uvx --from mcp-atlassian==0.23.1 mcp-atlassian',
     secretFields: [
       {
         key: 'JIRA_URL',
         label: 'Jira Base URL',
-        placeholder: 'e.g. /openclaw/mcp/JIRA_URL',
+        placeholder: 'e.g. openclaw/mcp/JIRA_URL',
         hint: 'Secret holding your Jira URL, e.g. https://yourorg.atlassian.net',
         isUrl: true,
       },
       {
-        key: 'JIRA_USER_EMAIL',
-        label: 'Jira Account Email',
-        placeholder: 'e.g. /openclaw/mcp/JIRA_USER_EMAIL',
-        hint: 'Secret holding your Atlassian account email.',
+        key: 'JIRA_USERNAME',
+        label: 'Jira Username / Email',
+        placeholder: 'e.g. openclaw/mcp/JIRA_USERNAME',
+        hint: 'Secret holding your Atlassian account username or email.',
       },
       {
         key: 'JIRA_API_TOKEN',
         label: 'Jira API Token',
-        placeholder: 'e.g. /openclaw/mcp/JIRA_API_TOKEN',
+        placeholder: 'e.g. openclaw/mcp/JIRA_API_TOKEN',
         hint: 'Secret name in AWS Secrets Manager. Generate at id.atlassian.com/manage-profile/security/api-tokens.',
       },
     ],
@@ -158,26 +158,37 @@ function StatusPill({ status, error }: { status: ConnectionStatus; error?: strin
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium"
       style={{ background: 'rgba(165,180,252,0.12)', color: '#a5b4fc' }}>
       <Loader size={10} className="animate-spin" />
-      Validating…
+      Validating Secrets…
     </span>
   );
   if (status === 'error') return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium"
-      style={{ background: 'rgba(248,113,113,0.12)', color: '#f87171' }}>
-      <X size={10} />
-      {error || 'Error'}
+      style={{ background: 'rgba(248,113,113,0.12)', color: '#f87171' }}
+      title={error}>
+      <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
+      Failed
     </span>
   );
   return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium"
       style={{ background: 'rgba(255,255,255,0.06)', color: '#9aa0a6' }}>
-      <span className="w-1.5 h-1.5 rounded-full bg-[#9aa0a6]" />
-      Not connected
+      <span className="w-1.5 h-1.5 rounded-full bg-gray-500" />
+      Not Configured
     </span>
   );
 }
 
 // ─── Provider Card ────────────────────────────────────────────────────────────
+
+interface ProviderCardProps {
+  provider: ProviderConfig;
+  state: ConnectionState;
+  onFieldChange: (key: string, value: string) => void;
+  onConnect: () => void;
+  onDisconnect: () => void;
+  onTest: () => void;
+  onToggleExpand: () => void;
+}
 
 function ProviderCard({
   provider,
@@ -187,34 +198,38 @@ function ProviderCard({
   onDisconnect,
   onTest,
   onToggleExpand,
-}: {
-  provider: ProviderConfig;
-  state: ConnectionState;
-  onFieldChange: (key: string, value: string) => void;
-  onConnect: () => void;
-  onDisconnect: () => void;
-  onTest: () => void;
-  onToggleExpand: () => void;
-}) {
-  const isConnected = state.status === 'connected';
+}: ProviderCardProps) {
+  const isConnected  = state.status === 'connected';
   const isValidating = state.status === 'validating';
-  const allFilled = provider.secretFields.every(f => (state.secretValues[f.key] || '').trim() !== '');
+
+  // All secret fields must be non-empty before user can click Connect
+  const allFilled = provider.secretFields.every(
+    f => (state.secretValues[f.key] || '').trim().length > 0
+  );
 
   return (
-    <div className="rounded-2xl overflow-hidden border transition-all duration-300"
+    <div
+      className="rounded-2xl border transition-all duration-200 overflow-hidden"
       style={{
-        borderColor: isConnected ? 'rgba(74,222,128,0.25)' : 'var(--color-dark-border)',
         background: 'var(--color-dark-card)',
-        boxShadow: isConnected ? '0 0 0 1px rgba(74,222,128,0.1)' : 'none',
+        borderColor: isConnected
+          ? 'rgba(74,222,128,0.25)'
+          : state.status === 'error'
+          ? 'rgba(248,113,113,0.25)'
+          : 'var(--color-dark-border)',
       }}>
-
-      {/* ── Header ── */}
-      <div className="flex items-center justify-between p-5">
-        <div className="flex items-center gap-4">
-          {/* Icon */}
-          <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0"
-            style={{ background: provider.iconBg, color: provider.color }}>
-            <ProviderIcon id={provider.id} size={22} />
+      {/* ── Card Header ── */}
+      <div className="p-5 flex items-start justify-between gap-4">
+        <div className="flex items-start gap-4">
+          {/* Provider Icon */}
+          <div
+            className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0"
+            style={{
+              background: provider.iconBg,
+              color: provider.color,
+              border: `1px solid ${provider.color}22`,
+            }}>
+            <ProviderIcon id={provider.id} size={24} />
           </div>
 
           <div>
@@ -222,30 +237,65 @@ function ProviderCard({
               <h3 className="text-base font-semibold text-text-primary">{provider.name}</h3>
               <StatusPill status={state.status} error={state.validationError} />
             </div>
-            <p className="text-xs text-text-muted mt-0.5 max-w-md">{provider.description}</p>
+            <p className="text-xs text-text-muted mt-1 max-w-lg leading-relaxed">
+              {provider.description}
+            </p>
             {isConnected && state.connectedAt && (
-              <p className="text-[10px] text-green-400/70 mt-1">Connected {state.connectedAt}</p>
+              <p className="text-[11px] text-text-muted mt-1.5 flex items-center gap-1 font-mono">
+                <Check size={11} className="text-green-400" /> Connected at {state.connectedAt}
+              </p>
             )}
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          {isConnected && (
+        {/* Action buttons */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {isConnected ? (
             <>
-              <button onClick={onTest}
-                className="rounded-lg px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1.5"
-                style={{ background: 'rgba(165,180,252,0.1)', color: '#a5b4fc' }}>
-                <Zap size={12} /> Test
+              <button
+                onClick={onTest}
+                className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors hover:bg-dark-hover"
+                style={{ borderColor: 'var(--color-dark-border)', color: '#9aa0a6' }}>
+                <Zap size={12} className="text-yellow-400" /> Test
               </button>
-              <button onClick={onDisconnect}
-                className="rounded-lg px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1.5"
-                style={{ background: 'rgba(248,113,113,0.08)', color: '#f87171' }}>
+              <button
+                onClick={onDisconnect}
+                className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors hover:bg-red-500/10 hover:border-red-500/30 text-red-400"
+                style={{ borderColor: 'rgba(248,113,113,0.2)' }}>
                 <Unplug size={12} /> Disconnect
               </button>
             </>
+          ) : (
+            <button
+              onClick={() => {
+                if (!state.expandedConfig) onToggleExpand();
+                else onConnect();
+              }}
+              disabled={isValidating}
+              className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg transition-all"
+              style={{
+                background: allFilled && state.expandedConfig
+                  ? 'linear-gradient(135deg, #6366f1, #4f46e5)'
+                  : 'rgba(255,255,255,0.08)',
+                color: allFilled && state.expandedConfig ? '#fff' : '#c9d1d9',
+                cursor: isValidating ? 'not-allowed' : 'pointer',
+              }}>
+              {isValidating ? (
+                <><Loader size={12} className="animate-spin" /> Connecting…</>
+              ) : state.expandedConfig ? (
+                <><Check size={12} /> Connect</>
+              ) : (
+                <><Plug size={12} /> Configure</>
+              )}
+            </button>
           )}
-          <a href={provider.docsUrl} target="_blank" rel="noopener noreferrer"
-            className="rounded-lg p-2 transition-colors text-text-muted hover:text-text-primary hover:bg-dark-hover">
+
+          <a
+            href={provider.docsUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-lg p-2 transition-colors text-text-muted hover:text-text-primary hover:bg-dark-hover"
+            title="MCP Docs">
             <ExternalLink size={14} />
           </a>
           <button onClick={onToggleExpand}
@@ -348,29 +398,33 @@ function ProviderCard({
 // ─── Agentic Pipeline Preview ─────────────────────────────────────────────────
 
 function AgenticPipelinePreview({ connected }: { connected: MCPProvider[] }) {
-  const examples: Record<MCPProvider, string> = {
-    github: '"Review open PRs touching the auth module and summarize risk"',
-    ado:    '"List all active work items in sprint 42 assigned to me"',
-    jira:   '"Create a high-priority Jira ticket for the login bug reported today"',
-  };
-
   if (connected.length === 0) return null;
+
+  const examples: Record<MCPProvider, string> = {
+    github: 'Review PR #42 in openclaw/core and suggest performance improvements.',
+    ado:    'Query sprint backlog for high-priority bugs and create a summary report.',
+    jira:   'Find all OPEN tickets assigned to team platform and check if blockers exist.',
+  };
 
   return (
     <div className="rounded-2xl border p-5 space-y-3"
-      style={{ borderColor: 'rgba(165,180,252,0.15)', background: 'rgba(99,102,241,0.05)' }}>
+      style={{
+        background: 'rgba(99,102,241,0.03)',
+        borderColor: 'rgba(165,180,252,0.15)',
+      }}>
       <div className="flex items-center gap-2">
-        <Zap size={14} className="text-primary" />
-        <h4 className="text-sm font-semibold text-text-primary">Try in Playground</h4>
-        <Badge color="primary">Live</Badge>
+        <Zap size={14} className="text-yellow-400" />
+        <h4 className="text-xs font-semibold text-text-primary uppercase tracking-wider">
+          Ready for Agent Workflows
+        </h4>
       </div>
       <p className="text-xs text-text-muted">Connected MCPs are ready. Use these prompts in the Playground:</p>
       <div className="space-y-2">
-        {connected.map(id => (
-          <div key={id} className="flex items-start gap-2.5 px-3 py-2.5 rounded-xl"
-            style={{ background: 'var(--color-dark-bg)', border: '1px solid var(--color-dark-border)' }}>
-            <ProviderIcon id={id} size={13} />
-            <span className="text-xs text-text-secondary font-mono">{examples[id]}</span>
+        {connected.map(p => (
+          <div key={p} className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-mono"
+            style={{ background: 'var(--color-dark-bg)', color: '#c9d1d9' }}>
+            <span className="text-primary font-semibold">[{p.toUpperCase()}]</span>
+            <span className="truncate">{examples[p]}</span>
           </div>
         ))}
       </div>
@@ -389,6 +443,30 @@ export default function MCPConnections() {
     setStates(prev => ({ ...prev, [id]: { ...prev[id], ...patch } }));
   }, []);
 
+  // Restore existing connection status from server on mount
+  useEffect(() => {
+    api.get<Record<string, { connected: boolean; secrets?: Record<string, string>; updatedAt?: string }>>('/mcp/status')
+      .then(statusData => {
+        if (!statusData) return;
+        setStates(prev => {
+          const next = { ...prev };
+          for (const p of PROVIDERS) {
+            const info = statusData[p.id] || (p.id === 'ado' ? statusData['azure-devops'] : undefined);
+            if (info?.connected) {
+              next[p.id] = {
+                ...next[p.id],
+                status: 'connected',
+                secretValues: { ...(info.secrets || {}), ...next[p.id].secretValues },
+                connectedAt: info.updatedAt ? new Date(info.updatedAt).toLocaleTimeString() : '',
+              };
+            }
+          }
+          return next;
+        });
+      })
+      .catch(() => { /* best-effort status check */ });
+  }, []);
+
   const handleFieldChange = (id: MCPProvider, key: string, value: string) => {
     setStates(prev => ({
       ...prev,
@@ -405,7 +483,7 @@ export default function MCPConnections() {
     update(provider.id, { status: 'validating', validationError: '', testResult: '' });
 
     try {
-      // Call backend to validate secrets exist in Secrets Manager and start MCP
+      // Call backend to validate secrets exist in Secrets Manager and record binding
       await api.post('/mcp/connect', {
         provider: provider.id,
         secretNames: provider.secretFields.map(f => ({
@@ -422,7 +500,7 @@ export default function MCPConnections() {
     } catch (err: unknown) {
       const msg = err instanceof Error
         ? err.message
-        : 'Could not resolve secrets in AWS Secrets Manager. Check the secret name and IAM permissions.';
+        : 'Could not validate secrets in AWS Secrets Manager. Check secret names and IAM permissions.';
       update(provider.id, {
         status: 'error',
         validationError: msg,
@@ -462,7 +540,7 @@ export default function MCPConnections() {
     <div className="space-y-6 animate-fade-enter">
       <PageHeader
         title="MCP Connections"
-        subtitle="Connect your developer tools to OpenClaw agents via Model Context Protocol. Tokens are resolved securely from AWS Secrets Manager."
+        subtitle="Connect developer tools to OpenClaw agents via Model Context Protocol. Tokens are resolved securely from AWS Secrets Manager."
         actions={
           <div className="flex items-center gap-3">
             {connectedCount > 0 && (
@@ -489,10 +567,9 @@ export default function MCPConnections() {
         <div className="text-xs text-text-muted space-y-1">
           <p className="text-text-secondary font-medium">How it works</p>
           <p>
-            Enter the <span className="text-primary font-mono">secret name</span> (path) stored in{' '}
-            <span className="text-primary">AWS Secrets Manager</span>. OpenClaw validates the secret exists,
-            injects it into the MCP server subprocess, and makes the tools available to your playground agents
-            — all without the token ever touching the UI.
+            Enter the <span className="text-primary font-mono">secret name</span> (e.g. <span className="font-mono text-primary">openclaw/mcp/GITHUB_PERSONAL_ACCESS_TOKEN</span>) stored in{' '}
+            <span className="text-primary">AWS Secrets Manager</span>. OpenClaw validates the secret exists and records the binding in DynamoDB.
+            The MCP server configuration is injected directly into agent containers (AgentCore / Fargate) at container start/reload, with credentials resolved securely inside the container at runtime — without tokens ever touching the admin console or UI.
           </p>
         </div>
       </div>
@@ -525,21 +602,22 @@ export default function MCPConnections() {
         </div>
         <pre className="text-xs font-mono text-text-secondary leading-6 overflow-x-auto"
           style={{ background: 'var(--color-dark-bg)', borderRadius: 12, padding: '12px 16px' }}>
-{`# Org-wide (admin configures once)
-/openclaw/mcp/GITHUB_TOKEN
-/openclaw/mcp/ADO_TOKEN
-/openclaw/mcp/ADO_ORG_URL
-/openclaw/mcp/JIRA_URL
-/openclaw/mcp/JIRA_USER_EMAIL
-/openclaw/mcp/JIRA_API_TOKEN
+{`# Org-wide (admin configures once in AWS Secrets Manager)
+openclaw/mcp/GITHUB_PERSONAL_ACCESS_TOKEN
+openclaw/mcp/AZURE_DEVOPS_TOKEN
+openclaw/mcp/AZURE_DEVOPS_ORG_URL
+openclaw/mcp/JIRA_URL
+openclaw/mcp/JIRA_USERNAME
+openclaw/mcp/JIRA_API_TOKEN
 
 # Per-user overrides (optional)
-/openclaw/mcp/{emp_id}/GITHUB_TOKEN`}
+openclaw/mcp/{emp_id}/GITHUB_PERSONAL_ACCESS_TOKEN`}
         </pre>
         <p className="text-[11px] text-text-muted">
-          Per-user secrets take priority over org-wide ones. The EC2 IAM role needs{' '}
-          <span className="font-mono text-primary">secretsmanager:GetSecretValue</span> on{' '}
-          <span className="font-mono text-primary">arn:aws:secretsmanager:*:*:secret:/openclaw/mcp/*</span>
+          Per-user secrets take priority over org-wide ones. IAM roles need{' '}
+          <span className="font-mono text-primary">secretsmanager:GetSecretValue</span> and{' '}
+          <span className="font-mono text-primary">secretsmanager:DescribeSecret</span> on{' '}
+          <span className="font-mono text-primary">arn:aws:secretsmanager:*:*:secret:openclaw/*</span>
         </p>
       </div>
     </div>

@@ -288,6 +288,104 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
         logger.warning("DynamoDB usage write failed (non-fatal): %s", e)
 
 
+def _sync_mcp_servers_config(oc_config_path: str = None) -> None:
+    """Read CONFIG#mcp-servers from DynamoDB, resolve credentials from AWS Secrets Manager
+    inside the agent container, and inject mcpServers into openclaw.json."""
+    try:
+        import boto3 as _b3_mcp
+        ddb = _b3_mcp.resource("dynamodb", region_name=DYNAMODB_REGION)
+        table = ddb.Table(DYNAMODB_TABLE)
+        resp = table.get_item(Key={"PK": "ORG#acme", "SK": "CONFIG#mcp-servers"})
+        item = resp.get("Item")
+        servers_cfg = item.get("servers", {}) if item else {}
+
+        mcp_specs = {
+            "github": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-github@2025.4.8"],
+                "required_env": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+            },
+            "azure-devops": {
+                "command": "npx",
+                "args": ["-y", "@azure-devops/mcp@2.10.0"],
+                "required_env": ["AZURE_DEVOPS_TOKEN", "AZURE_DEVOPS_ORG_URL"],
+            },
+            "ado": {
+                "command": "npx",
+                "args": ["-y", "@azure-devops/mcp@2.10.0"],
+                "required_env": ["AZURE_DEVOPS_TOKEN", "AZURE_DEVOPS_ORG_URL"],
+            },
+            "jira": {
+                "command": "uvx",
+                "args": ["--from", "mcp-atlassian==0.23.1", "mcp-atlassian"],
+                "required_env": ["JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"],
+            },
+        }
+
+        active_servers = {}
+        sm_client = None
+
+        for prov_key in ("github", "azure-devops", "jira"):
+            p_cfg = servers_cfg.get(prov_key) or (servers_cfg.get("ado") if prov_key == "azure-devops" else None)
+            if not p_cfg or not p_cfg.get("enabled"):
+                continue
+
+            spec = mcp_specs[prov_key]
+            secrets_map = p_cfg.get("secrets", {})
+            resolved_env = {}
+            all_resolved = True
+
+            for env_var in spec["required_env"]:
+                sec_name = secrets_map.get(env_var)
+                if not sec_name:
+                    all_resolved = False
+                    break
+                try:
+                    if sm_client is None:
+                        sm_client = _b3_mcp.client("secretsmanager", region_name=AWS_REGION_RUNTIME)
+                    val = sm_client.get_secret_value(SecretId=sec_name).get("SecretString", "")
+                    if not val:
+                        all_resolved = False
+                        break
+                    resolved_env[env_var] = val
+                except Exception as e:
+                    logger.warning("Failed to resolve secret %s for MCP %s: %s", sec_name, prov_key, e)
+                    all_resolved = False
+                    break
+
+            if all_resolved:
+                active_servers[prov_key] = {
+                    "command": spec["command"],
+                    "args": spec["args"],
+                    "env": resolved_env,
+                }
+                logger.info("Configured MCP server %s in agent container", prov_key)
+
+        candidate_paths = [
+            oc_config_path,
+            os.path.expanduser("~/.openclaw/openclaw.json"),
+            "/root/.openclaw/openclaw.json",
+            "/home/ubuntu/.openclaw/openclaw.json",
+        ]
+        target_paths = set(p for p in candidate_paths if p and os.path.isfile(p))
+
+        for target_path in target_paths:
+            try:
+                with open(target_path) as f:
+                    oc = json.load(f)
+                if active_servers:
+                    oc["mcpServers"] = active_servers
+                else:
+                    oc.pop("mcpServers", None)
+                with open(target_path, "w") as f:
+                    json.dump(oc, f, indent=2)
+                logger.info("Updated mcpServers in %s (active: %s)", target_path, list(active_servers.keys()))
+            except Exception as e:
+                logger.warning("Failed writing mcpServers to %s: %s", target_path, e)
+    except Exception as e:
+        logger.warning("Syncing MCP servers config failed (non-fatal): %s", e)
+
+
 def _ensure_workspace_assembled(tenant_id: str) -> None:
     """Assemble workspace on first invocation for a tenant.
     Runs workspace_assembler.py to merge Global + Position + Personal SOUL.
@@ -577,6 +675,12 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
 
         except Exception as e:
             logger.warning("Dynamic agent config failed (non-fatal): %s", e)
+
+        # 6. Inject MCP servers from DynamoDB CONFIG#mcp-servers
+        try:
+            _sync_mcp_servers_config(oc_config_path)
+        except Exception as e:
+            logger.warning("MCP servers sync failed (non-fatal): %s", e)
 
         # CHANNELS.md is generated by workspace_assembler.py (step 7).
         # It runs both at container startup (entrypoint.sh bg worker) and here on
@@ -979,12 +1083,20 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
                     _assembled_tenants.discard(t)
                     evicted.append(t)
             logger.info("Admin refresh: evicted %d cached tenants for %s: %s", len(evicted), emp_id, evicted)
+            try:
+                _sync_mcp_servers_config()
+            except Exception:
+                pass
             self._respond(200, {"refreshed": True, "empId": emp_id, "evicted": evicted})
         elif self.path == "/admin/refresh-all":
             with _assembly_lock:
                 count = len(_assembled_tenants)
                 _assembled_tenants.clear()
             logger.info("Admin refresh-all: evicted %d cached tenants", count)
+            try:
+                _sync_mcp_servers_config()
+            except Exception:
+                pass
             self._respond(200, {"refreshed": True, "evictedCount": count})
         else:
             self._respond(404, {"error": "not found"})
@@ -1067,6 +1179,10 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
                 with _assembly_lock:
                     count = len(_assembled_tenants)
                     _assembled_tenants.clear()
+                try:
+                    _sync_mcp_servers_config()
+                except Exception:
+                    pass
                 self._respond(200, {"refreshed": True, "evictedCount": count})
             else:
                 evicted = []
@@ -1075,6 +1191,10 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
                     for t in to_remove:
                         _assembled_tenants.discard(t)
                         evicted.append(t)
+                try:
+                    _sync_mcp_servers_config()
+                except Exception:
+                    pass
                 self._respond(200, {"refreshed": True, "empId": emp_id, "evicted": evicted})
             return
 
@@ -1382,6 +1502,10 @@ def main():
     server = ThreadedServer(("0.0.0.0", port), AgentCoreHandler)
     logger.info("HTTP server listening on port %d", port)
     logger.info("openclaw binary: %s", OPENCLAW_BIN)
+
+    # Sync MCP servers into openclaw.json on container startup
+    threading.Thread(target=_sync_mcp_servers_config, daemon=True).start()
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
