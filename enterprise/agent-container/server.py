@@ -290,37 +290,17 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
 
 def _sync_mcp_servers_config(oc_config_path: str = None) -> None:
     """Read CONFIG#mcp-servers from DynamoDB, resolve credentials from AWS Secrets Manager
-    inside the agent container, and inject mcpServers into openclaw.json."""
+    inside the agent container, and inject into openclaw.json under both 'mcp.servers' (canonical
+    OpenClaw 2026.3.24 schema) and 'mcpServers' (legacy/tooling compatibility)."""
     try:
         import boto3 as _b3_mcp
+        import shutil
+        import base64
         ddb = _b3_mcp.resource("dynamodb", region_name=DYNAMODB_REGION)
         table = ddb.Table(DYNAMODB_TABLE)
         resp = table.get_item(Key={"PK": "ORG#acme", "SK": "CONFIG#mcp-servers"})
         item = resp.get("Item")
         servers_cfg = item.get("servers", {}) if item else {}
-
-        mcp_specs = {
-            "github": {
-                "command": "npx",
-                "args": ["-y", "@modelcontextprotocol/server-github@2025.4.8"],
-                "required_env": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
-            },
-            "azure-devops": {
-                "command": "npx",
-                "args": ["-y", "@azure-devops/mcp@2.10.0"],
-                "required_env": ["AZURE_DEVOPS_TOKEN", "AZURE_DEVOPS_ORG_URL"],
-            },
-            "ado": {
-                "command": "npx",
-                "args": ["-y", "@azure-devops/mcp@2.10.0"],
-                "required_env": ["AZURE_DEVOPS_TOKEN", "AZURE_DEVOPS_ORG_URL"],
-            },
-            "jira": {
-                "command": "uvx",
-                "args": ["--from", "mcp-atlassian==0.23.1", "mcp-atlassian"],
-                "required_env": ["JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"],
-            },
-        }
 
         active_servers = {}
         sm_client = None
@@ -330,12 +310,17 @@ def _sync_mcp_servers_config(oc_config_path: str = None) -> None:
             if not p_cfg or not p_cfg.get("enabled"):
                 continue
 
-            spec = mcp_specs[prov_key]
             secrets_map = p_cfg.get("secrets", {})
             resolved_env = {}
             all_resolved = True
 
-            for env_var in spec["required_env"]:
+            req_vars = {
+                "github": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+                "azure-devops": ["AZURE_DEVOPS_TOKEN", "AZURE_DEVOPS_ORG_URL"],
+                "jira": ["JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"],
+            }[prov_key]
+
+            for env_var in req_vars:
                 sec_name = secrets_map.get(env_var)
                 if not sec_name:
                     all_resolved = False
@@ -353,13 +338,61 @@ def _sync_mcp_servers_config(oc_config_path: str = None) -> None:
                     all_resolved = False
                     break
 
-            if all_resolved:
-                active_servers[prov_key] = {
-                    "command": spec["command"],
-                    "args": spec["args"],
-                    "env": resolved_env,
+            if not all_resolved:
+                continue
+
+            # Determine command, args, and final environment
+            if prov_key == "github":
+                token = resolved_env["GITHUB_PERSONAL_ACCESS_TOKEN"]
+                env = {
+                    "GITHUB_PERSONAL_ACCESS_TOKEN": token,
+                    "GITHUB_TOKEN": token,
                 }
-                logger.info("Configured MCP server %s in agent container", prov_key)
+                if shutil.which("mcp-server-github"):
+                    cmd, args = "mcp-server-github", []
+                elif os.path.exists("/usr/lib/node_modules/@modelcontextprotocol/server-github/dist/index.js"):
+                    cmd, args = "node", ["/usr/lib/node_modules/@modelcontextprotocol/server-github/dist/index.js"]
+                else:
+                    cmd, args = "npx", ["-y", "@modelcontextprotocol/server-github@2025.4.8"]
+
+                active_servers["github"] = {"command": cmd, "args": args, "env": env}
+                logger.info("Configured GitHub MCP server (%s) in agent container", cmd)
+
+            elif prov_key == "azure-devops":
+                token = resolved_env["AZURE_DEVOPS_TOKEN"]
+                org_url = resolved_env["AZURE_DEVOPS_ORG_URL"]
+                org_name = org_url.rstrip("/").split("/")[-1] if org_url else "default"
+                b64_pat = base64.b64encode(f":{token}".encode()).decode()
+                env = {
+                    "AZURE_DEVOPS_TOKEN": token,
+                    "ADO_MCP_AUTH_TOKEN": token,
+                    "PERSONAL_ACCESS_TOKEN": b64_pat,
+                    "AZURE_DEVOPS_ORG_URL": org_url,
+                }
+                server_args = [org_name, "--authentication", "envvar"]
+                if shutil.which("mcp-server-azuredevops"):
+                    cmd, args = "mcp-server-azuredevops", server_args
+                elif os.path.exists("/usr/lib/node_modules/@azure-devops/mcp/dist/index.js"):
+                    cmd, args = "node", ["/usr/lib/node_modules/@azure-devops/mcp/dist/index.js"] + server_args
+                else:
+                    cmd, args = "npx", ["-y", "@azure-devops/mcp@2.10.0"] + server_args
+
+                active_servers["azure-devops"] = {"command": cmd, "args": args, "env": env}
+                logger.info("Configured Azure DevOps MCP server (%s) for org %s", cmd, org_name)
+
+            elif prov_key == "jira":
+                env = {
+                    "JIRA_URL": resolved_env["JIRA_URL"],
+                    "JIRA_USERNAME": resolved_env["JIRA_USERNAME"],
+                    "JIRA_API_TOKEN": resolved_env["JIRA_API_TOKEN"],
+                }
+                if shutil.which("mcp-atlassian"):
+                    cmd, args = "mcp-atlassian", []
+                else:
+                    cmd, args = "uvx", ["--from", "mcp-atlassian==0.23.1", "mcp-atlassian"]
+
+                active_servers["jira"] = {"command": cmd, "args": args, "env": env}
+                logger.info("Configured Jira MCP server (%s) in agent container", cmd)
 
         candidate_paths = [
             oc_config_path,
@@ -369,19 +402,37 @@ def _sync_mcp_servers_config(oc_config_path: str = None) -> None:
         ]
         target_paths = set(p for p in candidate_paths if p and os.path.isfile(p))
 
+        # If no config file found, try default ~/.openclaw/openclaw.json
+        if not target_paths:
+            default_p = os.path.expanduser("~/.openclaw/openclaw.json")
+            try:
+                os.makedirs(os.path.dirname(default_p), exist_ok=True)
+                with open(default_p, "w") as f:
+                    json.dump({"agents": {"defaults": {}}}, f, indent=2)
+                target_paths.add(default_p)
+            except Exception:
+                pass
+
         for target_path in target_paths:
             try:
                 with open(target_path) as f:
                     oc = json.load(f)
                 if active_servers:
+                    if "mcp" not in oc or not isinstance(oc["mcp"], dict):
+                        oc["mcp"] = {}
+                    oc["mcp"]["servers"] = active_servers
                     oc["mcpServers"] = active_servers
                 else:
+                    if "mcp" in oc and isinstance(oc["mcp"], dict):
+                        oc["mcp"].pop("servers", None)
+                        if not oc["mcp"]:
+                            oc.pop("mcp", None)
                     oc.pop("mcpServers", None)
                 with open(target_path, "w") as f:
                     json.dump(oc, f, indent=2)
-                logger.info("Updated mcpServers in %s (active: %s)", target_path, list(active_servers.keys()))
+                logger.info("Updated MCP servers in %s (active: %s)", target_path, list(active_servers.keys()))
             except Exception as e:
-                logger.warning("Failed writing mcpServers to %s: %s", target_path, e)
+                logger.warning("Failed writing MCP servers to %s: %s", target_path, e)
     except Exception as e:
         logger.warning("Syncing MCP servers config failed (non-fatal): %s", e)
 
@@ -594,6 +645,7 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
         # 5. Dynamic agent config: read from DynamoDB and update openclaw.json
         # Hierarchy: employee override > position override > global default
         # Covers: model, memory compaction, context window, language preference
+        oc_config_path = os.path.expanduser("~/.openclaw/openclaw.json")
         try:
             import boto3 as _b3_model
             ddb = _b3_model.resource("dynamodb", region_name=DYNAMODB_REGION)

@@ -540,7 +540,7 @@ export default function MCPConnections() {
     <div className="space-y-6 animate-fade-enter">
       <PageHeader
         title="MCP Connections"
-        subtitle="Connect developer tools to OpenClaw agents via Model Context Protocol. Tokens are resolved securely from AWS Secrets Manager."
+        description="Connect developer tools to OpenClaw agents via Model Context Protocol. Tokens are resolved securely from AWS Secrets Manager."
         actions={
           <div className="flex items-center gap-3">
             {connectedCount > 0 && (

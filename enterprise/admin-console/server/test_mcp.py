@@ -265,29 +265,184 @@ class TestMCPEndpointsFunctional(unittest.TestCase):
 
 
 class TestAgentContainerInjection(unittest.TestCase):
-    """Test that agent container server.py contains the MCP config injection logic."""
+    """Test that agent container server.py contains MCP config injection logic and schema compliance."""
 
-    def test_server_py_has_mcp_injection(self):
+    def test_server_py_has_mcp_injection_and_schema(self):
         content = _read("../../agent-container/server.py")
         self.assertIn("def _sync_mcp_servers_config", content)
         self.assertIn("CONFIG#mcp-servers", content)
-        self.assertIn("mcpServers", content)
+        # Verifies dual schema: canonical OpenClaw 2026.3.24 (mcp.servers) and legacy (mcpServers)
+        self.assertIn('oc["mcp"]["servers"] = active_servers', content)
+        self.assertIn('oc["mcpServers"] = active_servers', content)
+        # Packages and commands
         self.assertIn("@modelcontextprotocol/server-github@2025.4.8", content)
         self.assertIn("@azure-devops/mcp@2.10.0", content)
         self.assertIn("mcp-atlassian==0.23.1", content)
+        # Binary execution fallbacks
+        self.assertIn("mcp-server-github", content)
+        self.assertIn("mcp-server-azuredevops", content)
+        self.assertIn("mcp-atlassian", content)
+        # Azure DevOps org argument and token handling
+        self.assertIn("ADO_MCP_AUTH_TOKEN", content)
+        self.assertIn("PERSONAL_ACCESS_TOKEN", content)
+        self.assertIn("--authentication", content)
+
+    def test_dockerfile_preinstalls_mcp_servers(self):
+        """Dockerfile must preinstall all MCP packages so microVMs run offline in restricted VPCs."""
+        dockerfile = _read("../../agent-container/Dockerfile")
+        self.assertIn("@azure-devops/mcp@2.10.0", dockerfile)
+        self.assertIn("@modelcontextprotocol/server-github@2025.4.8", dockerfile)
+        self.assertIn("mcp-atlassian==0.23.1", dockerfile)
+        # npm and npx must be copied to runtime stage
+        self.assertIn("COPY --from=builder /usr/bin/npm /usr/bin/npm", dockerfile)
+        self.assertIn("COPY --from=builder /usr/bin/npx /usr/bin/npx", dockerfile)
+        # Symlinks for executables
+        self.assertIn("mcp-server-azuredevops", dockerfile)
+        self.assertIn("mcp-server-github", dockerfile)
+
+    def test_functional_sync_mcp_servers_config(self):
+        """Direct functional test of _sync_mcp_servers_config writing both mcp.servers and mcpServers."""
+        import tempfile
+        import json
+        from unittest.mock import patch, MagicMock
+
+        # Create temporary openclaw.json
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as tmp:
+            tmp_path = tmp.name
+            json.dump({"agents": {"defaults": {}}}, tmp)
+
+        try:
+            # Mock DynamoDB and Secrets Manager
+            mock_boto3 = MagicMock()
+            mock_table = MagicMock()
+            mock_ddb = MagicMock()
+            mock_ddb.Table.return_value = mock_table
+            mock_sm = MagicMock()
+
+            # Mock DynamoDB returning enabled GitHub and ADO
+            mock_table.get_item.return_value = {
+                "Item": {
+                    "servers": {
+                        "github": {
+                            "enabled": True,
+                            "secrets": {"GITHUB_PERSONAL_ACCESS_TOKEN": "openclaw/mcp/gh_token"},
+                        },
+                        "azure-devops": {
+                            "enabled": True,
+                            "secrets": {
+                                "AZURE_DEVOPS_TOKEN": "openclaw/mcp/ado_tok",
+                                "AZURE_DEVOPS_ORG_URL": "openclaw/mcp/ado_url",
+                            },
+                        },
+                    }
+                }
+            }
+
+            # Mock Secrets Manager returning secret strings
+            def fake_get_secret(SecretId):
+                if SecretId == "openclaw/mcp/gh_token":
+                    return {"SecretString": "ghp_supersecret123"}
+                elif SecretId == "openclaw/mcp/ado_tok":
+                    return {"SecretString": "adopat456"}
+                elif SecretId == "openclaw/mcp/ado_url":
+                    return {"SecretString": "https://dev.azure.com/acmecorp"}
+                return {"SecretString": ""}
+
+            mock_sm.get_secret_value.side_effect = fake_get_secret
+
+            def fake_resource(name, **kwargs):
+                if name == "dynamodb":
+                    return mock_ddb
+                return MagicMock()
+
+            def fake_client(name, **kwargs):
+                if name == "secretsmanager":
+                    return mock_sm
+                return MagicMock()
+
+            mock_boto3.resource = fake_resource
+            mock_boto3.client = fake_client
+
+            import importlib.util
+            agent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../agent-container"))
+            if agent_dir not in sys.path:
+                sys.path.insert(0, agent_dir)
+
+            spec = importlib.util.spec_from_file_location("agent_server", os.path.join(agent_dir, "server.py"))
+            agent_server = importlib.util.module_from_spec(spec)
+
+            with patch.dict("sys.modules", {"boto3": mock_boto3}):
+                spec.loader.exec_module(agent_server)
+                # Run the sync function
+                agent_server._sync_mcp_servers_config(oc_config_path=tmp_path)
+
+            # Read back generated openclaw.json
+            with open(tmp_path) as f:
+                saved = json.load(f)
+
+            # Assert canonical OpenClaw 2026.3.24 schema
+            self.assertIn("mcp", saved)
+            self.assertIn("servers", saved["mcp"])
+            self.assertIn("github", saved["mcp"]["servers"])
+            self.assertIn("azure-devops", saved["mcp"]["servers"])
+
+            # Assert legacy mcpServers schema
+            self.assertIn("mcpServers", saved)
+            self.assertIn("github", saved["mcpServers"])
+            self.assertIn("azure-devops", saved["mcpServers"])
+
+            # Check GitHub configuration
+            gh = saved["mcp"]["servers"]["github"]
+            self.assertEqual(gh["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "ghp_supersecret123")
+            self.assertEqual(gh["env"]["GITHUB_TOKEN"], "ghp_supersecret123")
+
+            # Check Azure DevOps configuration
+            ado = saved["mcp"]["servers"]["azure-devops"]
+            self.assertEqual(ado["env"]["AZURE_DEVOPS_TOKEN"], "adopat456")
+            self.assertEqual(ado["env"]["ADO_MCP_AUTH_TOKEN"], "adopat456")
+            self.assertIn("PERSONAL_ACCESS_TOKEN", ado["env"])
+            self.assertIn("acmecorp", ado["args"])
+            self.assertIn("--authentication", ado["args"])
+            self.assertIn("envvar", ado["args"])
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
 
 class TestCloudFormationIAMPolicies(unittest.TestCase):
-    """Test that CloudFormation template includes SecretsManager permissions."""
+    """Test that CloudFormation template includes strict least-privilege SecretsManager permissions."""
 
-    def test_cfn_iam_policies(self):
-        cfn_content = _read("../../clawdbot-bedrock-agentcore-multitenancy.yaml")
-        self.assertIn("SecretsManagerAccessPolicy", cfn_content)
-        self.assertIn("secretsmanager:DescribeSecret", cfn_content)
-        self.assertIn("secretsmanager:GetSecretValue", cfn_content)
-        # Resource must match openclaw/* (no leading slash)
-        self.assertIn("arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/*", cfn_content)
+    def setUp(self):
+        self.cfn = _read("../../clawdbot-bedrock-agentcore-multitenancy.yaml")
+
+    def test_openclaw_instance_role_has_describe_only(self):
+        """Admin console host must ONLY have DescribeSecret (no privilege escalation via GetSecretValue)."""
+        self.assertIn("SecretsManagerDescribePolicy", self.cfn)
+        self.assertIn("secretsmanager:DescribeSecret", self.cfn)
+        # OpenClawInstanceRole section must not allow GetSecretValue
+        inst_role_start = self.cfn.find("OpenClawInstanceRole:")
+        inst_role_end = self.cfn.find("OpenClawInstanceProfile:", inst_role_start)
+        inst_role_snippet = self.cfn[inst_role_start:inst_role_end]
+        self.assertIn("secretsmanager:DescribeSecret", inst_role_snippet)
+        self.assertNotIn("secretsmanager:GetSecretValue", inst_role_snippet)
+        self.assertIn("arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/mcp/*", inst_role_snippet)
+
+    def test_container_roles_have_scoped_get_secret_value(self):
+        """Container roles must have GetSecretValue strictly scoped to openclaw/mcp/*."""
+        exec_role_start = self.cfn.find("AgentContainerExecutionRole:")
+        exec_role_end = self.cfn.find("OpenClawSecurityGroup:", exec_role_start)
+        exec_snippet = self.cfn[exec_role_start:exec_role_end]
+        self.assertIn("secretsmanager:GetSecretValue", exec_snippet)
+        self.assertIn("arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/mcp/*", exec_snippet)
+
+    def test_restricted_tier_has_no_secrets_access(self):
+        """Restricted tier must NOT have any secretsmanager permissions."""
+        restr_start = self.cfn.find("AlwaysOnTaskRoleRestricted:")
+        restr_end = self.cfn.find("AlwaysOnTaskRoleEngineering:", restr_start)
+        restr_snippet = self.cfn[restr_start:restr_end]
+        self.assertNotIn("secretsmanager", restr_snippet)
 
 
 if __name__ == "__main__":
     unittest.main()
+

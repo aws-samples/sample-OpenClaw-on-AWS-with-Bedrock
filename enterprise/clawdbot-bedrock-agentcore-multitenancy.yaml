@@ -450,16 +450,15 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:dynamodb:*:${AWS::AccountId}:table/${AWS::StackName}"
                   - !Sub "arn:aws:dynamodb:*:${AWS::AccountId}:table/${AWS::StackName}/index/*"
-        - PolicyName: SecretsManagerAccessPolicy
+        - PolicyName: SecretsManagerDescribePolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: SecretsManagerDescribeAndGet
+              - Sid: SecretsManagerDescribeOnly
                 Effect: Allow
                 Action:
                   - 'secretsmanager:DescribeSecret'
-                  - 'secretsmanager:GetSecretValue'
-                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/*'
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/mcp/*'
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance-role"
@@ -589,7 +588,7 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource:
-                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/*"
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/mcp/*"
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-agentcore-execution-role"
@@ -1220,7 +1219,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/*"
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/mcp/*"
 
   AlwaysOnTaskRoleRestricted:
     Type: AWS::IAM::Role
@@ -1271,11 +1270,6 @@ Resources:
                 Effect: Allow
                 Action: [logs:CreateLogStream, logs:PutLogEvents]
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${AWS::StackName}-always-on:*"
-              - Sid: SecretsManagerRead
-                Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/*"
 
   AlwaysOnTaskRoleEngineering:
     Type: AWS::IAM::Role
@@ -1325,7 +1319,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/*"
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/mcp/*"
 
   AlwaysOnTaskRoleExecutive:
     Type: AWS::IAM::Role
@@ -1380,7 +1374,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/*"
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/mcp/*"
 
   # ---- Per-tier Security Groups (network isolation) ----
   # Restricted: no internet. Standard: HTTPS only. Engineering/Executive: all outbound.
@@ -1684,7 +1678,7 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource:
-                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/*"
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openclaw/mcp/*"
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-cron-lambda-role"
