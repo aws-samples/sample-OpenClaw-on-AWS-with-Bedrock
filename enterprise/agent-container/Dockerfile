@@ -23,12 +23,10 @@ RUN if [ "$TARGETARCH" = "arm64" ] || [ "$(uname -m)" = "aarch64" ]; then \
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*
 
-# Install OpenClaw and ClawHub CLI globally via npm
+# Install OpenClaw, ClawHub CLI, and MCP servers globally via npm
 # Pin the openclaw npm package to 2026.3.24.
-# 2026.3.28 (released 2026-03-29T02:02Z) changed how the Gateway delivers responses —
-# reply no longer written to subprocess stdout — breaking IM channel integration
-# (Feishu, DingTalk, Telegram, Discord). Do NOT upgrade without testing IM channels end-to-end.
-RUN npm install -g openclaw@2026.3.24 clawhub@latest
+# Preinstall MCP servers to prevent unpinned downloads at runtime in egress-restricted environments.
+RUN npm install -g openclaw@2026.3.24 clawhub@latest @azure-devops/mcp@2.10.0 @modelcontextprotocol/server-github@2025.4.8
 
 # Install enterprise built-in skills (Layer 1)
 # These are available to all tenants with zero cold-start overhead.
@@ -70,15 +68,20 @@ FROM --platform=linux/arm64 python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends jq curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install AWS CLI via pip (not binary copy — avoids Python version mismatch)
-RUN pip install --no-cache-dir awscli boto3 requests
+# Install AWS CLI and runtime Python packages via pip
+RUN pip install --no-cache-dir awscli boto3 requests mcp-atlassian==0.23.1
 
-# Copy Node.js runtime + global modules from builder
+# Copy Node.js runtime + global modules + npm/npx from builder
 COPY --from=builder /usr/bin/node /usr/bin/node
 COPY --from=builder /usr/lib/node_modules /usr/lib/node_modules
+COPY --from=builder /usr/bin/npm /usr/bin/npm
+COPY --from=builder /usr/bin/npx /usr/bin/npx
 
-# Re-create openclaw symlink (COPY resolves symlinks, breaking ESM imports)
-RUN ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
+# Re-create openclaw and MCP server symlinks (COPY resolves symlinks, breaking ESM imports)
+RUN ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw && \
+    ln -sf /usr/lib/node_modules/@azure-devops/mcp/dist/index.js /usr/local/bin/mcp-server-azuredevops && \
+    ln -sf /usr/lib/node_modules/@modelcontextprotocol/server-github/dist/index.js /usr/local/bin/mcp-server-github && \
+    chmod +x /usr/lib/node_modules/@azure-devops/mcp/dist/index.js /usr/lib/node_modules/@modelcontextprotocol/server-github/dist/index.js
 
 # Copy V8 compile cache + templates from builder
 COPY --from=builder /app/.compile-cache /app/.compile-cache
