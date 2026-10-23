@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import Chart from 'react-apexcharts';
 import type { ApexOptions } from 'apexcharts';
-import { DollarSign, TrendingUp, TrendingDown, Users, Bot, AlertTriangle, Download, Cpu, Plus, Edit3, Save, Wallet, Zap } from 'lucide-react';
+import { DollarSign, TrendingUp, TrendingDown, Users, Bot, AlertTriangle, Download, Cpu, Edit3, Save, Zap } from 'lucide-react';
 import { Card, StatCard, Badge, Button, PageHeader, Table, Tabs, Select, Modal } from '../components/ui';
-import { useUsageSummary, useUsageByDepartment, useUsageByAgent, useUsageBudgets, useUsageTrend, useUsageByModel, useModelConfig, useUpdateModelConfig, useUpdateFallbackModel, usePositions, useAgentConfig, useKBAssignments, useUpdateBudgets, useAgents } from '../hooks/useApi';
+import { useUsageSummary, useUsageByDepartment, useUsageByAgent, useUsageBySkill, useUsageSkillUsers, useUsageBudgets, useUsageTrend, useUsageByModel, useUsageFargateCost, useModelConfig, useUpdateModelConfig, useUpdateFallbackModel, useUpdateBudgets } from '../hooks/useApi';
 import { useAuth } from '../contexts/AuthContext';
 
 const costTrendOpts: ApexOptions = {
@@ -23,34 +23,35 @@ const costTrendOpts: ApexOptions = {
 };
 
 export default function Usage() {
-  const { data: summary } = useUsageSummary();
-  const { data: byDept = [] } = useUsageByDepartment();
-  const { data: byAgent = [] } = useUsageByAgent();
-  const { data: AGENTS = [] } = useAgents();
-  const getAgentMode = (agentId: string) => AGENTS.find(a => a.id === agentId)?.deployMode;
-  const { data: byModel = [] } = useUsageByModel();
-  const { data: budgets = [] } = useUsageBudgets();
-  const { data: trend = [] } = useUsageTrend();
+  const { isAdmin } = useAuth();
+  const [activeTab, setActiveTab] = useState('department');
+  const [timeRange, setTimeRange] = useState<'1d' | '7d' | '30d' | 'mtd'>('7d');
+  const { data: summary } = useUsageSummary(timeRange);
+  const { data: byDept = [] } = useUsageByDepartment(timeRange);
+  const { data: byAgent = [] } = useUsageByAgent(timeRange);
+  const { data: bySkill = [] } = useUsageBySkill(timeRange);
+  const { data: byModel = [] } = useUsageByModel(timeRange);
+  const { data: budgets = [] } = useUsageBudgets(timeRange);
+  const { data: trend = [] } = useUsageTrend(timeRange);
+  const { data: fargateCost } = useUsageFargateCost(isAdmin);
   const { data: mc } = useModelConfig();
-  const { data: positions = [] } = usePositions();
-  const { data: agentCfgData } = useAgentConfig();
-  const { data: kbAssignData } = useKBAssignments();
   const updateDefault = useUpdateModelConfig();
   const updateFallback = useUpdateFallbackModel();
   const updateBudgets = useUpdateBudgets();
-  const [activeTab, setActiveTab] = useState('department');
-  const [timeRange, setTimeRange] = useState('7d');
   const [modelModal, setModelModal] = useState<'default' | 'fallback' | null>(null);
   const [selectedModelId, setSelectedModelId] = useState('');
   const [budgetModal, setBudgetModal] = useState(false);
   const [budgetDraft, setBudgetDraft] = useState<Record<string, string>>({});
+  const [selectedSkillId, setSelectedSkillId] = useState('');
+  const { data: skillUsers = [], isLoading: skillUsersLoading } = useUsageSkillUsers(selectedSkillId, timeRange);
 
   const s = summary || { totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0, totalRequests: 0, tenantCount: 0 };
+  const rangeLabel = timeRange === '1d' ? 'Today' : timeRange === '7d' ? 'Last 7 days' : timeRange === '30d' ? 'Last 30 days' : 'Month to date';
   const m = mc || { default: { modelId: '', modelName: '—', inputRate: 0, outputRate: 0 }, fallback: { modelId: '', modelName: '', inputRate: 0, outputRate: 0 }, positionOverrides: {}, employeeOverrides: {}, availableModels: [] };
-  const agentCfg = agentCfgData || { positionConfig: {}, employeeConfig: {} };
   const modelOptions = m.availableModels.map((mo: any) => ({ label: `${mo.modelName}  ($${mo.inputRate} in / $${mo.outputRate} out per 1M tokens)`, value: mo.modelId }));
   const findModel = (id: string) => m.availableModels.find((mo: any) => mo.modelId === id);
   const handleModelSave = () => {
+    if (!isAdmin) return;
     const model = findModel(selectedModelId); if (!model) return;
     if (modelModal === 'default') updateDefault.mutate({ modelId: model.modelId, modelName: model.modelName, inputRate: model.inputRate, outputRate: model.outputRate });
     else if (modelModal === 'fallback') updateFallback.mutate({ modelId: model.modelId, modelName: model.modelName, inputRate: model.inputRate, outputRate: model.outputRate });
@@ -58,13 +59,15 @@ export default function Usage() {
   };
 
   const handleBudgetSave = () => {
+    if (!isAdmin) return;
     const departments: Record<string, number> = {};
     for (const [dept, val] of Object.entries(budgetDraft)) {
       const n = parseFloat(val);
       if (!isNaN(n) && n > 0) departments[dept] = n;
     }
-    updateBudgets.mutate({ departments });
-    setBudgetModal(false);
+    updateBudgets.mutate({ departments }, {
+      onSuccess: () => setBudgetModal(false),
+    });
   };
 
   const buildDeptBarOpts = (depts: typeof byDept): ApexOptions => ({
@@ -129,9 +132,9 @@ export default function Usage() {
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-6 mb-6">
         <StatCard title="Bedrock Cost" value={`$${s.totalCost.toFixed(2)}`} subtitle={`${s.totalRequests} requests`} icon={<DollarSign size={22} />} color="success" />
-        <StatCard title="Fargate Cost" value={(() => { const aoCount = AGENTS.filter(a => a.deployMode === 'always-on-ecs').length; const est = aoCount * 12; return aoCount > 0 ? `~$${est}/mo` : '$0'; })()} subtitle={`${AGENTS.filter(a => a.deployMode === 'always-on-ecs').length} containers`} icon={<Zap size={22} />} color="cyan" />
-        <StatCard title="Input Tokens" value={`${(s.totalInputTokens / 1000).toFixed(0)}k`} subtitle="Today" icon={<TrendingUp size={22} />} color="primary" />
-        <StatCard title="Output Tokens" value={`${(s.totalOutputTokens / 1000).toFixed(0)}k`} subtitle="Today" icon={<TrendingDown size={22} />} color="info" />
+        <StatCard title="Fargate Cost" value={isAdmin ? `~$${(fargateCost?.totalMonthly || 0).toFixed(2)}/mo` : 'Admin only'} subtitle={isAdmin ? `${fargateCost?.count || 0} containers` : 'Restricted estimate'} icon={<Zap size={22} />} color="cyan" />
+        <StatCard title="Input Tokens" value={`${(s.totalInputTokens / 1000).toFixed(0)}k`} subtitle={rangeLabel} icon={<TrendingUp size={22} />} color="primary" />
+        <StatCard title="Output Tokens" value={`${(s.totalOutputTokens / 1000).toFixed(0)}k`} subtitle={rangeLabel} icon={<TrendingDown size={22} />} color="info" />
         <StatCard title="Active Tenants" value={s.tenantCount} subtitle="With agents" icon={<Users size={22} />} color="warning" />
         <StatCard title="Avg Cost/Req" value={s.totalRequests > 0 ? `$${(s.totalCost / s.totalRequests).toFixed(4)}` : '—'} subtitle="Per invocation" icon={<Bot size={22} />} color="info" />
       </div>
@@ -139,20 +142,17 @@ export default function Usage() {
       {/* Cost trend chart */}
       <Card className="mb-6">
         <h3 className="text-lg font-semibold text-text-primary mb-1">Cost & Request Trend</h3>
-        <p className="text-sm text-text-secondary mb-4">Daily Bedrock cost and request volume ({timeRange === '1d' ? 'Today' : timeRange === '7d' ? 'Last 7 days' : timeRange === '30d' ? 'Last 30 days' : 'Month to date'})</p>
-        {(() => {
-          const filtered = timeRange === '1d' ? trend.slice(-1) : timeRange === '7d' ? trend : trend;
-          return (
+        <p className="text-sm text-text-secondary mb-4">Daily Bedrock cost and request volume ({rangeLabel})</p>
+        {(() => (
             <Chart
-              options={{...costTrendOpts, xaxis: { ...costTrendOpts.xaxis, categories: filtered.map(t => t.date.slice(5)) }}}
+              options={{...costTrendOpts, xaxis: { ...costTrendOpts.xaxis, categories: trend.map(t => t.date.slice(5)) }}}
               series={[
-                { name: 'Cost ($)', type: 'area', data: filtered.map(t => t.openclawCost) },
-                { name: 'Requests', type: 'column', data: filtered.map(t => t.totalRequests || 0) },
+                { name: 'Cost ($)', type: 'area', data: trend.map(t => t.openclawCost) },
+                { name: 'Requests', type: 'column', data: trend.map(t => t.totalRequests || 0) },
               ]}
               type="line" height={280}
             />
-          );
-        })()}
+        ))()}
       </Card>
 
       <Card>
@@ -160,6 +160,7 @@ export default function Usage() {
           tabs={[
             { id: 'department', label: 'By Department', count: byDept.length },
             { id: 'agent', label: 'By Agent', count: byAgent.length },
+            { id: 'skill', label: 'By Skill', count: bySkill.length || undefined },
             { id: 'model', label: 'By Model' },
             { id: 'pricing', label: 'Models & Pricing' },
             { id: 'budget', label: 'Budget Management', count: budgets.filter(b => b.status !== 'ok').length || undefined },
@@ -223,12 +224,11 @@ export default function Usage() {
                 { key: 'agent', label: 'Agent', render: (a: typeof byAgent[0]) => (
                   <div><p className="font-medium">{a.agentName}</p><p className="text-xs text-text-muted">{a.employeeName}</p></div>
                 )},
-                { key: 'mode', label: 'Mode', render: (a: typeof byAgent[0]) => {
-                  const mode = getAgentMode(a.agentId);
-                  return mode === 'always-on-ecs'
+                { key: 'mode', label: 'Mode', render: (a: typeof byAgent[0]) => (
+                  a.deployMode === 'always-on-ecs'
                     ? <Badge color="success"><Zap size={10} className="inline mr-0.5" />Fargate</Badge>
-                    : <Badge color="default">Serverless</Badge>;
-                }},
+                    : <Badge color="default">Serverless</Badge>
+                )},
                 { key: 'position', label: 'Position', render: (a: typeof byAgent[0]) => <Badge>{a.positionName}</Badge> },
                 { key: 'requests', label: 'Requests', render: (a: typeof byAgent[0]) => a.requests },
                 { key: 'input', label: 'Input', render: (a: typeof byAgent[0]) => `${(a.inputTokens / 1000).toFixed(1)}k` },
@@ -241,6 +241,33 @@ export default function Usage() {
               ]}
               data={byAgent}
             />
+          )}
+
+          {activeTab === 'skill' && (
+            <div>
+              <div className="rounded-lg bg-info/5 border border-info/20 p-3 text-xs text-info mb-4">
+                Calls are counted per turn from validated Skill usage receipts. A direct SKILL.md read is used only as a compatibility fallback. Dynamic and removed Skills retain historical usage.
+              </div>
+              <Table
+                columns={[
+                  { key: 'skill', label: 'Skill', render: (item: typeof bySkill[0]) => (
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{item.skillId}</span>
+                      <Badge color={item.status === 'installed' ? 'success' : 'default'}>{item.status}</Badge>
+                    </div>
+                  ) },
+                  { key: 'calls', label: 'Calls', render: (item: typeof bySkill[0]) => item.calls },
+                  { key: 'users', label: 'Active Users', render: (item: typeof bySkill[0]) => item.activeUsers },
+                  { key: 'serverless', label: 'Serverless', render: (item: typeof bySkill[0]) => item.serverlessCalls },
+                  { key: 'alwaysOn', label: 'Always-On', render: (item: typeof bySkill[0]) => item.alwaysOnCalls },
+                  { key: 'lastUsed', label: 'Last Used', render: (item: typeof bySkill[0]) => item.lastUsedAt ? new Date(item.lastUsedAt).toLocaleString() : '—' },
+                  { key: 'details', label: '', render: (item: typeof bySkill[0]) => (
+                    <Button variant="ghost" size="sm" onClick={() => setSelectedSkillId(item.skillId)}>Users</Button>
+                  ) },
+                ]}
+                data={bySkill}
+              />
+            </div>
           )}
 
           {activeTab === 'model' && (
@@ -307,24 +334,26 @@ export default function Usage() {
                 <div className="rounded-xl bg-warning/10 border border-warning/30 px-4 py-3 flex items-start gap-2 flex-1 mr-4">
                   <AlertTriangle size={15} className="text-warning mt-0.5 shrink-0" />
                   <p className="text-xs text-warning">
-                    <strong>Tracking only — budgets are not enforced.</strong> Projected cost uses 7-day active-day average x 30.
+                    <strong>Tracking only — budgets are not enforced.</strong> Projected cost uses the selected range's active-day average x 30.
                   </p>
                 </div>
-                <Button variant="primary" size="sm" onClick={() => {
-                  const draft: Record<string, string> = {};
-                  budgets.forEach(b => { draft[b.department] = String(b.budget); });
-                  setBudgetDraft(draft);
-                  setBudgetModal(true);
-                }}>
-                  <Edit3 size={14} /> Edit Budgets
-                </Button>
+                {isAdmin && (
+                  <Button variant="primary" size="sm" onClick={() => {
+                    const draft: Record<string, string> = {};
+                    budgets.forEach(b => { draft[b.department] = String(b.budget); });
+                    setBudgetDraft(draft);
+                    setBudgetModal(true);
+                  }}>
+                    <Edit3 size={14} /> Edit Budgets
+                  </Button>
+                )}
               </div>
 
               <Table
                 columns={[
                   { key: 'dept', label: 'Department', render: (b: typeof budgets[0]) => <span className="font-medium">{b.department}</span> },
                   { key: 'budget', label: 'Monthly Budget', render: (b: typeof budgets[0]) => `$${b.budget.toFixed(0)}` },
-                  { key: 'used', label: 'Used Today', render: (b: typeof budgets[0]) => `$${b.used.toFixed(2)}` },
+                  { key: 'used', label: `Used (${rangeLabel})`, render: (b: typeof budgets[0]) => `$${b.used.toFixed(2)}` },
                   { key: 'projected', label: 'Projected Monthly', render: (b: typeof budgets[0]) => `$${b.projected.toFixed(2)}` },
                   { key: 'utilization', label: 'Utilization', render: (b: typeof budgets[0]) => {
                     const pct = Math.round(b.projected / b.budget * 100);
@@ -346,7 +375,7 @@ export default function Usage() {
                 data={budgets}
               />
               <div className="mt-4 rounded-lg bg-info/5 border border-info/20 p-3 text-xs text-info">
-                Budget resolution: Employee (individual) → Department → Global. 7-day average active-day usage x 30 for projection.
+                Budget resolution: Employee (individual) → Department → Global. Selected-range active-day average x 30 for projection.
               </div>
             </div>
           )}
@@ -361,7 +390,7 @@ export default function Usage() {
                   <Card key={r.label}>
                     <div className="flex items-center justify-between mb-3">
                       <h3 className="text-sm font-semibold text-text-primary flex items-center gap-2"><Cpu size={15} className="text-primary" />{r.label}</h3>
-                      <Button variant="default" size="sm" onClick={r.action}>Change</Button>
+                      {isAdmin && <Button variant="default" size="sm" onClick={r.action}>Change</Button>}
                     </div>
                     <div className="rounded-xl bg-surface-dim p-3 space-y-1.5">
                       <p className="text-base font-semibold text-text-primary">{r.model.modelName || '—'}</p>
@@ -404,7 +433,7 @@ export default function Usage() {
                         </div>
                         {isDefault && <Badge color="primary">Default</Badge>}
                         {isFallback && <Badge color="warning">Fallback</Badge>}
-                        {!isDefault && !isFallback && mo.enabled && (
+                        {isAdmin && !isDefault && !isFallback && mo.enabled && (
                           <Button variant="ghost" size="sm" onClick={() => updateDefault.mutate({ modelId: mo.modelId, modelName: mo.modelName, inputRate: mo.inputRate, outputRate: mo.outputRate })}>Set Default</Button>
                         )}
                       </div>
@@ -421,8 +450,31 @@ export default function Usage() {
         </div>
       </Card>
 
+      {/* Skill user drill-down */}
+      {selectedSkillId && (
+        <Modal open={true} onClose={() => setSelectedSkillId('')}
+          title={`Skill Calls — ${selectedSkillId}`}
+          footer={<div className="flex justify-end"><Button variant="default" onClick={() => setSelectedSkillId('')}>Close</Button></div>}>
+          {skillUsersLoading ? (
+            <p className="py-6 text-center text-sm text-text-muted">Loading usage...</p>
+          ) : (
+            <Table
+              columns={[
+                { key: 'employee', label: 'Employee', render: (item: typeof skillUsers[0]) => <span className="font-medium">{item.employeeName}</span> },
+                { key: 'department', label: 'Department', render: (item: typeof skillUsers[0]) => item.departmentName || '—' },
+                { key: 'calls', label: 'Calls', render: (item: typeof skillUsers[0]) => item.calls },
+                { key: 'serverless', label: 'Serverless', render: (item: typeof skillUsers[0]) => item.serverlessCalls },
+                { key: 'alwaysOn', label: 'Always-On', render: (item: typeof skillUsers[0]) => item.alwaysOnCalls },
+                { key: 'lastUsed', label: 'Last Used', render: (item: typeof skillUsers[0]) => item.lastUsedAt ? new Date(item.lastUsedAt).toLocaleString() : '—' },
+              ]}
+              data={skillUsers}
+            />
+          )}
+        </Modal>
+      )}
+
       {/* Model change modal */}
-      {modelModal && (
+      {isAdmin && modelModal && (
         <Modal open={true} onClose={() => setModelModal(null)}
           title={modelModal === 'default' ? 'Change Default Model' : 'Change Fallback Model'}
           footer={<div className="flex justify-end gap-3"><Button variant="default" onClick={() => setModelModal(null)}>Cancel</Button><Button variant="primary" onClick={handleModelSave}>Apply</Button></div>}>
@@ -433,7 +485,7 @@ export default function Usage() {
       )}
 
       {/* Budget edit modal */}
-      {budgetModal && (
+      {isAdmin && budgetModal && (
         <Modal open={true} onClose={() => setBudgetModal(false)}
           title="Edit Department Budgets"
           footer={<div className="flex justify-end gap-3">

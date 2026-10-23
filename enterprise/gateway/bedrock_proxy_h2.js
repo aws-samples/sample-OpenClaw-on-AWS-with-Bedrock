@@ -27,7 +27,7 @@ const PORT = parseInt(process.env.PROXY_PORT || '8091');
 const TENANT_ROUTER_URL = process.env.TENANT_ROUTER_URL || 'http://127.0.0.1:8090';
 const ADMIN_CONSOLE_URL = process.env.ADMIN_CONSOLE_URL || 'http://127.0.0.1:8099';
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
-const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID || 'global.amazon.nova-2-lite-v1:0';
+const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID || 'zai.glm-5';
 
 // Fast-path: enable/disable via env var (default: enabled)
 const FAST_PATH_ENABLED = process.env.FAST_PATH_ENABLED !== 'false';
@@ -179,9 +179,15 @@ async function fastPathBedrock(userText) {
 
 function stripTrailingConversationMetadata(text) {
   if (!text) return text;
+  // Surgically remove each metadata block (header + its fenced ```json ... ```
+  // code block) wherever it appears in the text, instead of deleting from the
+  // header to the end of the string. OpenClaw's buildInboundUserContextPrefix()
+  // PREPENDS these blocks before the real user text for many channels (incl.
+  // DingTalk via dingtalk-connector) — deleting "to end of string" would wipe
+  // out real commands (e.g. "/start TOKEN") that follow the metadata blocks.
   return text
-    .replace(/\n{2,}Conversation info \(untrusted metadata\):[\s\S]*$/i, '')
-    .replace(/\n{2,}Sender \(untrusted metadata\):[\s\S]*$/i, '')
+    .replace(/\n{0,2}Conversation info \(untrusted metadata\):\s*```json[\s\S]*?```/gi, '')
+    .replace(/\n{0,2}Sender \(untrusted metadata\):\s*```json[\s\S]*?```/gi, '')
     .trim();
 }
 
@@ -207,76 +213,85 @@ function unwrapChannelMessage(text) {
   return stripTrailingConversationMetadata(text);
 }
 
+function messageText(message) {
+  return (message?.content || [])
+    .filter(block => typeof block?.text === 'string')
+    .map(block => block.text)
+    .join(' ')
+    .trim();
+}
+
+function isOpenClawInternalContext(text) {
+  return /^OpenClaw runtime context for the immediately preceding user message\./i.test(text)
+    || (text.includes('<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>')
+      && text.includes('<<<END_OPENCLAW_INTERNAL_CONTEXT>>>'));
+}
+
+function jsonMetadata(text) {
+  const values = [];
+  const pattern = /```json\s*([\s\S]*?)```/gi;
+  let match;
+  while ((match = pattern.exec(text || '')) !== null) {
+    try { values.push(JSON.parse(match[1].trim())); } catch { /* ignore malformed metadata */ }
+  }
+  return values;
+}
+
 function extractUserMessage(body) {
   const messages = body.messages || [];
   const systemParts = body.system || [];
 
-  let userText = '';
+  // OpenClaw 2026.7+ appends a synthetic user block containing runtime context.
+  // Walk backwards to the latest real user-authored block instead of routing the
+  // synthetic block as channel=actions/user=a.
+  let originalUserText = '';
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user') {
-      const content = messages[i].content || [];
-      userText = content
-        .filter(b => b.text)
-        .map(b => b.text)
-        .join(' ')
-        .trim();
-      break;
-    }
+    if (messages[i].role !== 'user') continue;
+    const candidate = messageText(messages[i]);
+    if (!candidate || isOpenClawInternalContext(candidate)) continue;
+    originalUserText = candidate;
+    break;
   }
 
-  const originalUserText = userText;
+  let userText = originalUserText;
   let channel = 'unknown';
   let userId = 'unknown';
 
-  // Priority 0: Extract from OpenClaw's JSON metadata in message text
-  // OpenClaw embeds sender info as JSON in the conversation context
-  try {
-    const jsonMatch = originalUserText.match(/```json\s*\n([\s\S]*?)\n```/);
-    if (jsonMatch) {
-      const meta = JSON.parse(jsonMatch[1]);
-      if (meta.sender_id) {
-        userId = meta.sender_id;
-        // Detect channel from metadata — skip placeholder values like 'unknown'/'unkn'
-        const metaChannel = (meta.channel || '').toLowerCase();
-        if (metaChannel && metaChannel !== 'unknown' && metaChannel !== 'unkn') {
-          channel = metaChannel;
-        } else if (meta.channel_type) {
-          channel = meta.channel_type.toLowerCase();
-        } else if (originalUserText.includes('Discord')) channel = 'discord';
-        else if (originalUserText.includes('Telegram')) channel = 'telegram';
-        else if (originalUserText.includes('Slack')) channel = 'slack';
-        else if (originalUserText.includes('WhatsApp')) channel = 'whatsapp';
-        else if (originalUserText.includes('Feishu') || originalUserText.includes('feishu')) channel = 'feishu';
-        // Heuristic fallback: detect channel by sender_id format when no keyword found
-        // Telegram user IDs are 7-12 digits; Discord IDs are 17-19 digits; WhatsApp uses +phone
-        else if (/^\d{7,12}$/.test(meta.sender_id)) channel = 'telegram';
-        else if (/^\d{17,19}$/.test(meta.sender_id)) channel = 'discord';
-        else if (/^\+\d{7,15}$/.test(meta.sender_id)) channel = 'whatsapp';
-        else if (/^ou_[a-zA-Z0-9]+$/.test(meta.sender_id)) channel = 'feishu'; // Feishu Open User ID
-      }
-    }
-  } catch (e) { /* JSON parse failed, fall through to regex */ }
+  // Normalize channel identifiers reported by channel plugins.
+  const normalizeChannel = (value) => (value || '')
+    .toString().toLowerCase().replace(/-connector$/, '');
+  const applyMetadata = (meta) => {
+    if (!meta || typeof meta !== 'object') return;
+    const sender = meta.sender_id || meta.senderId || meta.user_id || meta.userId;
+    if (userId === 'unknown' && sender) userId = String(sender);
+    const candidate = meta.channel || meta.originatingChannel || meta.provider || meta.surface;
+    const normalized = normalizeChannel(candidate);
+    if (normalized && !['unknown', 'unkn', 'actions'].includes(normalized)) channel = normalized;
+  };
 
-  // Also try system prompt JSON metadata
-  try {
-    const sysText = systemParts.map(p => (typeof p === 'string' ? p : p.text || '')).join(' ');
-    const sysJsonMatch = sysText.match(/```json\s*\n([\s\S]*?)\n```/);
-    if (sysJsonMatch && userId === 'unknown') {
-      const meta = JSON.parse(sysJsonMatch[1]);
-      if (meta.sender_id) userId = meta.sender_id;
-      const sysMetaChannel = (meta.channel || '').toLowerCase();
-      if (sysMetaChannel && sysMetaChannel !== 'unknown' && sysMetaChannel !== 'unkn') {
-        channel = sysMetaChannel;
-      }
-    }
-    // Also try "label": "pitchshow (1484960930608578580)" format
-    if (userId === 'unknown') {
-      const labelMatch = sysText.match(/"label":\s*"[^"]*\((\d{10,})\)"/);
-      if (labelMatch) userId = labelMatch[1];
-      const chanMatch = sysText.match(/"channel":\s*"(\w+)"/i);
-      if (chanMatch) channel = chanMatch[1].toLowerCase();
-    }
-  } catch (e) { /* fall through */ }
+  // Scan every metadata block. The first JSON block in the system prompt may be
+  // unrelated tool/schema data, while inbound metadata can appear later.
+  for (const meta of jsonMetadata(originalUserText)) applyMetadata(meta);
+  const systemText = systemParts
+    .map(part => (typeof part === 'string' ? part : part.text || ''))
+    .join('\n');
+  for (const meta of jsonMetadata(systemText)) applyMetadata(meta);
+
+  // Connector-name hints are only a fallback when trusted metadata omitted channel.
+  if (channel === 'unknown') {
+    if (/Discord/i.test(originalUserText)) channel = 'discord';
+    else if (/Telegram/i.test(originalUserText)) channel = 'telegram';
+    else if (/Slack/i.test(originalUserText)) channel = 'slack';
+    else if (/WhatsApp/i.test(originalUserText)) channel = 'whatsapp';
+    else if (/Feishu/i.test(originalUserText)) channel = 'feishu';
+    else if (/DingTalk/i.test(originalUserText)) channel = 'dingtalk';
+  }
+
+  // Legacy metadata sometimes exposes only a display label.
+  if (userId === 'unknown') {
+    const labelMatch = systemText.match(/"label":\s*"[^"]*\((\d{6,})\)"/);
+    if (labelMatch) userId = labelMatch[1];
+  }
 
   // Priority 1: extract from user message text (original regex)
   const slackDm = originalUserText.match(/Slack DM from ([\w]+):/i);
@@ -297,18 +312,15 @@ function extractUserMessage(body) {
   else if (dcChan) { channel = 'discord'; userId = 'chan_' + dcChan[1] + '_' + dcChan[2]; }
   else if (dcDm) { channel = 'discord'; userId = 'dm_' + dcDm[1]; }
 
-  // Fallback: system prompt regex
+  // Last-resort legacy plain-text metadata. Reject internal pseudo-channels.
   if (userId === 'unknown') {
-    const systemText = systemParts
-      .map(p => (typeof p === 'string' ? p : p.text || ''))
-      .join(' ');
-    const chMatch = systemText.match(/(?:channel|source|platform)[:\s]+(\w+)/i);
-    if (chMatch) channel = chMatch[1].toLowerCase();
-    const idMatch = systemText.match(/(?:sender|from|user|recipient|target)[:\s]+([\w@+\-.]+)/i);
-    if (idMatch) userId = idMatch[1];
-    if (userId === 'unknown') {
-      userId = 'sys-' + crypto.createHash('md5').update(systemText.slice(0, 500)).digest('hex').slice(0, 12);
+    const channelMatch = systemText.match(/(?:channel|source|platform)[:\s]+([\w-]+)/i);
+    const fallbackChannel = normalizeChannel(channelMatch?.[1]);
+    if (fallbackChannel && !['unknown', 'unkn', 'actions'].includes(fallbackChannel)) {
+      channel = fallbackChannel;
     }
+    const idMatch = systemText.match(/(?:sender|from|user|recipient|target)[:\s]+([\w@+\-.]+)/i);
+    if (idMatch && idMatch[1].toLowerCase() !== 'actions') userId = idMatch[1];
   }
 
   userText = unwrapChannelMessage(originalUserText);
@@ -706,9 +718,7 @@ server.on('stream', (stream, headers) => {
       const parsed = JSON.parse(body);
       const { userText, channel, userId } = extractUserMessage(parsed);
 
-      log(`DEBUG-SYS: ${JSON.stringify((parsed.system||[]).map(s=>typeof s==='string'?s:s.text||'')).slice(0,500)}`);
-      log(`DEBUG-MSG: ${userText.slice(0,300)}`);
-      log(`Request: ${path} channel=${channel} user=${userId} msg=${userText.slice(0, 60)}`);
+      log(`Request: ${path} channel=${channel} user_known=${userId !== 'unknown'}`);
 
       // =====================================================================
       // PATH B: Admin Assistant bypass — proxy directly to real Bedrock
@@ -892,11 +902,22 @@ server.on('stream', (stream, headers) => {
             injectResponse(`This account is already linked to ${pending.body.boundTo}. Please contact your IT admin to unlink it first.`);
             return;
           }
-          // Token invalid/expired — fall through to normal routing
-          log(`PATH C: pair-pending invalid (${pending.body?.reason}), routing normally`);
+          log(`PATH C: pair-pending rejected reason=${pending.body?.reason || 'unknown'}`);
+          injectResponse('Binding token is invalid or expired. Please return to the Employee Portal and generate a new token.');
+          return;
         } catch (pairErr) {
-          log(`PATH C: Pairing error (falling through): ${pairErr.message}`);
+          log(`PATH C: Pairing error: ${pairErr.message}`);
+          injectResponse('Binding service is temporarily unavailable. Please try again later.');
+          return;
         }
+      }
+
+      // A pairing command must never reach the LLM, even if sender metadata is
+      // incomplete. This avoids exposing one-time tokens and returning model errors.
+      if (pairMatch) {
+        log(`PATH C: Pairing metadata incomplete channel=${channel} user_known=${userId !== 'unknown'}`);
+        injectResponse('Unable to identify this messaging account. Please restart the bot connection and try binding again.');
+        return;
       }
 
       // ── Strict binding enforcement ─────────────────────────────────────
@@ -915,7 +936,7 @@ server.on('stream', (stream, headers) => {
 
       // Core routing: fast-path for cold tenants, full pipeline for warm
       const responseText = await routeRequest(channel, userId, userText);
-      log(`Response: ${responseText.slice(0, 80)}`);
+      log(`Response complete channel=${channel}`);
 
       if (isStream) {
         stream.respond({ ':status': 200, 'content-type': 'application/vnd.amazon.eventstream' });
@@ -956,9 +977,9 @@ const h1Server = http.createServer((req, res) => {
     try {
       const parsed = JSON.parse(body);
       const { userText, channel, userId } = extractUserMessage(parsed);
-      log(`H1 Request: channel=${channel} user=${userId} msg=${userText.slice(0, 60)}`);
+      log(`H1 Request: channel=${channel} user_known=${userId !== 'unknown'}`);
       const responseText = await routeRequest(channel, userId, userText);
-      log(`H1 Response: ${responseText.slice(0, 80)}`);
+      log(`H1 Response complete channel=${channel}`);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(buildConverseResponse(responseText)));
     } catch (e) {

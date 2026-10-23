@@ -8,7 +8,7 @@
 #
 # Prerequisites:
 #   - /etc/openclaw/env must exist (written by deploy.sh before this script runs)
-#   - Node.js 22 installed via NVM (done by CloudFormation UserData)
+#   - NVM installed for ubuntu (done by CloudFormation UserData)
 #   - services.tar.gz already extracted in working directory
 #
 # Idempotent — safe to re-run.
@@ -34,13 +34,23 @@ echo "  DYNAMODB_TABLE=$DYNAMODB_TABLE"
 echo "  AGENTCORE_RUNTIME_ID=$AGENTCORE_RUNTIME_ID"
 echo "  BEDROCK_MODEL_ID=$BEDROCK_MODEL_ID"
 echo "  ECS_CLUSTER=$ECS_CLUSTER"
+echo "  OPENCLAW_VERSION=$OPENCLAW_VERSION"
+echo "  NODE_VERSION=$NODE_VERSION"
 
-# ── Phase 1: Install system dependencies ─────────────────────────────────────
+# ── Phase 1: Install system dependencies and pinned OpenClaw ─────────────────
 
-echo ">>> Phase 1: Installing system dependencies..."
+echo ">>> Phase 1: Installing system dependencies and OpenClaw..."
 
 apt-get update -qq
 apt-get install -y python3.12-venv 2>/dev/null || true
+
+if [ ! -s /home/ubuntu/.nvm/nvm.sh ]; then
+  echo "ERROR: NVM is not installed for ubuntu"
+  exit 1
+fi
+
+# Upgrade the existing Gateway host before copying package docs or restarting it.
+su - ubuntu -c "source /home/ubuntu/.nvm/nvm.sh && nvm install '$NODE_VERSION' && nvm use '$NODE_VERSION' && nvm alias default '$NODE_VERSION' && npm install -g 'openclaw@$OPENCLAW_VERSION' --timeout=300000 && test \"\$(node --version)\" = 'v$NODE_VERSION' && openclaw --version | grep -F 'OpenClaw $OPENCLAW_VERSION' && openclaw agent --help | grep -F -- '--json' && openclaw gateway --help >/dev/null"
 
 # Upgrade boto3/botocore for system python (tenant_router uses system python)
 pip3 install --break-system-packages --upgrade boto3 botocore 2>/dev/null || true
@@ -62,9 +72,8 @@ echo ">>> Phase 3: Setting up Python venv..."
 
 python3 -m venv /opt/admin-venv
 /opt/admin-venv/bin/pip install --upgrade pip
-/opt/admin-venv/bin/pip install \
-  fastapi uvicorn boto3 requests python-multipart anthropic \
-  "PyJWT[crypto]>=2.8.0" "bcrypt>=4.0.0"
+/opt/admin-venv/bin/pip install -r "$ADMIN_CONSOLE_DIR/server/requirements.txt"
+/opt/admin-venv/bin/pip install python-multipart anthropic
 
 # ── Phase 4: Install files ───────────────────────────────────────────────────
 
@@ -87,7 +96,7 @@ chown ubuntu:ubuntu /home/ubuntu/tenant_router.py /home/ubuntu/bedrock_proxy_h2.
 # OpenClaw workspace templates → /home/ubuntu/docs/
 # The Gateway Chat UI and `openclaw tui` need template files (AGENTS.md, TOOLS.md, etc.)
 # in $HOME/docs/reference/templates/. These ship inside the npm package.
-OPENCLAW_DOCS=$(ls -d /home/ubuntu/.nvm/versions/node/*/lib/node_modules/openclaw/docs 2>/dev/null | head -1)
+OPENCLAW_DOCS="/home/ubuntu/.nvm/versions/node/v${NODE_VERSION}/lib/node_modules/openclaw/docs"
 if [ -n "$OPENCLAW_DOCS" ] && [ -d "$OPENCLAW_DOCS" ]; then
   cp -r "$OPENCLAW_DOCS" /home/ubuntu/docs
   chown -R ubuntu:ubuntu /home/ubuntu/docs
@@ -139,6 +148,26 @@ done
 # 1. openclaw.json baseUrl → http://localhost:8091 (read by some versions)
 # 2. AWS_ENDPOINT_URL_BEDROCK_RUNTIME env var (forces AWS SDK to route to H2 Proxy)
 GATEWAY_SERVICE="/home/ubuntu/.config/systemd/user/openclaw-gateway.service"
+# Fully clear the previous user unit before reinstalling. OpenClaw 2026.10.x
+# inspects the existing unit definition and rejects stale or partially-written
+# files before --force can replace them.
+sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop openclaw-gateway 2>/dev/null || true
+sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 systemctl --user disable openclaw-gateway 2>/dev/null || true
+sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 systemctl --user reset-failed openclaw-gateway 2>/dev/null || true
+rm -f "$GATEWAY_SERVICE" "/home/ubuntu/.config/systemd/user/default.target.wants/openclaw-gateway.service"
+sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload 2>/dev/null || true
+sudo -H -u ubuntu chown -R ubuntu:ubuntu /home/ubuntu/.config/systemd/user
+sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -lc '
+  export HOME=/home/ubuntu
+  source /home/ubuntu/.nvm/nvm.sh
+  openclaw gateway install --force || openclaw daemon install --force
+'
+
+if [ ! -f "$GATEWAY_SERVICE" ]; then
+  echo "ERROR: OpenClaw Gateway service was not installed"
+  exit 1
+fi
+
 if [ -f "$GATEWAY_SERVICE" ]; then
   if ! grep -q "AWS_ENDPOINT_URL_BEDROCK_RUNTIME" "$GATEWAY_SERVICE"; then
     sed -i '/\[Service\]/a Environment=AWS_ENDPOINT_URL_BEDROCK_RUNTIME=http://localhost:8091' "$GATEWAY_SERVICE"

@@ -428,13 +428,41 @@ def get_approvals(authorization: str = Header(default="")):
 @router.post("/api/v1/approvals/{approval_id}/approve")
 def approve_request(approval_id: str, authorization: str = Header(default="")):
     user = require_role(authorization, roles=["admin", "manager"])
+    approval = db.get_approval(approval_id)
+    if not approval:
+        raise HTTPException(404, "Approval not found")
+    if approval.get("status") != "pending":
+        raise HTTPException(409, "Approval has already been resolved")
+
+    request_type = approval.get("resourceType", approval.get("requestType", approval.get("type", "")))
+    skill_name = approval.get("skillName", "")
+    if request_type in ("skill", "skill_access_request"):
+        skill_name = skill_name or approval.get("resource", "")
+    elif approval.get("type") == "permission_request" and approval.get("resource"):
+        # Backward compatibility for requests created before resourceType was stored.
+        import s3ops
+        candidate = approval["resource"]
+        if s3ops.read_file(f"_shared/skills/{candidate}/skill.json"):
+            skill_name = candidate
+
+    if skill_name:
+        emp_id = approval.get("employeeId", "")
+        emp = db.get_employee(emp_id)
+        if not emp:
+            raise HTTPException(404, f"Employee {emp_id} not found")
+        personal_skills = list(emp.get("personalSkills", []))
+        if skill_name not in personal_skills:
+            personal_skills.append(skill_name)
+            db.update_employee(emp_id, {"personalSkills": personal_skills})
+        from shared import stop_employee_session
+        threading.Thread(target=stop_employee_session, args=(emp_id,), daemon=True).start()
+
     result = db.update_approval(approval_id, {
         "status": "approved",
         "reviewer": user.name,
+        "reviewedBy": user.employee_id,
         "resolvedAt": datetime.now(timezone.utc).isoformat(),
     })
-    if not result:
-        raise HTTPException(404, "Approval not found")
     return result
 
 

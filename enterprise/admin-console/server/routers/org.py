@@ -237,12 +237,15 @@ def update_employee(emp_id: str, body: dict, authorization: str = Header(default
 
 @router.delete("/employees/{emp_id}")
 def delete_employee(emp_id: str, force: bool = False, authorization: str = Header(default="")):
-    require_role(authorization, roles=["admin"])
+    user = require_role(authorization, roles=["admin"])
+    emp = db.get_employee(emp_id)
+    if not emp:
+        raise HTTPException(404, f"Employee {emp_id} not found")
+
     bindings = db.get_bindings_for_employee(emp_id)
     im_mappings = db.get_user_mappings_for_employee(emp_id)
-    total_links = len(bindings) + len(im_mappings)
-    if total_links > 0 and not force:
-        raise HTTPException(409, {
+    if (bindings or im_mappings) and not force:
+        raise HTTPException(status_code=409, detail={
             "error": "employee_has_bindings",
             "agentBindings": len(bindings),
             "imMappings": len(im_mappings),
@@ -251,61 +254,67 @@ def delete_employee(emp_id: str, force: bool = False, authorization: str = Heade
                 "Pass force=true to delete all associated bindings along with the employee."
             ),
         })
-    # Get agent info before deletion
-    emp = db.get_employee(emp_id)
-    agent_id = emp.get("agentId") if emp else None
 
+    agent_id = emp.get("agentId")
     if force:
-        for b in bindings:
-            db.delete_binding(b["id"])
-        for m in im_mappings:
-            db.delete_user_mapping(m["channel"], m["channelUserId"])
-        # Cascade: delete agent + S3 workspace + always-on infrastructure
-        if agent_id:
-            db.delete_agent(agent_id)
-            # S3 workspace cleanup
+        for binding in bindings:
+            db.delete_binding(binding["id"])
+        for mapping in im_mappings:
+            db.delete_user_mapping(mapping["channel"], mapping["channelUserId"])
+
+    if agent_id:
+        import boto3 as _b3del
+
+        # Stop Always-On before deleting AGENT#, because stop updates that record.
+        if emp.get("alwaysOnEnabled"):
             try:
-                import boto3 as _b3del
-                s3_bucket = os.environ.get("S3_BUCKET", "")
-                if s3_bucket:
-                    s3 = _b3del.client("s3")
-                    resp = s3.list_objects_v2(Bucket=s3_bucket, Prefix=f"{emp_id}/workspace/", MaxKeys=200)
-                    for obj in resp.get("Contents", []):
-                        s3.delete_object(Bucket=s3_bucket, Key=obj["Key"])
+                from routers.admin_always_on import stop_always_on_agent
+                stop_always_on_agent(agent_id, authorization=authorization)
+            except Exception as exc:
+                print(f"[delete-emp] ECS stop failed: {exc}")
+
+            try:
+                access_point_id = emp.get("alwaysOnAccessPointId", "")
+                if access_point_id:
+                    _b3del.client("efs", region_name=os.environ.get("AWS_REGION", "us-east-1")).delete_access_point(
+                        AccessPointId=access_point_id
+                    )
             except Exception:
                 pass
-            # Always-on cleanup: stop ECS Service + delete Access Point + delete EFS dir + delete SSM
-            if emp and emp.get("alwaysOnEnabled"):
-                try:
-                    from routers.admin_always_on import stop_always_on_agent
-                    stop_always_on_agent(agent_id, authorization=authorization)
-                except Exception as _e_ao:
-                    print(f"[delete-emp] ECS stop failed: {_e_ao}")
-                # Delete EFS Access Point
-                try:
-                    ap_id = emp.get("alwaysOnAccessPointId", "")
-                    if ap_id:
-                        _b3del.client("efs", region_name=os.environ.get("AWS_REGION", "us-east-1")).delete_access_point(AccessPointId=ap_id)
-                except Exception:
-                    pass
-                # Delete EFS workspace directory
-                import shutil as _shutil
-                efs_path = f"/mnt/efs/{emp_id}"
-                if os.path.isdir(efs_path):
-                    _shutil.rmtree(efs_path, ignore_errors=True)
-                # Delete SSM endpoint + gateway-token
-                try:
-                    _ssm_del = _b3del.client("ssm", region_name=os.environ.get("AWS_REGION", "us-east-1"))
-                    stack = os.environ.get("STACK_NAME", "openclaw")
-                    for suffix in ["/endpoint", "/gateway-token", "/dashboard-token"]:
-                        try:
-                            _ssm_del.delete_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}{suffix}")
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-    db.delete_employee(emp_id)
-    # Audit
+
+            import shutil
+            efs_path = f"/mnt/efs/{emp_id}"
+            if os.path.isdir(efs_path):
+                shutil.rmtree(efs_path, ignore_errors=True)
+
+            try:
+                ssm = _b3del.client("ssm", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+                stack = os.environ.get("STACK_NAME", "openclaw")
+                for suffix in ["/endpoint", "/gateway-token", "/dashboard-token"]:
+                    try:
+                        ssm.delete_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}{suffix}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        try:
+            s3_bucket = os.environ.get("S3_BUCKET", "")
+            if s3_bucket:
+                s3 = _b3del.client("s3")
+                paginator = s3.get_paginator("list_objects_v2")
+                for page in paginator.paginate(Bucket=s3_bucket, Prefix=f"{emp_id}/workspace/"):
+                    objects = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+                    if objects:
+                        s3.delete_objects(Bucket=s3_bucket, Delete={"Objects": objects})
+        except Exception as exc:
+            print(f"[delete-emp] S3 cleanup failed: {exc}")
+
+        db.delete_agent(agent_id)
+
+    if not db.delete_employee(emp_id):
+        raise HTTPException(500, f"Failed to delete employee {emp_id}")
+
     db.create_audit_entry({
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "eventType": "employee_deleted",
@@ -316,7 +325,13 @@ def delete_employee(emp_id: str, force: bool = False, authorization: str = Heade
         "detail": f"Deleted employee {emp_id} (bindings: {len(bindings)}, mappings: {len(im_mappings)}, agent: {agent_id or 'none'})",
         "status": "success",
     })
-    return {"ok": True, "deleted": emp_id, "bindingsDeleted": len(bindings), "imMappingsDeleted": len(im_mappings), "agentDeleted": agent_id}
+    return {
+        "ok": True,
+        "deleted": emp_id,
+        "bindingsDeleted": len(bindings),
+        "imMappingsDeleted": len(im_mappings),
+        "agentDeleted": agent_id,
+    }
 
 
 # ── Activity ─────────────────────────────────────────────────────────────

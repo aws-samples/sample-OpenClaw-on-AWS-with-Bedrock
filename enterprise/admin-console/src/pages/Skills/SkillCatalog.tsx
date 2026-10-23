@@ -52,7 +52,7 @@ function SkillDetailModal({ skill, apiKeys, onClose }: {
     assignSkill.mutate({ skillName, positionId: assignPos }, {
       onSuccess: (data) => {
         const posName = positions.find(p => p.id === assignPos)?.name || assignPos;
-        setAssignResult(`Assigned to ${posName} — ${data.agentsPropagated} agent(s) updated`);
+        setAssignResult(`Assigned to ${posName} — ${data.agentsAffected} agent(s) updated`);
         setAssignPos('');
       },
     });
