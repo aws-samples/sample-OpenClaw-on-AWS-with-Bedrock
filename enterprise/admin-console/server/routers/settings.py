@@ -42,7 +42,7 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 def _get_model_config():
     config = db.get_config("model")
     if not config:
-        return {"default": {"modelId": "global.anthropic.claude-sonnet-4-5-20250929-v1:0", "modelName": "Claude Sonnet 4.5", "inputRate": 3.00, "outputRate": 15.00}, "fallback": {}, "positionOverrides": {}, "availableModels": []}
+        return {"default": {"modelId": "zai.glm-5", "modelName": "Z.AI GLM-5", "inputRate": 1.00, "outputRate": 3.20}, "fallback": {}, "positionOverrides": {}, "availableModels": []}
     def fix_rates(d):
         if isinstance(d, dict):
             for k in ("inputRate", "outputRate"):

@@ -7,9 +7,13 @@
 FROM --platform=linux/arm64 python:3.12-slim AS builder
 
 ARG TARGETARCH=arm64
+ARG NODE_VERSION=24.16.0
+ARG OPENCLAW_VERSION=2026.10.4
+ARG CLAWHUB_VERSION=0.23.3
+ARG BEDROCK_PROVIDER_VERSION=2026.10.4
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl unzip git && rm -rf /var/lib/apt/lists/*
+    curl unzip git xz-utils && rm -rf /var/lib/apt/lists/*
 
 # Install AWS CLI v2 (architecture-aware)
 RUN if [ "$TARGETARCH" = "arm64" ] || [ "$(uname -m)" = "aarch64" ]; then \
@@ -19,16 +23,28 @@ RUN if [ "$TARGETARCH" = "arm64" ] || [ "$(uname -m)" = "aarch64" ]; then \
     fi && unzip -q /tmp/awscli.zip -d /tmp && /tmp/aws/install \
     && rm -rf /tmp/aws /tmp/awscli.zip
 
-# Install Node.js 22 (required by OpenClaw)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*
+# Install an exact Node.js release compatible with the pinned OpenClaw version;
+# distro packages are intentionally avoided.
+RUN NODE_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo arm64 || echo x64) \
+    && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -o /tmp/node.tar.xz \
+    && tar -xJf /tmp/node.tar.xz -C /usr --strip-components=1 \
+    && rm /tmp/node.tar.xz \
+    && node --version | grep -Fx "v${NODE_VERSION}"
 
-# Install OpenClaw and ClawHub CLI globally via npm
-# Pin the openclaw npm package to 2026.3.24.
-# 2026.3.28 (released 2026-03-29T02:02Z) changed how the Gateway delivers responses —
-# reply no longer written to subprocess stdout — breaking IM channel integration
-# (Feishu, DingTalk, Telegram, Discord). Do NOT upgrade without testing IM channels end-to-end.
-RUN npm install -g openclaw@2026.3.24 clawhub@latest
+# Pin OpenClaw, Node.js, ClawHub, and the matching Bedrock provider.
+# OpenClaw discovers provider packages from its managed npm project directory.
+RUN npm install -g "openclaw@${OPENCLAW_VERSION}" "clawhub@${CLAWHUB_VERSION}" \
+    && PROVIDER_DIR=/root/.openclaw/npm/projects/openclaw-amazon-bedrock-provider-53c77d25cd \
+    && mkdir -p "$PROVIDER_DIR" \
+    && npm install --prefix "$PROVIDER_DIR" --save-exact \
+        "@openclaw/amazon-bedrock-provider@${BEDROCK_PROVIDER_VERSION}" \
+    && PROVIDER_PACKAGE_DIR="$PROVIDER_DIR/node_modules/@openclaw/amazon-bedrock-provider" \
+    && mkdir -p "$PROVIDER_PACKAGE_DIR/node_modules" \
+    && ln -s /usr/lib/node_modules/openclaw "$PROVIDER_PACKAGE_DIR/node_modules/openclaw" \
+    && node -e "const p=require('$PROVIDER_DIR/node_modules/@openclaw/amazon-bedrock-provider/package.json'); if(p.version!=='${BEDROCK_PROVIDER_VERSION}') process.exit(1)" \
+    && openclaw --version | grep -F "OpenClaw ${OPENCLAW_VERSION}" \
+    && clawhub --cli-version | grep -F "${CLAWHUB_VERSION}" \
+    && openclaw agent --help | grep -F -- "--json"
 
 # Install enterprise built-in skills (Layer 1)
 # These are available to all tenants with zero cold-start overhead.
@@ -58,7 +74,7 @@ RUN mkdir -p /app/docs/reference && \
 COPY agent-container/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Pre-warm V8 Compile Cache (Node.js 22+)
+# Pre-warm V8 Compile Cache (supported by the pinned Node.js runtime)
 # Caches compiled bytecode so openclaw CLI modules load faster at runtime
 RUN mkdir -p /app/.compile-cache && \
     NODE_COMPILE_CACHE=/app/.compile-cache OPENCLAW_SKIP_ONBOARDING=1 \
@@ -73,12 +89,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends jq curl \
 # Install AWS CLI via pip (not binary copy — avoids Python version mismatch)
 RUN pip install --no-cache-dir awscli boto3 requests
 
-# Copy Node.js runtime + global modules from builder
+# Copy Node.js runtime, global modules, and the managed provider project.
+# Recreate CLI symlinks because Docker COPY dereferences source symlinks.
 COPY --from=builder /usr/bin/node /usr/bin/node
 COPY --from=builder /usr/lib/node_modules /usr/lib/node_modules
+COPY --from=builder /root/.openclaw/npm /root/.openclaw/npm
 
-# Re-create openclaw symlink (COPY resolves symlinks, breaking ESM imports)
-RUN ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
+RUN ln -sf /usr/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf /usr/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw \
+    && npm --version >/dev/null
 
 # Copy V8 compile cache + templates from builder
 COPY --from=builder /app/.compile-cache /app/.compile-cache
@@ -98,9 +118,11 @@ COPY agent-container/permissions.py .
 COPY agent-container/identity.py .
 COPY agent-container/memory.py .
 COPY agent-container/observability.py .
+COPY agent-container/skill_usage.py .
 COPY agent-container/safety.py .
 COPY agent-container/skill_loader.py .
 COPY agent-container/workspace_assembler.py .
+COPY agent-container/smoke-test.sh .
 
 # Copy auth-agent module
 RUN mkdir -p /app/auth-agent
@@ -110,8 +132,8 @@ COPY auth-agent/__init__.py /app/auth-agent/__init__.py
 # Create directories
 RUN mkdir -p /tmp/openclaw/sessions /tmp/workspace /root/.openclaw
 
-# Make entrypoint executable
-RUN chmod +x /app/entrypoint.sh
+# Make runtime scripts executable
+RUN chmod +x /app/entrypoint.sh /app/smoke-test.sh
 
 ENV OPENCLAW_SKIP_ONBOARDING=1
 ENV PORT=8080

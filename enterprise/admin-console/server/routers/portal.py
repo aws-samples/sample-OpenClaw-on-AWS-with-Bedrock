@@ -569,54 +569,79 @@ def update_portal_profile(body: ProfileUpdateRequest, authorization: str = Heade
 
 
 @router.get("/api/v1/portal/usage")
-def portal_usage(authorization: str = Header(default="")):
-    """Get employee's personal usage stats."""
+def portal_usage(agent_type: str = "serverless", authorization: str = Header(default="")):
+    """Get the employee's personal usage, filtered by deployment mode."""
     user = require_auth(authorization)
     emp = next((e for e in db.get_employees() if e["id"] == user.employee_id), None)
     agent_id = emp.get("agentId", "") if emp else ""
 
-    usage_records = db.get_usage_for_agent(agent_id) if agent_id else []
+    # Include legacy records written with employeeId plus current records written
+    # with the canonical Agent ID. The stored agentId filter prevents duplicates.
+    identities = {user.employee_id}
+    if agent_id:
+        identities.add(agent_id)
+    usage_records = [
+        record
+        for identity in identities
+        for record in db.get_usage_for_agent(identity)
+        if record.get("agentType", "serverless") == agent_type
+    ]
     total_input = sum(u.get("inputTokens", 0) for u in usage_records)
     total_output = sum(u.get("outputTokens", 0) for u in usage_records)
     total_requests = sum(u.get("requests", 0) for u in usage_records)
     total_cost = sum(float(u.get("cost", 0)) for u in usage_records)
+
+    daily = {}
+    for record in usage_records:
+        record_date = record.get("date")
+        if not record_date:
+            continue
+        day = daily.setdefault(record_date, {"date": record_date, "requests": 0, "cost": 0.0})
+        day["requests"] += record.get("requests", 0)
+        day["cost"] += float(record.get("cost", 0))
 
     return {
         "totalInputTokens": total_input,
         "totalOutputTokens": total_output,
         "totalRequests": total_requests,
         "totalCost": round(total_cost, 4),
-        "dailyUsage": [{
-            "date": u.get("date"),
-            "requests": u.get("requests", 0),
-            "cost": float(u.get("cost", 0)),
-        } for u in sorted(usage_records, key=lambda x: x.get("date", ""))],
+        "dailyUsage": [daily[day] for day in sorted(daily)],
     }
 
 
 @router.get("/api/v1/portal/skills")
 def portal_skills(authorization: str = Header(default="")):
-    """Get employee's available and restricted skills."""
+    """Get skills available through the employee's position or personal approvals."""
     user = require_auth(authorization)
-    emp = next((e for e in db.get_employees() if e["id"] == user.employee_id), None)
-    agent = db.get_agent(emp.get("agentId", "")) if emp else None
-    agent_skills = agent.get("skills", []) if agent else []
+    emp = db.get_employee(user.employee_id)
+    assigned_skills = set(emp.get("personalSkills", [])) if emp else set()
+    if emp and emp.get("positionId"):
+        position = db.get_position(emp["positionId"])
+        if position:
+            assigned_skills.update(position.get("defaultSkills", []))
 
-    # Get all skills from S3
-    all_skills = get_skills()  # reuse existing endpoint logic
-    available = [s for s in all_skills if s.get("name", s.get("id", "")).replace("sk-", "") in agent_skills or s.get("permissions", {}).get("allowedRoles", ["*"]) == ["*"]]
-    restricted = [s for s in all_skills if s not in available]
+    all_skills = get_skills()
+    available = [
+        skill for skill in all_skills
+        if skill.get("name", skill.get("id", "")).replace("sk-", "") in assigned_skills
+        or skill.get("permissions", {}).get("allowedRoles", ["*"]) == ["*"]
+    ]
+    restricted = [skill for skill in all_skills if skill not in available]
 
     return {"available": available, "restricted": restricted}
 
 
 @router.get("/api/v1/portal/requests")
 def portal_requests(authorization: str = Header(default="")):
-    """Get employee's approval requests."""
+    """Get the current employee's approval requests."""
     user = require_auth(authorization)
-    all_approvals = db.get_approvals()
-    my_pending = [a for a in all_approvals if a.get("tenantId", "").endswith(user.employee_id.replace("emp-", "")) and a.get("status") == "pending"]
-    my_resolved = [a for a in all_approvals if a.get("tenantId", "").endswith(user.employee_id.replace("emp-", "")) and a.get("status") != "pending"]
+    mine = [
+        approval for approval in db.get_approvals()
+        if approval.get("employeeId") == user.employee_id
+        or approval.get("tenantId") == f"portal__{user.employee_id}"
+    ]
+    my_pending = [approval for approval in mine if approval.get("status") == "pending"]
+    my_resolved = [approval for approval in mine if approval.get("status") != "pending"]
     return {"pending": my_pending, "resolved": my_resolved}
 
 
@@ -631,6 +656,7 @@ def portal_request_create(body: PortalRequestCreate, authorization: str = Header
     db.create_approval({
         "id": request_id,
         "type": "permission_request",
+        "resourceType": body.type,
         "status": "pending",
         "tenantId": f"portal__{user.employee_id}",
         "employeeId": user.employee_id,

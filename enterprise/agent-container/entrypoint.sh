@@ -1,8 +1,9 @@
 #!/bin/bash
 # =============================================================================
 # Agent Container Entrypoint
-# Design: OpenClaw Gateway starts first (port 18789) for native session management.
-# server.py starts immediately for health check. S3 workspace assembled on first request.
+# Design: Enterprise Skills and SSM-backed credentials load before OpenClaw Gateway.
+# Gateway then starts on port 18789 for native session management, followed by
+# server.py for health checks and invocations.
 # openclaw agent CLI connects to Gateway → proper memory compaction and session state.
 # =============================================================================
 set -eo pipefail
@@ -33,14 +34,14 @@ echo "[entrypoint] START tenant=${TENANT_ID} base=${BASE_TENANT_ID} bucket=${S3_
 # Step 0: Node.js runtime optimizations (before any openclaw invocation)
 # =============================================================================
 
-# V8 Compile Cache (Node.js 22+) — pre-warmed at Docker build time
+# V8 Compile Cache — pre-warmed at Docker build time
 if [ -d /app/.compile-cache ]; then
     export NODE_COMPILE_CACHE=/app/.compile-cache
     echo "[entrypoint] V8 compile cache enabled"
 fi
 
-# Force IPv4 for Node.js 22 VPC compatibility
-# Node.js 22 Happy Eyeballs tries IPv6 first, times out in VPC without IPv6
+# Force IPv4-first DNS ordering for Node.js VPC compatibility.
+# This avoids IPv6 connection delays in VPCs without IPv6 routing.
 export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--dns-result-order=ipv4first"
 
 # EFS workspace detection:
@@ -112,7 +113,7 @@ GATEWAY_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
 export OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN"
 
 sed -e "s|\${AWS_REGION}|${AWS_REGION}|g" \
-    -e "s|\${BEDROCK_MODEL_ID}|${BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-5-20250929-v1:0}|g" \
+    -e "s|\${BEDROCK_MODEL_ID}|${BEDROCK_MODEL_ID:-zai.glm-5}|g" \
     /app/openclaw.json > "$OPENCLAW_CONFIG_DIR/openclaw.json"
 echo "[entrypoint] openclaw.json written to $OPENCLAW_CONFIG_DIR/openclaw.json"
 
@@ -251,13 +252,39 @@ except Exception as e:
 fi
 
 # =============================================================================
-# Step 0.7: Start OpenClaw Gateway — native session management + memory
-# Gateway must run BEFORE server.py so OpenClaw agent CLI can connect to it.
+# Step 0.7: Load enterprise skills and export their SSM-backed credentials
+# This must complete before the Gateway starts. Environment variables exported
+# after a process starts cannot be inherited by that already-running process.
+# =============================================================================
+echo "[entrypoint] Loading enterprise skills before Gateway startup..."
+rm -f /tmp/skill_env.sh
+if python /app/skill_loader.py \
+    --tenant "$TENANT_ID" \
+    --workspace "$WORKSPACE" \
+    --bucket "$S3_BUCKET" \
+    --stack "$STACK_NAME" \
+    --region "$AWS_REGION"; then
+    if [ -f /tmp/skill_env.sh ]; then
+        # shellcheck disable=SC1091
+        . /tmp/skill_env.sh
+        cp /tmp/skill_env.sh.keys /tmp/active_skill_env.keys 2>/dev/null || true
+        chmod 600 /tmp/active_skill_env.keys 2>/dev/null || true
+        echo "[entrypoint] Skill environment loaded before Gateway startup"
+    fi
+else
+    echo "[entrypoint] WARNING: skill_loader.py failed (Gateway will start without Skill credentials)"
+fi
+
+# =============================================================================
+# Step 0.8: Start OpenClaw Gateway — native session management + memory
+# Gateway must run AFTER Skill credentials are exported and BEFORE server.py so
+# both processes inherit the same environment and the CLI can connect to Gateway.
 # Without Gateway, OpenClaw falls back to embedded mode (no memory compaction).
 # With bot tokens injected above, Gateway auto-connects to IM channels.
 # =============================================================================
 openclaw gateway --port 18789 > /tmp/openclaw-gateway.log 2>&1 &
 GATEWAY_PID=$!
+echo "$GATEWAY_PID" > /tmp/openclaw-gateway.pid
 echo "[entrypoint] OpenClaw Gateway PID=${GATEWAY_PID}"
 
 # Wait for Gateway to start — but don't block server.py startup.
@@ -282,6 +309,27 @@ for i in $(seq 1 $GATEWAY_WAIT); do
     sleep 1
 done
 if [ "$GATEWAY_READY" = "false" ]; then
+    if kill -0 "$GATEWAY_PID" 2>/dev/null; then
+        echo "[entrypoint] Gateway process is still running after ${GATEWAY_WAIT}s"
+    else
+        GATEWAY_EXIT=0
+        wait "$GATEWAY_PID" 2>/dev/null || GATEWAY_EXIT=$?
+        echo "[entrypoint] ERROR: Gateway exited before ready (exit=${GATEWAY_EXIT})"
+    fi
+
+    # Gateway startup occurs before requests are accepted, so these filtered lines
+    # contain initialization failures rather than user prompts. Redact common secret
+    # forms and URLs before sending the diagnostics to CloudWatch.
+    if [ -s /tmp/openclaw-gateway.log ]; then
+        echo "[entrypoint] Gateway startup diagnostics:"
+        tail -40 /tmp/openclaw-gateway.log \
+            | grep -Ei 'error|failed|reason|ENOENT|provider|npm|invalid|accessdenied|validation|model' \
+            | sed -E \
+                -e 's#https?://[^[:space:]]+#[url-redacted]#g' \
+                -e 's/(token|secret|password|authorization|api[_-]?key)[=:][^[:space:]]+/\1=[redacted]/Ig' \
+            | tail -12 || true
+    fi
+
     if [ "$EFS_MODE" = "true" ]; then
         echo "[entrypoint] Gateway still starting (Fargate: will be ready for next request)"
     else
@@ -331,6 +379,57 @@ export OPENCLAW_SKIP_CRON=1  # Disable built-in cron — EventBridge handles sch
 python /app/server.py &
 SERVER_PID=$!
 echo "[entrypoint] server.py PID=${SERVER_PID}"
+
+# PID 1 is the only process that can change the environment inherited by a new
+# Gateway. Watch for tenant-specific Skill key updates from server.py, then
+# restart Gateway without ever printing credential values.
+(
+    while kill -0 "$SERVER_PID" 2>/dev/null; do
+        if [ -f /tmp/gateway_env_reload.request ]; then
+            rm -f /tmp/gateway_env_reload.request /tmp/gateway_env_reload.done
+            CURRENT_GATEWAY_PID=$(cat /tmp/openclaw-gateway.pid 2>/dev/null || true)
+            [ -n "$CURRENT_GATEWAY_PID" ] && kill -SIGTERM "$CURRENT_GATEWAY_PID" 2>/dev/null || true
+            for _ in $(seq 1 20); do
+                [ -z "$CURRENT_GATEWAY_PID" ] || ! kill -0 "$CURRENT_GATEWAY_PID" 2>/dev/null && break
+                sleep 0.25
+            done
+            [ -n "$CURRENT_GATEWAY_PID" ] && kill -9 "$CURRENT_GATEWAY_PID" 2>/dev/null || true
+
+            if [ -f /tmp/active_skill_env.keys ]; then
+                while IFS= read -r key; do
+                    [ -n "$key" ] && unset "$key"
+                done < /tmp/active_skill_env.keys
+            fi
+            if [ -f /tmp/skill_env.sh ]; then
+                # shellcheck disable=SC1091
+                . /tmp/skill_env.sh
+                cp /tmp/skill_env.sh.keys /tmp/active_skill_env.keys 2>/dev/null || true
+                chmod 600 /tmp/active_skill_env.keys 2>/dev/null || true
+            fi
+
+            openclaw gateway --port 18789 > /tmp/openclaw-gateway.log 2>&1 &
+            NEW_GATEWAY_PID=$!
+            echo "$NEW_GATEWAY_PID" > /tmp/openclaw-gateway.pid
+            READY=false
+            for _ in $(seq 1 40); do
+                if curl -sf --connect-timeout 1 http://127.0.0.1:18789/__openclaw/control-ui-config.json >/dev/null 2>&1; then
+                    READY=true
+                    break
+                fi
+                kill -0 "$NEW_GATEWAY_PID" 2>/dev/null || break
+                sleep 0.5
+            done
+            if [ "$READY" = "true" ]; then
+                echo "[entrypoint] Gateway restarted with updated Skill environment"
+                touch /tmp/gateway_env_reload.done
+            else
+                echo "[entrypoint] ERROR: Gateway Skill environment reload failed"
+            fi
+        fi
+        sleep 0.25
+    done
+) &
+GATEWAY_RELOAD_PID=$!
 
 # =============================================================================
 # Step 2: S3 sync in background (non-blocking)
@@ -383,23 +482,8 @@ echo "[entrypoint] server.py PID=${SERVER_PID}"
         echo "[bg] Skipping workspace assembly (tenant=unknown, will assemble on first request)"
     fi
 
-    # =========================================================================
-    # Skill Loader: Layer 2 (S3 hot-load) + Layer 3 (pre-built bundles)
-    # Layer 1 (built-in) is already in the Docker image at ~/.openclaw/skills/
-    # =========================================================================
-    echo "[bg] Loading enterprise skills..."
-    python /app/skill_loader.py \
-        --tenant "$TENANT_ID" \
-        --workspace "$WORKSPACE" \
-        --bucket "$S3_BUCKET" \
-        --stack "$STACK_NAME" \
-        --region "$AWS_REGION" 2>&1 || echo "[bg] skill_loader.py failed (non-fatal)"
-
-    # Source skill API keys into environment (for subsequent openclaw invocations)
-    if [ -f /tmp/skill_env.sh ]; then
-        . /tmp/skill_env.sh
-        echo "[bg] Skill API keys loaded"
-    fi
+    # Skills and SSM-backed credentials were loaded synchronously before the
+    # Gateway started so both Gateway and server.py inherited the environment.
 
     echo "[bg] Workspace + skills ready"
     echo "WORKSPACE_READY" > /tmp/workspace_status
@@ -463,19 +547,20 @@ cleanup() {
     # Step 1: Stop server first — no new requests during shutdown
     kill "$SERVER_PID" 2>/dev/null || true
 
-    # Step 2: Signal Gateway to shut down gracefully and WAIT for it to finish.
-    # The Gateway writes session state (MEMORY.md) during graceful shutdown.
-    # Without waiting, the final sync below runs before MEMORY.md is updated.
-    kill -SIGTERM "$GATEWAY_PID" 2>/dev/null || true
+    # Step 2: Signal the currently active Gateway to shut down gracefully and
+    # WAIT for it to finish. The PID may change after a Skill env reload.
+    CURRENT_GATEWAY_PID=$(cat /tmp/openclaw-gateway.pid 2>/dev/null || echo "$GATEWAY_PID")
+    kill -SIGTERM "$CURRENT_GATEWAY_PID" 2>/dev/null || true
     # Give Gateway up to 15s to write memory and exit cleanly
     for i in $(seq 1 15); do
-        kill -0 "$GATEWAY_PID" 2>/dev/null || break
+        kill -0 "$CURRENT_GATEWAY_PID" 2>/dev/null || break
         sleep 1
     done
-    kill -9 "$GATEWAY_PID" 2>/dev/null || true  # force-kill if still alive
+    kill -9 "$CURRENT_GATEWAY_PID" 2>/dev/null || true  # force-kill if still alive
 
-    # Step 3: Stop background watchdog
+    # Step 3: Stop background watchdog and Gateway reload watcher
     kill "$BG_PID" 2>/dev/null || true
+    kill "${GATEWAY_RELOAD_PID:-}" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
 
     # Step 4: Persist workspace to S3

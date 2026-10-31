@@ -44,8 +44,7 @@
       "mode": "none"
     },
     "controlUi": {
-      "allowedOrigins": ["*"],
-      "allowInsecureAuth": true
+      "allowedOrigins": ["*"]
     }
   },
   "plugins": {
