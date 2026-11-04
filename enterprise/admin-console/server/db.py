@@ -491,9 +491,18 @@ def get_usage_by_date(date: str = "") -> list[dict]:
     return items
 
 def get_usage_for_agent(agent_id: str) -> list[dict]:
-    """Get all daily usage records for a specific agent."""
-    items = _query(f"USAGE#{agent_id}#")
-    return items
+    """Get all usage records whose stored agentId exactly matches the ID.
+
+    The broader key prefix supports both legacy ``USAGE#id/date`` records and
+    current mode-aware ``USAGE#id#mode#date`` records without prefix collisions.
+    """
+    items = _query(f"USAGE#{agent_id}")
+    return [item for item in items if item.get("agentId") == agent_id]
+
+
+def get_skill_usage() -> list[dict]:
+    """Get all dynamic Skill call aggregates, including legacy activation rows."""
+    return _query("SKILL_USAGE#")
 
 # === Sessions ===
 

@@ -43,6 +43,44 @@ def _get_current_user(authorization: str):
         return None
 
 
+def _propagate_skill_key_change(skill_name: str) -> None:
+    """Restart only running environments assigned the changed Skill credential."""
+    positions = {position["id"]: position for position in db.get_positions() if position.get("id")}
+    affected = [
+        employee for employee in db.get_employees()
+        if skill_name in employee.get("personalSkills", [])
+        or skill_name in positions.get(employee.get("positionId", ""), {}).get("defaultSkills", [])
+    ]
+    stack = os.environ.get("STACK_NAME", "openclaw")
+    cluster = os.environ.get("ECS_CLUSTER_NAME", f"{stack}-always-on")
+    services: set[str] = set()
+
+    for employee in affected:
+        position = positions.get(employee.get("positionId", ""), {})
+        agent = db.get_agent(employee.get("agentId", "")) or {}
+        dedicated = employee.get("alwaysOnServiceName") or agent.get("ecsServiceName")
+        is_dedicated = bool(employee.get("alwaysOnEnabled") or agent.get("deployMode") == "always-on-ecs")
+        if is_dedicated and dedicated:
+            services.add(dedicated)
+            continue
+        if position.get("deployMode") == "fargate":
+            tier = position.get("fargateTier") or employee.get("alwaysOnTier") or "standard"
+            services.add(f"{stack}-tier-{tier}")
+            continue
+        stop_employee_session(employee["id"])
+
+    if services:
+        ecs = boto3.client("ecs", region_name=GATEWAY_REGION)
+        for service in sorted(services):
+            try:
+                response = ecs.describe_services(cluster=cluster, services=[service])
+                active = [item for item in response.get("services", []) if item.get("status") == "ACTIVE"]
+                if active and int(active[0].get("desiredCount", 0)) > 0:
+                    ecs.update_service(cluster=cluster, service=service, forceNewDeployment=True)
+            except Exception as exc:
+                print(f"[skill-key] Could not restart ECS service {service}: {exc}")
+
+
 def _resolve_agent_status(agent: dict) -> str:
     """Derive agent status from DynamoDB lastInvocationAt field.
     Replaces CloudWatch-based status detection (was 20+ API calls per page load)."""
@@ -70,22 +108,22 @@ def _resolve_agent_status(agent: dict) -> str:
 def get_agents(authorization: str = Header(default="")):
     user = _get_current_user(authorization)
     agents = db.get_agents()
+    positions = {p["id"]: p for p in db.get_positions()}
+    employees = {e["id"]: e for e in db.get_employees()}
 
-    # Ensure all agents have required array fields (some DynamoDB records lack them)
-    for a in agents:
-        a.setdefault("channels", [])
-        a.setdefault("skills", [])
-        a.setdefault("soulVersions", {})
-
-    # Dynamic status from DynamoDB lastInvocationAt (replaces CloudWatch)
-    for a in agents:
-        a["status"] = _resolve_agent_status(a)
+    # Skills are resolved dynamically from the authoritative assignment records.
+    for agent in agents:
+        agent.setdefault("channels", [])
+        agent.setdefault("soulVersions", {})
+        position_skills = positions.get(agent.get("positionId", ""), {}).get("defaultSkills", [])
+        personal_skills = employees.get(agent.get("employeeId", ""), {}).get("personalSkills", [])
+        agent["skills"] = list(dict.fromkeys([*position_skills, *personal_skills]))
+        agent["status"] = _resolve_agent_status(agent)
 
     if user and user.role == "manager":
         scope = get_dept_scope(user)
         if scope is not None:
-            positions = db.get_positions()
-            pos_in_scope = {p["id"] for p in positions if p.get("departmentId") in scope}
+            pos_in_scope = {p["id"] for p in positions.values() if p.get("departmentId") in scope}
             agents = [a for a in agents if a.get("positionId") in pos_in_scope or not a.get("employeeId")]
     return agents
 
@@ -421,26 +459,17 @@ def get_skill(skill_name: str):
 _skill_keys_cache = {"data": None, "expires": 0}
 
 @router.get("/api/v1/skills/keys/all")
-def get_all_skill_keys():
-    """List all required API keys across all skills.
-    Reads skill manifests from S3 to determine required env vars,
-    then checks SSM to see which are actually configured.
-    Cached for 5 minutes to reduce S3 API calls."""
-
-    if _skill_keys_cache["data"] and _time_agents.time() < _skill_keys_cache["expires"]:
+def get_all_skill_keys(authorization: str = Header(default="")):
+    """List required skill environment variables and their real SSM status."""
+    require_role(authorization, roles=["admin"])
+    if _skill_keys_cache["data"] is not None and _time_agents.time() < _skill_keys_cache["expires"]:
         return _skill_keys_cache["data"]
 
-    # Get all skills from S3
     files = s3ops.list_files("_shared/skills/")
-    skill_names = set()
-    for f in files:
-        parts = f["name"].split("/")
-        if parts[0]:
-            skill_names.add(parts[0])
-
-    keys = []
-    key_id = 0
+    skill_names = {f["name"].split("/")[0] for f in files if f.get("name")}
     stack = os.environ.get("STACK_NAME", "openclaw")
+    ssm = boto3.client("ssm", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+    keys = []
 
     for name in sorted(skill_names):
         content = s3ops.read_file(f"_shared/skills/{name}/skill.json")
@@ -451,36 +480,38 @@ def get_all_skill_keys():
         except json.JSONDecodeError:
             continue
 
-        required_env = manifest.get("requires", {}).get("env", [])
-        if not required_env:
-            continue
-
-        # Check if keys exist in SSM
-        for env_var in required_env:
-            key_id += 1
+        aws_service = manifest.get("awsService", "")
+        for env_var in manifest.get("requires", {}).get("env", []):
             ssm_path = f"/openclaw/{stack}/skill-keys/{name}/{env_var}"
-
-            # For AWS-native skills, keys come from IAM role, not SSM
-            aws_service = manifest.get("awsService", "")
+            last_rotated = ""
             if aws_service:
                 status = "iam-role"
                 note = f"Provided by IAM role ({aws_service})"
             else:
-                status = "not-configured"
-                note = "Needs configuration in API Key Vault"
+                try:
+                    parameter = ssm.get_parameter(Name=ssm_path)["Parameter"]
+                    status = "active"
+                    note = "Stored securely in SSM Parameter Store"
+                    modified = parameter.get("LastModifiedDate")
+                    last_rotated = modified.isoformat() if modified else ""
+                except ssm.exceptions.ParameterNotFound:
+                    status = "not-configured"
+                    note = "Needs configuration in API Key Vault"
 
             keys.append({
-                "id": f"key-{key_id}",
+                "id": f"key-{len(keys) + 1}",
                 "skillName": name,
                 "envVar": env_var,
                 "ssmPath": ssm_path,
                 "status": status,
+                "lastRotated": last_rotated,
+                "createdBy": "",
                 "awsService": aws_service,
                 "note": note,
             })
 
     _skill_keys_cache["data"] = keys
-    _skill_keys_cache["expires"] = _time_agents.time() + 300
+    _skill_keys_cache["expires"] = _time_agents.time() + 60
     return keys
 
 
@@ -560,16 +591,34 @@ def unassign_skill_from_position(skill_name: str, positionId: str = "", authoriz
 
 @router.put("/api/v1/skills/keys/{skill_name}/{env_var}")
 def set_skill_key(skill_name: str, env_var: str, body: dict, authorization: str = Header(default="")):
-    """Configure a platform-level API key for a skill. Stored in SSM SecureString."""
+    """Store a manifest-declared skill credential in SSM SecureString."""
     user = require_role(authorization, roles=["admin"])
     value = body.get("value", "")
-    if not value:
+    if not isinstance(value, str) or not value.strip():
         raise HTTPException(400, "value is required")
+    if len(value) > 4096:
+        raise HTTPException(400, "value exceeds the 4096 character limit")
+
+    manifest_content = s3ops.read_file(f"_shared/skills/{skill_name}/skill.json")
+    if not manifest_content:
+        raise HTTPException(404, f"Skill {skill_name} not found")
+    try:
+        manifest = json.loads(manifest_content)
+    except json.JSONDecodeError:
+        raise HTTPException(500, f"Skill {skill_name} has an invalid manifest")
+    if env_var not in manifest.get("requires", {}).get("env", []):
+        raise HTTPException(400, f"{env_var} is not declared by skill {skill_name}")
+    if manifest.get("awsService"):
+        raise HTTPException(400, "AWS-native skills use IAM roles and do not accept API keys")
+
     stack = os.environ.get("STACK_NAME", "openclaw")
     ssm = boto3.client("ssm", region_name=os.environ.get("AWS_REGION", "us-east-1"))
     ssm.put_parameter(
         Name=f"/openclaw/{stack}/skill-keys/{skill_name}/{env_var}",
         Value=value, Type="SecureString", Overwrite=True)
+    _skill_keys_cache["data"] = None
+    _skill_keys_cache["expires"] = 0
+
     db.create_audit_entry({
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "eventType": "config_change",
@@ -578,7 +627,17 @@ def set_skill_key(skill_name: str, env_var: str, body: dict, authorization: str 
         "detail": f"Configured API key {env_var} for skill {skill_name}",
         "status": "success",
     })
-    return {"configured": True, "skill": skill_name, "envVar": env_var}
+    threading.Thread(
+        target=_propagate_skill_key_change,
+        args=(skill_name,),
+        daemon=True,
+    ).start()
+    return {
+        "configured": True,
+        "skill": skill_name,
+        "envVar": env_var,
+        "propagation": "Affected Serverless sessions and running Always-On services are restarting",
+    }
 
 
 # =========================================================================

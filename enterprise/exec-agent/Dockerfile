@@ -14,17 +14,22 @@
 #
 # Build:
 #   docker build --platform linux/arm64 \
+#     --build-arg OPENCLAW_VERSION=2026.10.4 \
+#     --build-arg NODE_VERSION=24.16.0 \
 #     -f exec-agent/Dockerfile \
-#     -t <ECR_URI>:exec-latest .
+#     -t <ECR_URI>:openclaw-2026.10.4-exec .
 # =============================================================================
 
 # Stage 1: Builder
 FROM --platform=linux/arm64 python:3.12-slim AS builder
 
 ARG TARGETARCH=arm64
+ARG NODE_VERSION=24.16.0
+ARG OPENCLAW_VERSION=2026.10.4
+ARG CLAWHUB_VERSION=0.23.3
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl unzip git && rm -rf /var/lib/apt/lists/*
+    curl unzip git xz-utils && rm -rf /var/lib/apt/lists/*
 
 RUN if [ "$TARGETARCH" = "arm64" ] || [ "$(uname -m)" = "aarch64" ]; then \
         curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "/tmp/awscli.zip"; \
@@ -33,13 +38,19 @@ RUN if [ "$TARGETARCH" = "arm64" ] || [ "$(uname -m)" = "aarch64" ]; then \
     fi && unzip -q /tmp/awscli.zip -d /tmp && /tmp/aws/install \
     && rm -rf /tmp/aws /tmp/awscli.zip
 
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*
+# Install an exact Node.js release compatible with the pinned OpenClaw version;
+# distro packages are intentionally avoided.
+RUN NODE_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo arm64 || echo x64) \
+    && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -o /tmp/node.tar.xz \
+    && tar -xJf /tmp/node.tar.xz -C /usr --strip-components=1 \
+    && rm /tmp/node.tar.xz \
+    && node --version | grep -Fx "v${NODE_VERSION}"
 
-# Pin the openclaw npm package to 2026.3.24 — same as agent-container/Dockerfile.
-# 2026.3.28 changed Gateway response delivery, breaking IM channel integration.
-# Do NOT upgrade without testing IM channels (Feishu, DingTalk, Telegram, Discord) end-to-end.
-RUN npm install -g openclaw@2026.3.24 clawhub@latest
+# Pin OpenClaw, Node.js, and ClawHub. Never use @latest in a production image.
+RUN npm install -g "openclaw@${OPENCLAW_VERSION}" "clawhub@${CLAWHUB_VERSION}" \
+    && openclaw --version | grep -F "OpenClaw ${OPENCLAW_VERSION}" \
+    && clawhub --cli-version | grep -F "${CLAWHUB_VERSION}" \
+    && openclaw agent --help | grep -F -- "--json"
 
 # Executive tier: all skills pre-installed (no S3 hot-load needed)
 # Full tool set: shell, browser, file, code_execution, all integrations

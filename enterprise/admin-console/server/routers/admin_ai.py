@@ -167,7 +167,7 @@ _ADMIN_AI_TOOLS = [
 
 def _execute_admin_tool(name: str, inputs: dict, actor_id: str, actor_name: str) -> str:
     """Execute one whitelisted admin tool. Returns result as string for Claude."""
-    from routers.usage import _get_agent_usage_recent, usage_summary, usage_by_department, usage_by_agent
+    from routers.usage import _get_agent_usage_recent, _usage_summary, _usage_by_department, _usage_by_agent
     try:
         if name == "list_employees":
             emps = db.get_employees()
@@ -288,21 +288,21 @@ def _execute_admin_tool(name: str, inputs: dict, actor_id: str, actor_name: str)
         elif name == "get_usage_report":
             scope = inputs["scope"]
             if scope == "summary":
-                s = usage_summary()
+                s = _usage_summary()
                 return (f"Input: {s['totalInputTokens']:,} tokens\n"
                         f"Output: {s['totalOutputTokens']:,} tokens\n"
                         f"Cost (7-day): ${s['totalCost']:.4f}\n"
                         f"Requests: {s['totalRequests']}\n"
                         f"Active tenants: {s['tenantCount']}")
             elif scope == "by_department":
-                rows = usage_by_department()
+                rows = _usage_by_department()
                 lines = [f"{'Dept':<25} {'Agents':>6} {'Reqs':>6} {'Tokens':>8} {'Cost':>8}"]
                 lines.append("-" * 58)
                 for r in rows:
                     lines.append(f"{r['department']:<25} {r['agents']:>6} {r['requests']:>6} {(r['inputTokens']+r['outputTokens'])//1000:>7}k ${r['cost']:>6.2f}")
                 return "\n".join(lines)
             elif scope == "by_agent":
-                rows = usage_by_agent()
+                rows = _usage_by_agent()
                 lines = [f"{'Agent':<30} {'Reqs':>5} {'Cost':>7}"]
                 for r in rows[:20]:
                     lines.append(f"{r['agentName'][:30]:<30} {r['requests']:>5} ${r['cost']:>5.2f}")
