@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -21,6 +22,13 @@ from socketserver import ThreadingMixIn
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from permissions import read_permission_profile
 from observability import log_agent_invocation, log_permission_denied
+from skill_usage import (
+    build_skill_receipt_message,
+    collect_since,
+    extract_skill_receipts,
+    load_authorized_skill_ids,
+    snapshot_transcripts,
+)
 from safety import validate_message
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -47,7 +55,44 @@ def _find_openclaw() -> str:
 
 
 OPENCLAW_BIN = _find_openclaw()
-logger.info("openclaw binary: %s", OPENCLAW_BIN)
+
+
+def _get_openclaw_version() -> str:
+    try:
+        result = subprocess.run(
+            [OPENCLAW_BIN, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        output = (result.stdout or result.stderr).strip()
+        return output.splitlines()[0][:120] if output else "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+OPENCLAW_VERSION = _get_openclaw_version()
+logger.info("openclaw binary=%s version=%s", OPENCLAW_BIN, OPENCLAW_VERSION)
+
+
+def _classify_openclaw_stderr(stderr: str) -> str:
+    """Return a safe error category without logging prompts, payloads, or secrets."""
+    value = stderr.lower()
+    signatures = (
+        ("spawn npm enoent", "runtime_npm_missing"),
+        ("amazon-bedrock-provider", "bedrock_provider_error"),
+        ("cannot find module", "node_module_missing"),
+        ("cannot find package", "node_package_missing"),
+        ("accessdenied", "bedrock_access_denied"),
+        ("validationexception", "bedrock_validation_error"),
+        ("modelnotready", "bedrock_model_not_ready"),
+        ("resource not found", "bedrock_model_not_found"),
+        ("credentials", "aws_credentials_error"),
+        ("econn", "provider_connection_error"),
+        ("timed out", "provider_timeout"),
+    )
+    return next((category for signature, category in signatures if signature in value), "unclassified")
+
 
 # Track which tenants have had their workspace assembled
 _assembled_tenants: set = set()
@@ -163,6 +208,67 @@ def _append_conversation_turn(tenant_id: str, user_message: str, assistant_reply
         logger.warning("Daily memory write failed (non-fatal): %s", e)
 
 
+def _write_skill_usage_to_dynamodb(
+    base_id: str,
+    skill_ids: set[str],
+    tool_names: set[str],
+    duration_ms: int,
+    attribution_source: str,
+) -> None:
+    """Atomically aggregate one validated call per Skill per Agent run.
+
+    Receipt IDs are constrained to the current tenant's protected allowlist.
+    A structured ``SKILL.md`` read is used only when no valid receipt exists.
+    No user prompt, response, credential, or transcript content is persisted.
+    """
+    if not skill_ids:
+        return
+    try:
+        import boto3 as _b3_skill
+        from datetime import datetime, timezone
+
+        table = _b3_skill.resource("dynamodb", region_name=DYNAMODB_REGION).Table(DYNAMODB_TABLE)
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%Y-%m-%d")
+        agent_type = "always-on" if os.environ.get("EFS_ENABLED") == "true" else "serverless"
+        employee = table.get_item(Key={"PK": "ORG#acme", "SK": f"EMP#{base_id}"}).get("Item", {})
+        agent_id = employee.get("agentId") or base_id
+        department_id = employee.get("departmentId", "")
+        safe_tools = sorted(name for name in tool_names if name)[:50]
+
+        for skill_id in sorted(skill_ids):
+            key = f"SKILL_USAGE#{today}#{skill_id}#{base_id}#{agent_type}"
+            table.update_item(
+                Key={"PK": "ORG#acme", "SK": key},
+                UpdateExpression=(
+                    "SET #d = :date, skillId = :skill, employeeId = :employee, "
+                    "agentId = :agent, departmentId = :department, agentType = :agent_type, "
+                    "lastUsedAt = :now, lastDurationMs = :duration, "
+                    "lastToolNames = :tools, attributionSource = :source, "
+                    "GSI1PK = :gsi_pk, GSI1SK = :gsi_sk "
+                    "ADD calls :one"
+                ),
+                ExpressionAttributeNames={"#d": "date"},
+                ExpressionAttributeValues={
+                    ":date": today, ":skill": skill_id, ":employee": base_id,
+                    ":agent": agent_id, ":department": department_id,
+                    ":agent_type": agent_type, ":now": now.isoformat(),
+                    ":duration": duration_ms, ":tools": safe_tools,
+                    ":source": attribution_source, ":one": 1,
+                    ":gsi_pk": "TYPE#skill-usage",
+                    ":gsi_sk": f"{today}#{skill_id}#{agent_id}#{agent_type}",
+                },
+            )
+        logger.info(
+            "Skill usage written: employee=%s skills=%d source=%s",
+            base_id,
+            len(skill_ids),
+            attribution_source,
+        )
+    except Exception as e:
+        logger.warning("Skill usage write failed (non-fatal): %s", e)
+
+
 def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: str, duration_ms: int, message: str = ""):
     """Fire-and-forget: write usage metrics, session, and audit entry to DynamoDB.
     Runs in a background thread to avoid blocking the response."""
@@ -177,9 +283,15 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
         today = now.strftime("%Y-%m-%d")
         org_pk = "ORG#acme"
 
-        input_tokens = int(usage.get("input", 0))
-        output_tokens = int(usage.get("output", 0))
-        total_tokens = int(usage.get("total", input_tokens + output_tokens))
+        input_tokens = int(usage.get("input", usage.get("inputTokens", 0)) or 0)
+        output_tokens = int(usage.get("output", usage.get("outputTokens", 0)) or 0)
+        total_tokens = int(usage.get("total", usage.get("totalTokens", input_tokens + output_tokens)) or 0)
+
+        # Resolve the employee's canonical Agent ID. Older runtimes wrote the
+        # employee ID into agentId, which made organization-level attribution fail.
+        emp_resp = table.get_item(Key={"PK": org_pk, "SK": f"EMP#{base_id}"})
+        emp_item = emp_resp.get("Item", {})
+        agent_id = emp_item.get("agentId") or base_id
 
         # Model-aware pricing — cost based on actual model used
         MODEL_PRICING = {
@@ -193,21 +305,23 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
             "us.deepseek.r1-v1:0":                      {"input": 1.35, "output": 5.40},
             "us.meta.llama3-3-70b-instruct-v1:0":       {"input": 0.72, "output": 0.72},
             "moonshotai.kimi-k2.5":                      {"input": 0.60, "output": 3.00},
+            "zai.glm-5":                                  {"input": 1.00, "output": 3.20},
         }
         pricing = MODEL_PRICING.get(model, {"input": 0.30, "output": 2.50})
         cost = Decimal(str(round((input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000, 6)))
 
-        # 1. Atomic increment USAGE#{base_id}/{agent_type}#{date}
-        # Detect agent type: EFS_ENABLED=true means Fargate always-on
+        # 1. Atomic increment USAGE#{agent_id}#{agent_type}#{date}
+        # Detect agent type: EFS_ENABLED=true means Fargate always-on.
         agent_type = "always-on" if os.environ.get("EFS_ENABLED") == "true" else "serverless"
-        usage_key = f"USAGE#{base_id}/{agent_type}#{today}"
+        usage_key = f"USAGE#{agent_id}#{agent_type}#{today}"
         table.update_item(
             Key={"PK": org_pk, "SK": usage_key},
-            UpdateExpression="SET #d = :date, agentId = :aid, model = :model, agentType = :at, GSI1PK = :gsi1pk, GSI1SK = :gsi1sk ADD inputTokens :inp, outputTokens :out, requests :one, cost :cost",
+            UpdateExpression="SET #d = :date, agentId = :aid, employeeId = :eid, model = :model, agentType = :at, GSI1PK = :gsi1pk, GSI1SK = :gsi1sk ADD inputTokens :inp, outputTokens :out, requests :one, cost :cost",
             ExpressionAttributeNames={"#d": "date"},
             ExpressionAttributeValues={
                 ":date": today,
-                ":aid": base_id,
+                ":aid": agent_id,
+                ":eid": base_id,
                 ":model": model,
                 ":at": agent_type,
                 ":inp": input_tokens,
@@ -215,7 +329,7 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
                 ":one": 1,
                 ":cost": cost,
                 ":gsi1pk": "TYPE#usage",
-                ":gsi1sk": f"USAGE#{today}#{base_id}/{agent_type}",
+                ":gsi1sk": f"USAGE#{today}#{agent_id}#{agent_type}",
             },
         )
 
@@ -228,7 +342,7 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":id": session_id,
-                ":aid": base_id,
+                ":aid": agent_id,
                 ":eid": base_id,
                 ":status": "active",
                 ":now": now.isoformat(),
@@ -239,19 +353,11 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
             },
         )
 
-        logger.info("DynamoDB usage written: %s tokens=%d cost=%s", base_id, total_tokens, cost)
+        logger.info("DynamoDB usage written: employee=%s agent=%s tokens=%d cost=%s", base_id, agent_id, total_tokens, cost)
 
         # 3. Write audit entry — makes ALL channels (Discord, Telegram, Portal) visible
         #    in the Admin Console Audit Center, not just Portal chat.
-        #    Try to resolve the employee display name from DynamoDB EMP# record.
-        actor_name = base_id
-        try:
-            emp_resp = table.get_item(Key={"PK": "ORG#acme", "SK": f"EMP#{base_id}"})
-            emp_item = emp_resp.get("Item", {})
-            if emp_item.get("name"):
-                actor_name = emp_item["name"]
-        except Exception:
-            pass
+        actor_name = emp_item.get("name", base_id)
 
         # Detect channel from tenant_id prefix (wa__, tg__, dc__, sl__, port__, etc.)
         channel = "unknown"
@@ -431,19 +537,68 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
         # server.py no longer modifies SOUL.md. The assembler writes a complete
         # SOUL.md in a single pass (3-layer merge + context block).
 
-        # 4. Re-source skill env vars (in case skills were loaded)
-        skill_env = "/tmp/skill_env.sh"
-        if os.path.isfile(skill_env):
+        # 4. Reload skills after workspace assembly so new role assignments and
+        # approved personal skills are available on this invocation.
+        previous_skill_env = {}
+        skill_env_json = "/tmp/skill_env.sh.json"
+        if os.path.isfile(skill_env_json):
             try:
-                with open(skill_env) as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith("export ") and "=" in line:
-                            kv = line[7:]
-                            key, _, val = kv.partition("=")
-                            os.environ[key] = val.strip("'\"")
-            except IOError:
+                with open(skill_env_json, encoding="utf-8") as handle:
+                    loaded_previous = json.load(handle)
+                if isinstance(loaded_previous, dict):
+                    previous_skill_env = loaded_previous
+            except (OSError, json.JSONDecodeError):
                 pass
+
+        skill_loader = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skill_loader.py")
+        if os.path.isfile(skill_loader):
+            try:
+                result = subprocess.run(
+                    [sys.executable, skill_loader,
+                     "--tenant", tenant_id,
+                     "--workspace", WORKSPACE,
+                     "--bucket", S3_BUCKET,
+                     "--stack", STACK_NAME,
+                     "--region", AWS_REGION_RUNTIME],
+                    capture_output=True, text=True, timeout=45
+                )
+                if result.returncode:
+                    logger.warning("Skill load failed for %s: %s", tenant_id, result.stderr[:200])
+            except Exception as e:
+                logger.warning("Skill loading error for %s: %s", tenant_id, e)
+
+        # 5. Load Skill env vars into server.py and ask PID 1 to restart the
+        # Gateway when the authorized key set/value changes. The request waits
+        # for acknowledgement so it cannot race an old Gateway environment.
+        skill_env_json = "/tmp/skill_env.sh.json"
+        if os.path.isfile(skill_env_json):
+            try:
+                with open(skill_env_json, encoding="utf-8") as handle:
+                    skill_env_values = json.load(handle)
+                if isinstance(skill_env_values, dict):
+                    for key in previous_skill_env:
+                        if key not in skill_env_values:
+                            os.environ.pop(key, None)
+                    for key, value in skill_env_values.items():
+                        if isinstance(key, str) and isinstance(value, str):
+                            os.environ[key] = value
+                    if previous_skill_env != skill_env_values:
+                        request_file = "/tmp/gateway_env_reload.request"
+                        done_file = "/tmp/gateway_env_reload.done"
+                        try:
+                            os.remove(done_file)
+                        except FileNotFoundError:
+                            pass
+                        with open(request_file, "w", encoding="utf-8") as handle:
+                            handle.write(str(time.time_ns()))
+                        deadline = time.time() + 45
+                        while time.time() < deadline and not os.path.isfile(done_file):
+                            time.sleep(0.25)
+                        if not os.path.isfile(done_file):
+                            raise RuntimeError("Gateway environment reload timed out")
+                        logger.info("Gateway reloaded with authorized Skill environment")
+            except Exception as e:
+                logger.warning("Skill environment activation failed: %s", e)
 
         # Write tenant_id so watchdog sync knows where to write back
         try:
@@ -530,7 +685,7 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
                     if os.path.isfile(oc_config_path):
                         with open(oc_config_path) as f:
                             oc_config = json.load(f)
-                        old_model = os.environ.get("BEDROCK_MODEL_ID", "global.amazon.nova-2-lite-v1:0")
+                        old_model = os.environ.get("BEDROCK_MODEL_ID", "zai.glm-5")
                         oc_json_str = json.dumps(oc_config)
                         oc_json_str = oc_json_str.replace(old_model, new_model_id)
                         with open(oc_config_path, "w") as f:
@@ -737,21 +892,22 @@ def _invoke_openclaw_once(tenant_id: str, message: str, timeout: int = 300) -> d
     """
     env = os.environ.copy()
 
-    # Inject skill API keys from /tmp/skill_env.sh (written by skill_loader.py)
-    skill_env_file = "/tmp/skill_env.sh"
-    if os.path.isfile(skill_env_file):
+    # Inject authorized Skill API keys from the protected JSON generated by
+    # skill_loader.py. JSON avoids corrupting values that contain shell quotes.
+    skill_env: dict[str, str] = {}
+    skill_env_json = "/tmp/skill_env.sh.json"
+    if os.path.isfile(skill_env_json):
         try:
-            with open(skill_env_file) as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("export ") and "=" in line:
-                        kv = line[7:]  # strip "export "
-                        key, _, val = kv.partition("=")
-                        # Strip surrounding quotes
-                        val = val.strip("'\"")
-                        env[key] = val
-        except IOError:
-            pass
+            with open(skill_env_json, encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                skill_env = {
+                    key: value for key, value in loaded.items()
+                    if isinstance(key, str) and isinstance(value, str)
+                }
+                env.update(skill_env)
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Could not load protected Skill environment")
 
     # Ensure node is on PATH for nvm installs (glob to avoid hardcoded version)
     import glob as _glob
@@ -790,7 +946,7 @@ def _invoke_openclaw_once(tenant_id: str, message: str, timeout: int = 300) -> d
             f"AWS_DEFAULT_REGION={aws_region}",
             f"OPENCLAW_WORKSPACE={workspace_val}",
             "OPENCLAW_SKIP_ONBOARDING=1",
-        ] + openclaw_cmd
+        ] + [f"{key}={value}" for key, value in sorted(skill_env.items())] + openclaw_cmd
         run_env = None  # let sudo handle the environment
     else:
         cmd = openclaw_cmd
@@ -813,9 +969,14 @@ def _invoke_openclaw_once(tenant_id: str, message: str, timeout: int = 300) -> d
     stderr = result.stderr.strip()
 
     if stderr:
-        # openclaw logs info/warnings to stderr — log at WARNING for visibility
-        for line in stderr.splitlines():
-            logger.warning("[openclaw stderr] %s", line)
+        # OpenClaw logs info/warnings to stderr. Never log raw stderr because
+        # upstream errors can include user messages, tool payloads, or credentials.
+        logger.warning(
+            "openclaw emitted stderr tenant_id=%s bytes=%d category=%s",
+            tenant_id,
+            len(result.stderr.encode("utf-8", errors="replace")),
+            _classify_openclaw_stderr(stderr),
+        )
 
     # OpenClaw may write JSON response to stderr when Gateway fallback occurs
     # ("Gateway agent failed; falling back to embedded" → JSON goes to stderr)
@@ -826,19 +987,35 @@ def _invoke_openclaw_once(tenant_id: str, message: str, timeout: int = 300) -> d
             stdout = stderr[json_start_stderr:]
 
     if not stdout:
-        raise RuntimeError(f"openclaw returned empty output (exit={result.returncode})")
+        logger.error(
+            "openclaw empty output tenant_id=%s version=%s exit=%d stdout_bytes=%d stderr_bytes=%d",
+            tenant_id,
+            OPENCLAW_VERSION,
+            result.returncode,
+            len(result.stdout.encode("utf-8", errors="replace")),
+            len(result.stderr.encode("utf-8", errors="replace")),
+        )
+        raise RuntimeError(
+            f"openclaw returned empty output (version={OPENCLAW_VERSION}, exit={result.returncode})"
+        )
 
     # Find the first JSON object in stdout (may have log lines before it)
     json_start = stdout.find('{')
     if json_start == -1:
-        raise RuntimeError(f"No JSON in openclaw output: {stdout[:200]}")
+        raise RuntimeError(
+            "No JSON in openclaw output "
+            f"(version={OPENCLAW_VERSION}, exit={result.returncode}, stdout_bytes={len(result.stdout.encode('utf-8', errors='replace'))})"
+        )
 
     # Use JSONDecoder to parse only the first complete JSON object
     decoder = json.JSONDecoder()
     try:
         data, _ = decoder.raw_decode(stdout, json_start)
     except json.JSONDecodeError as e:
-        raise RuntimeError(f"Failed to parse openclaw JSON: {e} — output: {stdout[:200]}")
+        raise RuntimeError(
+            "Failed to parse openclaw JSON "
+            f"(version={OPENCLAW_VERSION}, exit={result.returncode}, line={e.lineno}, column={e.colno})"
+        )
 
     return data
 
@@ -1259,8 +1436,17 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
         start_ms = int(time.time() * 1000)
         try:
             timeout = int(payload.get("timeout", 300))
-            data = invoke_openclaw(tenant_id, message, timeout=timeout)
+            allowed_skill_ids = load_authorized_skill_ids()
+            receipt_nonce = secrets.token_hex(16)
+            invocation_message = build_skill_receipt_message(
+                message,
+                allowed_skill_ids,
+                receipt_nonce,
+            )
+            transcript_offsets = snapshot_transcripts(tenant_id)
+            data = invoke_openclaw(tenant_id, invocation_message, timeout=timeout)
             duration_ms = int(time.time() * 1000) - start_ms
+            explicit_skills, tools_used = collect_since(transcript_offsets, tenant_id)
 
             # Extract text from openclaw JSON response.
             # Embedded mode:  {"payloads": [...], "meta": {...}}
@@ -1276,6 +1462,39 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
             if not response_text:
                 logger.warning("Empty response_text from openclaw, raw data keys: %s", list(data.keys()))
                 response_text = "(no response)"
+
+            # Receipts are the primary per-turn signal. Every telemetry marker is
+            # stripped before guardrails, storage, logs, or the user response.
+            response_text, receipt_skills = extract_skill_receipts(
+                response_text,
+                allowed_skill_ids,
+                receipt_nonce,
+            )
+            if receipt_skills:
+                called_skills = receipt_skills
+                attribution_source = "receipt"
+            else:
+                called_skills = explicit_skills & allowed_skill_ids
+                attribution_source = "explicit_fallback" if called_skills else "none"
+
+            # Attribute the call before output guardrails: if a Skill already ran,
+            # blocking its response must not erase that usage event.
+            parts = tenant_id.split("__")
+            base_id = parts[1] if len(parts) >= 2 else tenant_id
+            try:
+                with open("/tmp/base_tenant_id") as handle:
+                    resolved = handle.read().strip()
+                    if resolved and resolved != "unknown":
+                        base_id = resolved
+            except OSError:
+                pass
+            _write_skill_usage_to_dynamodb(
+                base_id,
+                called_skills,
+                tools_used,
+                duration_ms,
+                attribution_source,
+            )
 
             # ── Guardrail OUTPUT check ────────────────────────────────────────
             if GUARDRAIL_ID:
@@ -1293,14 +1512,26 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
             _audit_response(tenant_id, response_text, allowed)
 
             # Extract model usage for observability
-            meta = result_block.get("meta", data.get("meta", {}))
-            agent_meta = meta.get("agentMeta", {})
-            model = agent_meta.get("model", "unknown")
-            usage = agent_meta.get("usage", {})
+            meta = result_block.get("meta", data.get("meta", {})) or {}
+            agent_meta = meta.get("agentMeta", {}) or {}
+            model = (
+                agent_meta.get("model")
+                or meta.get("model")
+                or result_block.get("model")
+                or os.environ.get("BEDROCK_MODEL_ID")
+                or "unknown"
+            )
+            usage = (
+                agent_meta.get("usage")
+                or meta.get("usage")
+                or result_block.get("usage")
+                or data.get("usage")
+                or {}
+            )
 
             log_agent_invocation(
                 tenant_id=tenant_id,
-                tools_used=[],
+                tools_used=sorted(tools_used),
                 duration_ms=duration_ms,
                 status="success",
             )
@@ -1310,21 +1541,6 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
             )
 
             # Fire-and-forget: write usage to DynamoDB in background thread
-            base_id = tenant_id
-            parts = tenant_id.split("__")
-            if len(parts) >= 3:
-                base_id = parts[1]
-            elif len(parts) == 2:
-                base_id = parts[1]
-            # Use resolved base_id from workspace assembly if available
-            try:
-                with open("/tmp/base_tenant_id") as f:
-                    resolved = f.read().strip()
-                    if resolved and resolved != "unknown":
-                        base_id = resolved
-            except Exception:
-                pass
-
             threading.Thread(
                 target=_write_usage_to_dynamodb,
                 args=(tenant_id, base_id, usage, model, duration_ms, message),

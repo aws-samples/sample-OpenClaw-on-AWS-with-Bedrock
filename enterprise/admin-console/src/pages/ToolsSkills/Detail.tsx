@@ -38,7 +38,7 @@ const TOOL_DETAILS: Record<string, { description: string; guide: string; positio
   },
   'code_execution': {
     description: 'Run Python and Node.js code in a sandboxed environment within the agent microVM. This enables agents to perform data analysis, run calculations, prototype solutions, and execute test scripts.',
-    guide: '## Supported Languages\n\n- **Python 3.12** — full standard library + pip packages\n- **Node.js 22** — full runtime + npm packages\n\n## Pre-installed Packages\n\n- Python: boto3, requests, pandas, numpy, openpyxl\n- Node.js: aws-sdk, axios\n\n## Security\n\nCode runs inside the agent microVM with the same IAM role. Network access is available for API calls. Filesystem access is scoped to the workspace directory.',
+    guide: '## Supported Languages\n\n- **Python 3.12** — full standard library + pip packages\n- **Node.js 24.16.0** — full runtime + npm packages\n\n## Pre-installed Packages\n\n- Python: boto3, requests, pandas, numpy, openpyxl\n- Node.js: aws-sdk, axios\n\n## Security\n\nCode runs inside the agent microVM with the same IAM role. Network access is available for API calls. Filesystem access is scoped to the workspace directory.',
     positions: 'SDE, DevOps, QA, Executive, SA',
   },
 };
