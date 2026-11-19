@@ -4,8 +4,8 @@ import {
   Puzzle, Search, Key, Package, Cloud, CheckCircle, Lock, Shield,
   ArrowRight, AlertTriangle, Zap, X, Wrench, Globe, User, Eye,
 } from 'lucide-react';
-import { Card, StatCard, Badge, Button, PageHeader, Modal, Select, Tabs } from '../../components/ui';
-import { useSkills, useSkillKeys, usePositions, useAssignSkill, useUnassignSkill, usePendingSkills, useReviewSkill } from '../../hooks/useApi';
+import { Card, StatCard, Badge, Button, PageHeader, Modal, Select, Tabs, Input } from '../../components/ui';
+import { useSkills, useSkillKeys, useSetSkillKey, usePositions, useAssignSkill, useUnassignSkill, usePendingSkills, useReviewSkill } from '../../hooks/useApi';
 import type { SkillManifest, SkillApiKey } from '../../hooks/useApi';
 
 // ── Tag colors ────────────────────────────────────────────────────────────
@@ -270,6 +270,7 @@ function SkillCard({ item, apiKeys, onClick }: { item: SkillManifest; apiKeys: S
 export default function ToolsSkills() {
   const { data: skills = [] } = useSkills();
   const { data: apiKeys = [] } = useSkillKeys();
+  const setSkillKey = useSetSkillKey();
   const { data: positions = [] } = usePositions();
   const { data: pendingSkills = [] } = usePendingSkills();
   const reviewSkill = useReviewSkill();
@@ -277,6 +278,9 @@ export default function ToolsSkills() {
   const [activeTab, setActiveTab] = useState('tools');
   const [skillFilter, setSkillFilter] = useState<'all' | 'official' | 'approved' | 'under_review' | 'community'>('all');
   const [filterText, setFilterText] = useState('');
+  const [keyTarget, setKeyTarget] = useState<SkillApiKey | null>(null);
+  const [keyValue, setKeyValue] = useState('');
+  const [keyError, setKeyError] = useState('');
 
   const toolCount = BUILT_IN_TOOLS.length;
   const skillCount = skills.length;
@@ -465,6 +469,15 @@ export default function ToolsSkills() {
                         {k.status === 'iam-role' ? 'IAM Role' : k.status === 'active' ? 'Configured' : 'Not Configured'}
                       </Badge>
                       <span className="text-[10px] text-text-muted">{k.note}</span>
+                      {k.status !== 'iam-role' && (
+                        <Button size="sm" variant="default" onClick={() => {
+                          setKeyTarget(k);
+                          setKeyValue('');
+                          setKeyError('');
+                        }}>
+                          {k.status === 'active' ? 'Rotate' : 'Configure'}
+                        </Button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -473,6 +486,50 @@ export default function ToolsSkills() {
           </div>
         )}
       </Card>
+
+      <Modal
+        open={!!keyTarget}
+        onClose={() => { setKeyTarget(null); setKeyValue(''); setKeyError(''); }}
+        title={keyTarget?.status === 'active' ? 'Rotate API Key' : 'Configure API Key'}
+        size="sm"
+        footer={<div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => { setKeyTarget(null); setKeyValue(''); setKeyError(''); }}>Cancel</Button>
+          <Button
+            variant="primary"
+            disabled={!keyValue.trim() || setSkillKey.isPending}
+            onClick={() => {
+              if (!keyTarget) return;
+              setKeyError('');
+              setSkillKey.mutate({
+                skillName: keyTarget.skillName,
+                envVar: keyTarget.envVar,
+                value: keyValue,
+              }, {
+                onSuccess: () => { setKeyTarget(null); setKeyValue(''); },
+                onError: (error: any) => setKeyError(error?.message || 'Failed to save API key'),
+              });
+            }}
+          >
+            {setSkillKey.isPending ? 'Saving…' : 'Save Securely'}
+          </Button>
+        </div>}
+      >
+        {keyTarget && <div className="space-y-4">
+          <div className="rounded-lg bg-surface-dim px-3 py-2 text-xs text-text-muted">
+            <p><span className="text-text-secondary">Skill:</span> {keyTarget.skillName}</p>
+            <p><span className="text-text-secondary">Variable:</span> <code>{keyTarget.envVar}</code></p>
+            <p className="mt-1">Stored as an encrypted SSM SecureString. Existing values are never displayed.</p>
+          </div>
+          <Input
+            label="API Key"
+            type="password"
+            value={keyValue}
+            onChange={setKeyValue}
+            placeholder="Enter a new value"
+          />
+          {keyError && <p className="text-sm text-danger">{keyError}</p>}
+        </div>}
+      </Modal>
 
       {/* Detail Modal */}    </div>
   );

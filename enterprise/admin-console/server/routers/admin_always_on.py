@@ -121,11 +121,12 @@ def _ecs_service_name(agent_id: str) -> str:
 # ── Per-tier config resolution ────────────────────────────────────────────
 
 # Tier → (model, guardrail_id, cpu, memory)
+_DEPLOYMENT_MODEL = os.environ.get("BEDROCK_MODEL_ID", "zai.glm-5")
 _TIER_DEFAULTS = {
-    "standard":    ("minimax.minimax-m2.5",  "", "256", "512"),
-    "restricted":  ("deepseek.v3.2",         "", "256", "512"),
-    "engineering": ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", "", "512", "1024"),
-    "executive":   ("global.anthropic.claude-sonnet-4-6", "", "512", "1024"),
+    "standard":    (_DEPLOYMENT_MODEL, "", "256", "512"),
+    "restricted":  (_DEPLOYMENT_MODEL, "", "256", "512"),
+    "engineering": (_DEPLOYMENT_MODEL, "", "512", "1024"),
+    "executive":   (_DEPLOYMENT_MODEL, "", "512", "1024"),
 }
 
 

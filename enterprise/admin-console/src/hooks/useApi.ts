@@ -86,10 +86,12 @@ export function useEmployeeActivities() {
   });
 }
 
-export function useUsageTrend() {
-  return useQuery<{ date: string; openclawCost: number; chatgptEquivalent: number; totalRequests: number }[]>({
-    queryKey: ['usage-trend'],
-    queryFn: () => api.get('/usage/trend'),
+export type UsageRange = '1d' | '7d' | '30d' | 'mtd';
+
+export function useUsageTrend(range: UsageRange = '7d') {
+  return useQuery<{ date: string; openclawCost: number; totalRequests: number }[]>({
+    queryKey: ['usage-trend', range],
+    queryFn: () => api.get(`/usage/trend?report_range=${range}`),
   });
 }
 
@@ -346,24 +348,24 @@ export function useDashboard() {
 
 // === Usage (multi-dimension) ===
 
-export function useUsageSummary() {
+export function useUsageSummary(range: UsageRange = '7d') {
   return useQuery<{ totalInputTokens: number; totalOutputTokens: number; totalCost: number; totalRequests: number; tenantCount: number }>({
-    queryKey: ['usage-summary'],
-    queryFn: () => api.get('/usage/summary'),
+    queryKey: ['usage-summary', range],
+    queryFn: () => api.get(`/usage/summary?report_range=${range}`),
   });
 }
 
-export function useUsageByDepartment() {
+export function useUsageByDepartment(range: UsageRange = '7d') {
   return useQuery<{ department: string; inputTokens: number; outputTokens: number; requests: number; cost: number; agents: number }[]>({
-    queryKey: ['usage-by-dept'],
-    queryFn: () => api.get('/usage/by-department'),
+    queryKey: ['usage-by-dept', range],
+    queryFn: () => api.get(`/usage/by-department?report_range=${range}`),
   });
 }
 
-export function useUsageByAgent() {
-  return useQuery<{ agentId: string; agentName: string; employeeName: string; positionName: string; inputTokens: number; outputTokens: number; requests: number; cost: number }[]>({
-    queryKey: ['usage-by-agent'],
-    queryFn: () => api.get('/usage/by-agent'),
+export function useUsageByAgent(range: UsageRange = '7d') {
+  return useQuery<{ agentId: string; agentName: string; employeeName: string; positionName: string; deployMode: string; inputTokens: number; outputTokens: number; requests: number; cost: number }[]>({
+    queryKey: ['usage-by-agent', range],
+    queryFn: () => api.get(`/usage/by-agent?report_range=${range}`),
   });
 }
 
@@ -375,17 +377,50 @@ export function useAgentDailyUsage(agentId: string) {
   });
 }
 
-export function useUsageByModel() {
+export function useUsageByModel(range: UsageRange = '7d') {
   return useQuery<{ model: string; inputTokens: number; outputTokens: number; requests: number; cost: number }[]>({
-    queryKey: ['usage-by-model'],
-    queryFn: () => api.get('/usage/by-model'),
+    queryKey: ['usage-by-model', range],
+    queryFn: () => api.get(`/usage/by-model?report_range=${range}`),
   });
 }
 
-export function useUsageBudgets() {
+export interface SkillUsageItem {
+  skillId: string; status: 'installed' | 'removed'; calls: number; activeUsers: number;
+  serverlessCalls: number; alwaysOnCalls: number; lastUsedAt: string;
+}
+
+export interface SkillUserUsageItem {
+  employeeId: string; employeeName: string; departmentName: string; calls: number;
+  serverlessCalls: number; alwaysOnCalls: number; lastUsedAt: string;
+}
+
+export function useUsageBySkill(range: UsageRange = '7d') {
+  return useQuery<SkillUsageItem[]>({
+    queryKey: ['usage-by-skill', range],
+    queryFn: () => api.get(`/usage/by-skill?report_range=${range}`),
+  });
+}
+
+export function useUsageSkillUsers(skillId: string, range: UsageRange = '7d') {
+  return useQuery<SkillUserUsageItem[]>({
+    queryKey: ['usage-skill-users', skillId, range],
+    queryFn: () => api.get(`/usage/skill/${encodeURIComponent(skillId)}/users?report_range=${range}`),
+    enabled: !!skillId,
+  });
+}
+
+export function useUsageBudgets(range: UsageRange = '7d') {
   return useQuery<{ department: string; budget: number; used: number; projected: number; status: string }[]>({
-    queryKey: ['usage-budgets'],
-    queryFn: () => api.get('/usage/budgets'),
+    queryKey: ['usage-budgets', range],
+    queryFn: () => api.get(`/usage/budgets?report_range=${range}`),
+  });
+}
+
+export function useUsageFargateCost(enabled = true) {
+  return useQuery<{ items: { employeeId: string; employeeName: string; tier: string; resource: string; monthlyEstimate: number }[]; totalMonthly: number; count: number }>({
+    queryKey: ['usage-fargate-cost'],
+    queryFn: () => api.get('/usage/fargate-cost'),
+    enabled,
   });
 }
 
@@ -572,11 +607,23 @@ export function useSkillKeys() {
   });
 }
 
+export function useSetSkillKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ skillName, envVar, value }: { skillName: string; envVar: string; value: string }) =>
+      api.put<{ configured: boolean }>(
+        `/skills/keys/${encodeURIComponent(skillName)}/${encodeURIComponent(envVar)}`,
+        { value },
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['skill-keys'] }),
+  });
+}
+
 export function useAssignSkill() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ skillName, positionId }: { skillName: string; positionId: string }) =>
-      api.post<{ assigned: boolean; agentsPropagated: number }>(`/skills/${skillName}/assign`, { positionId }),
+      api.post<{ assigned: boolean; agentsAffected: number }>(`/skills/${skillName}/assign`, { positionId }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['skills'] });
       qc.invalidateQueries({ queryKey: ['positions'] });
@@ -671,7 +718,11 @@ export function useApproveRequest() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.post(`/approvals/${id}/approve`, {}),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['approvals'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['approvals'] });
+      qc.invalidateQueries({ queryKey: ['employees'] });
+      qc.invalidateQueries({ queryKey: ['agents'] });
+    },
   });
 }
 

@@ -22,6 +22,8 @@ import argparse
 import json
 import logging
 import os
+import re
+import shlex
 import subprocess
 import sys
 
@@ -32,37 +34,32 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 
+def _base_tenant_id(tenant_id):
+    """Extract an employee ID from a tenant-router session ID."""
+    parts = tenant_id.split("__")
+    return parts[1] if len(parts) >= 2 else tenant_id
+
+
 def get_tenant_roles(stack_name, tenant_id, region=None):
-    """Get tenant's roles from DynamoDB position/department data.
-    Maps: tenant_id → emp_id → EMP# record → departmentName → role list.
-    Returns list of role strings for skill permission filtering."""
+    """Get tenant roles from the employee's DynamoDB record."""
     ddb_region = region or os.environ.get("DYNAMODB_REGION", os.environ.get("AWS_REGION", "us-east-1"))
     ddb_table = os.environ.get("DYNAMODB_TABLE", os.environ.get("STACK_NAME", "openclaw"))
-
-    # Strip Tenant Router prefix: channel__emp_id__hash → emp_id
-    base_id = tenant_id
-    parts = base_id.split("__")
-    if len(parts) >= 2:
-        base_id = parts[1]
+    base_id = _base_tenant_id(tenant_id)
 
     try:
         ddb = boto3.resource("dynamodb", region_name=ddb_region)
         table = ddb.Table(ddb_table)
-
-        resp = table.get_item(Key={"PK": "ORG#acme", "SK": f"EMP#{base_id}"})
-        emp = resp.get("Item", {})
+        emp = table.get_item(Key={"PK": "ORG#acme", "SK": f"EMP#{base_id}"}).get("Item", {})
         if not emp:
             logger.info("Employee %s not found, using default roles", base_id)
             return ["employee"]
 
         dept_name = emp.get("departmentName", "")
         role = emp.get("role", "employee")
-
         roles = [role, "employee"]
         if dept_name:
-            dept_lower = dept_name.lower().replace(" & ", "_").replace(" ", "_")
-            roles.append(dept_lower)
-            DEPT_ALIASES = {
+            roles.append(dept_name.lower().replace(" & ", "_").replace(" ", "_"))
+            aliases = {
                 "engineering": ["engineering", "devops", "qa"],
                 "platform team": ["engineering", "devops"],
                 "frontend team": ["engineering"],
@@ -76,18 +73,45 @@ def get_tenant_roles(stack_name, tenant_id, region=None):
                 "product": ["product"],
                 "finance": ["finance"],
             }
-            for alias in DEPT_ALIASES.get(dept_name.lower(), []):
-                if alias not in roles:
-                    roles.append(alias)
-
+            roles.extend(aliases.get(dept_name.lower(), []))
         if role == "admin":
             roles.append("management")
-
-        logger.info("Tenant %s (%s) roles: %s", base_id, dept_name, list(set(roles)))
         return list(set(roles))
     except Exception as e:
         logger.warning("DynamoDB role resolution failed: %s — using default", e)
         return ["employee"]
+
+
+def get_tenant_assigned_skills(tenant_id, region=None):
+    """Return skills explicitly assigned to the employee's position."""
+    ddb_region = region or os.environ.get("DYNAMODB_REGION", os.environ.get("AWS_REGION", "us-east-1"))
+    ddb_table = os.environ.get("DYNAMODB_TABLE", os.environ.get("STACK_NAME", "openclaw"))
+    try:
+        table = boto3.resource("dynamodb", region_name=ddb_region).Table(ddb_table)
+        emp = table.get_item(Key={"PK": "ORG#acme", "SK": f"EMP#{_base_tenant_id(tenant_id)}"}).get("Item", {})
+        pos_id = emp.get("positionId", "")
+        if not pos_id:
+            return set()
+        position = table.get_item(Key={"PK": "ORG#acme", "SK": f"POS#{pos_id}"}).get("Item", {})
+        return set(position.get("defaultSkills", []))
+    except Exception as e:
+        logger.warning("Failed to read position skill assignments: %s", e)
+        return set()
+
+
+def get_tenant_personal_skills(tenant_id, region=None):
+    """Return employee-specific Skills approved by an administrator."""
+    ddb_region = region or os.environ.get("DYNAMODB_REGION", os.environ.get("AWS_REGION", "us-east-1"))
+    ddb_table = os.environ.get("DYNAMODB_TABLE", os.environ.get("STACK_NAME", "openclaw"))
+    try:
+        table = boto3.resource("dynamodb", region_name=ddb_region).Table(ddb_table)
+        employee = table.get_item(
+            Key={"PK": "ORG#acme", "SK": f"EMP#{_base_tenant_id(tenant_id)}"}
+        ).get("Item", {})
+        return set(employee.get("personalSkills", []))
+    except Exception as e:
+        logger.warning("Failed to read personal Skill assignments: %s", e)
+        return set()
 
 
 def load_skill_manifest(skill_dir):
@@ -130,25 +154,20 @@ def is_skill_allowed(manifest, tenant_roles):
 
 
 def load_layer2_skills(s3, bucket, stack_name, tenant_id, tenant_roles, workspace):
-    """Load Layer 2 skills from S3 (script-level, no npm deps)."""
+    """Load Layer 2 skills allowed by manifest role or explicit position assignment."""
     skills_dir = os.path.join(workspace, "skills")
     os.makedirs(skills_dir, exist_ok=True)
     loaded = []
+    assigned_skills = get_tenant_assigned_skills(tenant_id)
 
-    # 1. Pull shared skills
-    shared_prefix = "_shared/skills/"
     try:
-        result = subprocess.run(
-            ["aws", "s3", "sync",
-             f"s3://{bucket}/{shared_prefix}", f"{skills_dir}/_shared_tmp/",
-             "--quiet"],
-            capture_output=True, text=True, timeout=30
-        )
+        subprocess.run(
+            ["aws", "s3", "sync", f"s3://{bucket}/_shared/skills/", f"{skills_dir}/_shared_tmp/", "--quiet"],
+            capture_output=True, text=True, timeout=30, check=False)
     except Exception as e:
         logger.warning("Failed to sync shared skills: %s", e)
         return loaded
 
-    # 2. Filter by permissions and move to skills dir
     shared_tmp = os.path.join(skills_dir, "_shared_tmp")
     if os.path.isdir(shared_tmp):
         for skill_name in os.listdir(shared_tmp):
@@ -156,7 +175,7 @@ def load_layer2_skills(s3, bucket, stack_name, tenant_id, tenant_roles, workspac
             if not os.path.isdir(skill_path):
                 continue
             manifest = load_skill_manifest(skill_path)
-            if is_skill_allowed(manifest, tenant_roles):
+            if skill_name in assigned_skills or is_skill_allowed(manifest, tenant_roles):
                 dest = os.path.join(skills_dir, skill_name)
                 if not os.path.exists(dest):
                     os.rename(skill_path, dest)
@@ -164,21 +183,14 @@ def load_layer2_skills(s3, bucket, stack_name, tenant_id, tenant_roles, workspac
                     logger.info("Layer 2 skill loaded: %s", skill_name)
             else:
                 logger.info("Layer 2 skill filtered: %s", skill_name)
-        # Cleanup tmp
         subprocess.run(["rm", "-rf", shared_tmp], capture_output=True)
 
-    # 3. Pull tenant-specific skills
-    tenant_prefix = f"{tenant_id}/skills/"
     try:
         subprocess.run(
-            ["aws", "s3", "sync",
-             f"s3://{bucket}/{tenant_prefix}", f"{skills_dir}/",
-             "--quiet"],
-            capture_output=True, text=True, timeout=30
-        )
+            ["aws", "s3", "sync", f"s3://{bucket}/{tenant_id}/skills/", f"{skills_dir}/", "--quiet"],
+            capture_output=True, text=True, timeout=30, check=False)
     except Exception as e:
         logger.warning("Failed to sync tenant skills: %s", e)
-
     return loaded
 
 
@@ -269,66 +281,172 @@ def load_layer3_bundles(s3_client, ssm, bucket, stack_name, workspace):
     return loaded
 
 
-def inject_skill_keys(ssm, stack_name, workspace, env_file="/tmp/skill_env.sh"):
-    """Read API keys from SSM and write export statements to env file."""
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SKILL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+_TELEMETRY_MARKER = "<!-- OPENCLAW_ENTERPRISE_SKILL_TELEMETRY_V1 -->"
+
+
+def get_builtin_skill_ids():
+    """Return image-pinned Skills intentionally available to every tenant."""
+    result = set()
+    for root in ("/root/.openclaw/skills", "/home/ubuntu/.openclaw/skills"):
+        if not os.path.isdir(root):
+            continue
+        for skill_name in os.listdir(root):
+            if _SKILL_ID.fullmatch(skill_name) and os.path.isdir(os.path.join(root, skill_name)):
+                result.add(skill_name)
+    return result
+
+
+def instrument_authorized_skills(workspace, authorized_skills):
+    """Idempotently add an implementation-neutral usage receipt contract."""
+    roots = [os.path.join(workspace, "skills"), "/root/.openclaw/skills", "/home/ubuntu/.openclaw/skills"]
+    instrumented = 0
+    for root in roots:
+        root_real = os.path.realpath(root)
+        if not os.path.isdir(root_real):
+            continue
+        for skill_name in sorted(authorized_skills):
+            if not _SKILL_ID.fullmatch(skill_name):
+                continue
+            skill_md = os.path.realpath(os.path.join(root_real, skill_name, "SKILL.md"))
+            if not skill_md.startswith(root_real + os.sep) or not os.path.isfile(skill_md):
+                continue
+            try:
+                with open(skill_md, encoding="utf-8") as handle:
+                    content = handle.read()
+                if _TELEMETRY_MARKER in content:
+                    continue
+                block = (
+                    f"\n\n{_TELEMETRY_MARKER}\n"
+                    "## Enterprise usage receipt\n\n"
+                    "When you actually apply this Skill in a turn, follow the request-scoped "
+                    "enterprise telemetry instruction and append its hidden receipt for Skill ID "
+                    f"`{skill_name}`. Do this on every turn where the Skill is applied, even when "
+                    "this file was not read again. Reading or remembering this file alone is not "
+                    "usage. Do not emit a receipt when this Skill did not contribute to the answer, "
+                    "and never show or explain the receipt to the user.\n"
+                )
+                with open(skill_md, "a", encoding="utf-8") as handle:
+                    handle.write(block)
+                instrumented += 1
+            except OSError as exc:
+                logger.warning("Could not instrument Skill %s: %s", skill_name, exc)
+    return instrumented
+
+
+def write_authorized_skill_ids(skill_ids, path="/tmp/authorized_skill_ids.json"):
+    """Publish only validated tenant-authorized IDs for runtime receipt validation."""
+    values = sorted(skill for skill in skill_ids if _SKILL_ID.fullmatch(skill))
+    temp_path = f"{path}.{os.getpid()}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(values, handle, separators=(",", ":"))
+    os.chmod(temp_path, 0o600)
+    os.replace(temp_path, path)
+
+
+def inject_skill_keys(
+    ssm,
+    s3_client,
+    bucket,
+    stack_name,
+    workspace,
+    authorized_skills=None,
+    env_file="/tmp/skill_env.sh",
+):
+    """Export keys only for Skills authorized for this tenant."""
     skills_dir = os.path.join(workspace, "skills")
-    env_lines = []
+    manifests: dict[str, dict] = {}
+    authorized = set(authorized_skills or [])
+
+    if os.path.isdir(skills_dir):
+        for skill_name in sorted(os.listdir(skills_dir)):
+            skill_path = os.path.join(skills_dir, skill_name)
+            if not os.path.isdir(skill_path):
+                continue
+            manifest = load_skill_manifest(skill_path)
+            if manifest:
+                manifests[skill_name] = manifest
+
+    # An authorized Skill may already exist locally from a previous tenant in a
+    # shared Fargate workspace. Refresh its manifest from the trusted S3 catalog.
+    for skill_name in sorted(authorized - set(manifests)):
+        try:
+            body = s3_client.get_object(
+                Bucket=bucket,
+                Key=f"_shared/skills/{skill_name}/skill.json",
+            )["Body"].read()
+            manifest = json.loads(body)
+            if isinstance(manifest, dict):
+                manifests[skill_name] = manifest
+        except (ClientError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+
+    values: dict[str, str] = {}
     injected = []
-
-    # Scan all loaded skills for manifests
-    if not os.path.isdir(skills_dir):
-        return injected
-
-    for skill_name in os.listdir(skills_dir):
-        skill_path = os.path.join(skills_dir, skill_name)
-        if not os.path.isdir(skill_path):
+    for skill_name, manifest in manifests.items():
+        if authorized_skills is not None and skill_name not in authorized:
             continue
-        manifest = load_skill_manifest(skill_path)
-        if not manifest:
-            continue
-
         required_env = manifest.get("requires", {}).get("env", [])
-        if not required_env:
+        if not isinstance(required_env, list):
             continue
-
-        # Try to load each required env var from SSM
         for env_var in required_env:
+            if not isinstance(env_var, str) or not _ENV_NAME.fullmatch(env_var):
+                logger.warning("Invalid environment variable declaration in Skill %s", skill_name)
+                continue
             ssm_path = f"/openclaw/{stack_name}/skill-keys/{skill_name}/{env_var}"
             try:
-                resp = ssm.get_parameter(Name=ssm_path, WithDecryption=True)
-                value = resp["Parameter"]["Value"]
-                # Escape single quotes in value for shell safety
-                safe_value = value.replace("'", "'\\''")
-                env_lines.append(f"export {env_var}='{safe_value}'")
+                value = ssm.get_parameter(Name=ssm_path, WithDecryption=True)["Parameter"]["Value"]
+                if env_var in values and values[env_var] != value:
+                    logger.warning("Conflicting value for %s; keeping first loaded Skill mapping", env_var)
+                    continue
+                values[env_var] = value
                 injected.append(f"{skill_name}/{env_var}")
                 logger.info("Injected key: %s/%s", skill_name, env_var)
-            except ClientError:
-                logger.warning("Key not found in SSM: %s", ssm_path)
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "unknown")
+                if code == "ParameterNotFound":
+                    logger.warning("Key not found in SSM: %s", ssm_path)
+                else:
+                    logger.warning("Could not read Skill key %s/%s: %s", skill_name, env_var, code)
 
-    # Also load global skill keys (not tied to a specific skill)
     global_path = f"/openclaw/{stack_name}/skill-keys/_global/"
     try:
-        resp = ssm.get_parameters_by_path(
-            Path=global_path, Recursive=False, WithDecryption=True
-        )
-        for param in resp.get("Parameters", []):
-            env_var = param["Name"].split("/")[-1]
-            value = param["Value"]
-            safe_value = value.replace("'", "'\\''")
-            env_lines.append(f"export {env_var}='{safe_value}'")
-            injected.append(f"_global/{env_var}")
-            logger.info("Injected global key: %s", env_var)
+        token = None
+        while True:
+            kwargs = {"Path": global_path, "Recursive": False, "WithDecryption": True}
+            if token:
+                kwargs["NextToken"] = token
+            response = ssm.get_parameters_by_path(**kwargs)
+            for param in response.get("Parameters", []):
+                env_var = param["Name"].split("/")[-1]
+                if _ENV_NAME.fullmatch(env_var):
+                    values.setdefault(env_var, param["Value"])
+                    injected.append(f"_global/{env_var}")
+            token = response.get("NextToken")
+            if not token:
+                break
     except ClientError:
-        pass  # No global keys configured
+        pass
 
-    # Write env file
-    with open(env_file, "w") as f:
-        f.write("#!/bin/sh\n")
-        f.write("# Auto-generated by skill_loader.py — do not edit\n")
-        for line in env_lines:
-            f.write(line + "\n")
+    with open(env_file, "w", encoding="utf-8") as handle:
+        handle.write("#!/bin/sh\n# Auto-generated by skill_loader.py — do not edit\n")
+        for env_var, value in sorted(values.items()):
+            handle.write(f"export {env_var}={shlex.quote(value)}\n")
+    os.chmod(env_file, 0o600)
 
-    logger.info("Wrote %d env vars to %s", len(env_lines), env_file)
+    json_file = f"{env_file}.json"
+    with open(json_file, "w", encoding="utf-8") as handle:
+        json.dump(values, handle)
+    os.chmod(json_file, 0o600)
+
+    keys_file = f"{env_file}.keys"
+    with open(keys_file, "w", encoding="utf-8") as handle:
+        for env_var in sorted(values):
+            handle.write(env_var + "\n")
+    os.chmod(keys_file, 0o600)
+
+    logger.info("Wrote %d env vars to protected environment files", len(values))
     return injected
 
 
@@ -361,8 +479,28 @@ def main():
     l3 = load_layer3_bundles(s3, ssm, args.bucket, args.stack, args.workspace)
     logger.info("Layer 3 loaded: %s", l3 if l3 else "none")
 
-    # Inject API keys from SSM
-    keys = inject_skill_keys(ssm, args.stack, args.workspace)
+    # Inject API keys only for role-, position-, or personally-authorized Skills.
+    assigned = get_tenant_assigned_skills(args.tenant, region=args.region)
+    personal_assigned = get_tenant_personal_skills(args.tenant, region=args.region)
+    role_allowed = set()
+    skills_dir = os.path.join(args.workspace, "skills")
+    if _base_tenant_id(args.tenant) != "unknown" and os.path.isdir(skills_dir):
+        for skill_name in os.listdir(skills_dir):
+            manifest = load_skill_manifest(os.path.join(skills_dir, skill_name))
+            if manifest and is_skill_allowed(manifest, roles):
+                role_allowed.add(skill_name)
+    authorized_skills = assigned | personal_assigned | role_allowed | get_builtin_skill_ids()
+    write_authorized_skill_ids(authorized_skills)
+    instrumented = instrument_authorized_skills(args.workspace, authorized_skills)
+    logger.info("Skill telemetry instrumented: %d", instrumented)
+    keys = inject_skill_keys(
+        ssm,
+        s3,
+        args.bucket,
+        args.stack,
+        args.workspace,
+        authorized_skills=authorized_skills,
+    )
     logger.info("Keys injected: %d", len(keys))
 
     # Summary

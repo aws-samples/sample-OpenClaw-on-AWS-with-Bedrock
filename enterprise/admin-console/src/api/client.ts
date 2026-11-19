@@ -26,9 +26,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   if (!res.ok) {
     let data: any = null;
     try { data = await res.json(); } catch { /* non-JSON body */ }
-    const err: any = new Error(data?.message || data?.detail || `API ${res.status}: ${res.statusText}`);
+    // FastAPI wraps structured HTTPException payloads in `detail`.
+    const payload = data?.detail && typeof data.detail === 'object' ? data.detail : data;
+    const detailMessage = typeof data?.detail === 'string' ? data.detail : null;
+    const err: any = new Error(payload?.message || detailMessage || `API ${res.status}: ${res.statusText}`);
     err.status = res.status;
-    err.response = { status: res.status, data };
+    err.response = { status: res.status, data: payload };
     throw err;
   }
   return res.json();
