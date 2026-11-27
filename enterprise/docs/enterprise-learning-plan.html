@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenClaw Enterprise 学习与搭建路线图</title>
+  <style>
+    :root{--bg:#0b1220;--panel:#131d31;--panel2:#18263e;--text:#e6edf7;--muted:#a8b5c9;--line:#2b3a55;--accent:#67e8f9;--green:#86efac;--orange:#fbbf24;--red:#fca5a5}*{box-sizing:border-box}body{margin:0;background:linear-gradient(120deg,#0b1220,#101b31 45%,#0c1526);color:var(--text);font:15px/1.7 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:1160px;margin:auto;padding:32px 20px 64px}h1{font-size:clamp(28px,5vw,48px);line-height:1.15;margin:10px 0}h2{margin:42px 0 14px;font-size:26px}h3{margin:0 0 8px;font-size:18px}.eyebrow{color:var(--accent);letter-spacing:.1em;font-weight:700}.lead{font-size:18px;color:var(--muted);max-width:880px}.card,details{background:rgba(19,29,49,.92);border:1px solid var(--line);border-radius:14px;padding:18px;margin:12px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:14px}.good{border-left:4px solid var(--green)}.warn{border-left:4px solid var(--orange)}.danger{border-left:4px solid var(--red)}.tag{display:inline-block;border:1px solid #3c5877;border-radius:99px;padding:2px 9px;margin:3px;color:#ccecff;font-size:12px}pre{overflow:auto;background:#07101e;border:1px solid var(--line);border-radius:12px;padding:16px;color:#c7f9ff;font-size:13px;line-height:1.55}table{border-collapse:collapse;width:100%;min-width:700px}th,td{padding:11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--accent)}.scroll{overflow:auto}a{color:var(--accent)}summary{cursor:pointer;font-weight:700;font-size:17px}details p:last-child{margin-bottom:0}.check{color:var(--green);font-weight:700}.path{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#d8f5ff;font-size:13px}ol li{margin:6px 0}.small{color:var(--muted);font-size:13px}.phase{color:var(--accent);font-weight:800}footer{color:var(--muted);margin-top:48px;border-top:1px solid var(--line);padding-top:16px}@media print{body{background:#fff;color:#111}.card,details{background:#fff;border-color:#aaa}pre{background:#f5f5f5;color:#111}a{color:#065f9c}}
+  </style>
+</head>
+<body><main>
+  <p class="eyebrow">OPENCLAW ENTERPRISE · 从初学者到可独立搭建</p>
+  <h1>学习、理解与完整搭建路线图</h1>
+  <p class="lead">适合具备初级 AWS 操作经验和基础 Python 能力的学习者。目标不是背代码，而是能在隔离测试环境中部署、配置、排障、升级并安全扩展本项目。</p>
+  <div class="card good"><strong>建议节奏：</strong>12 周，每周 6–10 小时。每周都要完成一个“可验证产物”，而不是只看文档。生产部署有成本和数据风险，请先使用独立 AWS 账号、最小权限 IAM 用户、测试 Stack 名称和预算告警。</div>
+
+  <h2>1. 做到“完整搭建”相当于什么水平？</h2>
+  <div class="grid">
+    <div class="card"><h3>能够独立完成</h3><p>使用版本化镜像 tag 部署基础设施、管理后台、Gateway、AgentCore Runtime 和 Always-On ECS；配置员工、岗位、Skill、SSM Key、IM 与权限；定位大多数配置、运行时和数据链路问题。</p></div>
+    <div class="card"><h3>能力定位</h3><p>接近<strong>初中级云端 AI 应用工程师 / 平台工程师</strong>：具备全栈集成、容器化部署、AWS 托管服务、Agent Runtime 和基础运维能力。</p></div>
+    <div class="card warn"><h3>不等于</h3><p>不等于资深云架构师或安全负责人。生产多账号治理、合规审计、高可用设计、灾备、成本优化与事故响应仍需要更深实践和评审。</p></div>
+  </div>
+  <p>如果你还能独立评估权限边界、失败回滚、监控告警、成本预算，并能安全改造运行时或基础设施代码，就已接近<strong>中级 AI 平台工程师</strong>的实践能力。</p>
+
+  <h2>2. 先记住这张架构图</h2>
+  <pre>管理员 / 员工浏览器 / IM 平台
+            │
+            ├── Admin Console 前端（React + TypeScript）
+            │       └── FastAPI 管理与员工 API
+            │
+            ├── EC2 Gateway / Tenant Router（Node.js）
+            │       └── 用户身份映射、会话路由、IM 绑定
+            │
+            └── Agent 运行层
+                 ├── 默认：Bedrock AgentCore Serverless microVM
+                 └── 长驻：ECS Fargate Always-On + EFS
+                         │
+                         ├── entrypoint.sh
+                         ├── OpenClaw Gateway :18789
+                         ├── server.py :8080
+                         └── Bedrock 模型调用
+
+数据与安全层
+  DynamoDB：员工、岗位、Agent、审批、用量、审计、会话
+  S3：Workspace、SOUL、Skill、知识库、构建包
+  SSM SecureString：Skill Key、JWT、内部服务 Token、Gateway Token
+  ECR：版本化 Agent 容器镜像
+  CloudWatch / EventBridge：日志、监控、定时任务</pre>
+  <div class="scroll"><table><thead><tr><th>层</th><th>关键技术</th><th>要解决的问题</th><th>先读的代码</th></tr></thead><tbody>
+    <tr><td>前端</td><td>React、TypeScript、React Query</td><td>管理和员工如何操作平台</td><td class="path">admin-console/src/pages<br>admin-console/src/hooks/useApi.ts</td></tr>
+    <tr><td>管理 API</td><td>FastAPI、Pydantic、JWT/RBAC</td><td>组织、Skill、审批、用量、权限</td><td class="path">admin-console/server/main.py<br>admin-console/server/routers</td></tr>
+    <tr><td>数据</td><td>DynamoDB、S3、SSM</td><td>业务主数据、工作区、密钥分离</td><td class="path">admin-console/server/db.py<br>admin-console/server/s3ops.py</td></tr>
+    <tr><td>消息路由</td><td>Node.js、OpenClaw Gateway</td><td>IM 用户到员工与 Agent 的映射</td><td class="path">gateway/bedrock_proxy_h2.js</td></tr>
+    <tr><td>Agent Runtime</td><td>Python、Shell、Docker、OpenClaw</td><td>装配工作区、加载 Skill、调用模型</td><td class="path">agent-container/server.py<br>agent-container/entrypoint.sh</td></tr>
+    <tr><td>基础设施</td><td>CloudFormation、AWS CLI、ECR、EC2、ECS</td><td>可重复部署、版本更新、网络与 IAM</td><td class="path">deploy.sh<br>clawdbot-bedrock-agentcore-multitenancy.yaml</td></tr>
+  </tbody></table></div>
+
+  <h2>3. 关键概念：先学业务，再学技术</h2>
+  <div class="grid"><div class="card"><h3>组织关系</h3><pre>Department
+  └── Position.defaultSkills
+        └── Employee.personalSkills
+              └── Agent</pre><p>岗位提供默认 Skill，员工可额外获得个人 Skill；运行时再根据身份过滤，不能只信任前端显示。</p></div>
+  <div class="card"><h3>三种存储</h3><p><strong>DynamoDB</strong> 存业务记录。<br><strong>S3</strong> 存文件型内容。<br><strong>SSM SecureString</strong> 存密钥与 Token。</p></div>
+  <div class="card"><h3>两种运行方式</h3><p><strong>Serverless</strong>：按需、成本较低、约 5 分钟空闲后可能回收。<br><strong>Always-On</strong>：ECS 常驻、EFS 持久化、适合实时 IM。</p></div></div>
+
+  <h2>4. 学习前准备：安全实验环境</h2>
+  <div class="card danger"><strong>不要把第一个实验直接放到生产账号。</strong>本项目会创建网络、EC2、ECS、EFS、ECR、S3、DynamoDB 等资源，也会产生 Bedrock、存储、网络和计算费用。创建、更新或删除 Stack 前都要确认目标账号、区域和 Stack 名称。</div>
+  <ol>
+    <li>准备独立 AWS Sandbox 账号或至少独立测试环境，区域建议固定一个。</li>
+    <li>创建个人 IAM 身份，启用 MFA；不要使用 root 账号日常部署。</li>
+    <li>设置 AWS Budgets / Cost Explorer 告警，先设低阈值。</li>
+    <li>本地安装：Git、Python 3.12、Node.js 24、AWS CLI v2；Docker 可先不装，本项目在 EC2 上构建 ARM64 镜像。</li>
+    <li>只从 <span class="path">enterprise/.env.example</span> 创建自己的 <span class="path">.env</span>；不要提交它，不要把 Key、JWT、Token 贴进文档、Issue 或聊天。</li>
+  </ol>
+  <p><span class="tag">Git</span><span class="tag">AWS CLI</span><span class="tag">Python</span><span class="tag">Node.js</span><span class="tag">Docker</span><span class="tag">HTTP/JSON</span><span class="tag">IAM/MFA</span></p>
+
+  <h2>5. 12 周学习与搭建计划</h2>
+  <div class="scroll"><table><thead><tr><th>周</th><th>学习技能</th><th>项目阅读顺序</th><th>动手任务</th><th>本周验收</th></tr></thead><tbody>
+    <tr><td><span class="phase">1</span><br>项目全景</td><td>Git、终端、HTTP、JSON、环境变量</td><td class="path">enterprise/README.md<br>.env.example<br>docs/ui-guide.html</td><td>画出一张自己的架构图；只读执行 AWS 身份检查。</td><td><span class="check">✓</span> 能说清前端、API、Gateway、Runtime 分工。</td></tr>
+    <tr><td><span class="phase">2</span><br>业务模型</td><td>企业 RBAC、业务实体、单表设计入门</td><td class="path">seed_dynamodb.py<br>seed_workspaces.py<br>db.py</td><td>用纸或 Mermaid 画 Department → Position → Employee → Agent → Skill。</td><td><span class="check">✓</span> 能区分岗位 Skill 与个人 Skill。</td></tr>
+    <tr><td><span class="phase">3</span><br>AWS 数据层</td><td>DynamoDB Query/Update、S3 Prefix、SSM SecureString、IAM 最小权限</td><td class="path">db.py<br>s3ops.py<br>shared.py<br>skill_loader.py</td><td>在不使用真实 Key 的前提下，追踪 Skill Key 从管理 API 到运行时的路径。</td><td><span class="check">✓</span> 能解释数据为何分放 DynamoDB、S3、SSM。</td></tr>
+    <tr><td><span class="phase">4</span><br>后端 API</td><td>FastAPI、路由、Pydantic、JWT、异常处理</td><td class="path">main.py<br>auth.py<br>routers/org.py<br>routers/agents.py</td><td>追踪“给岗位分配 Skill”的完整请求链路。</td><td><span class="check">✓</span> 能从 API 找到 DynamoDB / S3 写入位置。</td></tr>
+    <tr><td><span class="phase">5</span><br>前端</td><td>React、TypeScript、useState、React Query</td><td class="path">api/client.ts<br>hooks/useApi.ts<br>pages/Skills/SkillCatalog.tsx<br>pages/Usage.tsx</td><td>从一个页面按钮追到 FastAPI 路由再返回页面。</td><td><span class="check">✓</span> 能新增一个只读展示字段。</td></tr>
+    <tr><td><span class="phase">6</span><br>认证与权限</td><td>RBAC、JWT、部门数据范围、SSO 基础</td><td class="path">auth.py<br>shared.py<br>routers/portal.py<br>docs/OIDC_SSO_SETUP.md</td><td>验证 admin、manager、employee 对同一 API 的可见范围设计。</td><td><span class="check">✓</span> 能解释 Manager 为什么不能访问其他部门。</td></tr>
+    <tr><td><span class="phase">7</span><br>容器与启动</td><td>Dockerfile、多阶段构建、ENTRYPOINT、进程与端口</td><td class="path">agent-container/Dockerfile<br>entrypoint.sh<br>smoke-test.sh</td><td>按步骤讲解一次容器启动，不必修改代码。</td><td><span class="check">✓</span> 能解释为何先加载 Key 再启动 Gateway。</td></tr>
+    <tr><td><span class="phase">8</span><br>Agent 请求链路</td><td>子进程、超时、日志、Guardrail、会话</td><td class="path">agent-container/server.py<br>workspace_assembler.py<br>openclaw.json</td><td>追踪一条 Portal 消息到 Bedrock、返回结果、写入用量的路径。</td><td><span class="check">✓</span> 能解释冷启动和热启动。</td></tr>
+    <tr><td><span class="phase">9</span><br>Skill 平台</td><td>Skill Manifest、动态加载、密钥隔离、调用计数</td><td class="path">skills/fulltext-search<br>skill_loader.py<br>skill_usage.py<br>routers/usage.py</td><td>设计一个不含真实 Key 的纯提示词 Skill，并说明其授权和统计方式。</td><td><span class="check">✓</span> 能区分加载、读取、实际调用。</td></tr>
+    <tr><td><span class="phase">10</span><br>基础设施</td><td>CloudFormation、VPC、IAM Role、ECR、EC2、ECS、EFS</td><td class="path">clawdbot-bedrock-agentcore-multitenancy.yaml<br>deploy.sh</td><td>列出部署资源、依赖和删除风险；不要急于创建。</td><td><span class="check">✓</span> 能说明每项 AWS 资源的用途。</td></tr>
+    <tr><td><span class="phase">11</span><br>测试部署</td><td>AWS CLI、CloudFormation、镜像 Tag、回滚思维、日志排障</td><td class="path">deploy.sh<br>docs/ENTERPRISE-OPERATIONS-GUIDE.md<br>TESTING.md（如存在）</td><td>在 Sandbox 用新 Stack 名称和新 tag 完成首次部署，再验证登录、Agent、Skill、用量。</td><td><span class="check">✓</span> 能执行部署并收集失败资源原因。</td></tr>
+    <tr><td><span class="phase">12</span><br>独立改造</td><td>需求拆分、变更评审、诊断、发布验证</td><td class="path">按你的功能选择相关文件</td><td>完成一个小功能：新增 Skill 展示字段、Skill Calls 导出或员工授权查询 API。</td><td><span class="check">✓</span> 能测试、构建候选镜像、使用新 tag 更新测试环境。</td></tr>
+  </tbody></table></div>
+
+  <h2>6. 完整搭建的推荐里程碑</h2>
+  <details open><summary>里程碑 A：本地理解，不部署</summary><ol><li>阅读本页第 1–5 周指定文件。</li><li>打开 <span class="path">enterprise/docs/ui-guide.html</span>，将界面与 API、数据模型对应起来。</li><li>完成三张图：业务关系图、一次消息流图、Skill Key 流图。</li></ol></details>
+  <details><summary>里程碑 B：测试环境基础设施</summary><ol><li>检查 AWS 身份、区域、预算、服务配额和模型访问。</li><li>从 <span class="path">.env.example</span> 创建测试配置，使用未被占用的 Stack 名称。</li><li>先运行候选镜像构建：<span class="path">bash enterprise/deploy.sh --build-only</span>。</li><li>再执行完整部署；遇到 CloudFormation 失败先查 <code>CREATE_FAILED</code> 事件，不要直接删除资源或 Stack。</li></ol></details>
+  <details><summary>里程碑 C：功能验收</summary><ol><li>管理员登录，检查组织、岗位、员工、Agent、Skill Catalog。</li><li>确认员工有 Agent 与 Skill 授权。</li><li>配置一个测试 Skill Key 到 SSM，验证运行时只检查变量存在，不输出值。</li><li>完成一轮员工对话，检查 Usage 与 Skill Calls 是否出现记录。</li><li>验证 Manager 只能看到本部门及下级部门数据。</li></ol></details>
+  <details><summary>里程碑 D：升级与可恢复性</summary><ol><li>修改一个无风险前端文案或测试 Skill 的描述。</li><li>设置一个全新的版本化 <span class="path">IMAGE_TAG</span>，不要覆盖稳定 tag。</li><li>先 <span class="path">--build-only</span>，确认 smoke test，再用 <span class="path">--skip-build --skip-seed</span> 更新。</li><li>验证 Admin Console、Gateway、Serverless Runtime、Always-On 服务均指向预期版本。</li></ol></details>
+
+  <h2>7. 必须能讲清楚的三条链路</h2>
+  <div class="card"><h3>A. 员工消息 → 模型回复</h3><pre>IM / Portal
+→ Gateway / Tenant Router
+→ employeeId 映射
+→ AgentCore 或 ECS
+→ server.py
+→ workspace_assembler.py（首次）
+→ OpenClaw Gateway
+→ Bedrock 模型
+→ Guardrail / Usage / Memory
+→ 用户</pre></div>
+  <div class="card"><h3>B. 管理员配置 Skill Key → Skill 可用</h3><pre>Admin Console
+→ PUT /skills/keys/{skill}/{env}
+→ SSM SecureString
+→ 受影响 Session / ECS service 刷新
+→ skill_loader.py 根据员工授权读取
+→ 仅注入允许的环境变量
+→ Gateway 使用该环境运行 Skill</pre></div>
+  <div class="card"><h3>C. Skill 调用 → Usage 页面</h3><pre>Agent 实际应用 Skill
+→ 当前请求回执（主信号）
+→ server.py 严格校验并移除 marker
+→ DynamoDB SKILL_USAGE#date#skill#employee#mode
+→ FastAPI /usage/by-skill 与 /usage/skill/{id}/users
+→ React Usage 页面显示 Calls 与用户下钻</pre></div>
+
+  <h2>8. 代码地图：遇到问题先去哪里找</h2>
+  <div class="scroll"><table><thead><tr><th>你想理解的事情</th><th>首选文件</th><th>第二层文件</th></tr></thead><tbody>
+    <tr><td>项目部署做了什么</td><td class="path">enterprise/deploy.sh</td><td class="path">clawdbot-bedrock-agentcore-multitenancy.yaml<br>ec2-setup.sh</td></tr>
+    <tr><td>员工、部门、岗位数据</td><td class="path">admin-console/server/db.py</td><td class="path">seed_dynamodb.py<br>routers/org.py</td></tr>
+    <tr><td>前端如何调用后端</td><td class="path">admin-console/src/hooks/useApi.ts</td><td class="path">admin-console/src/api/client.ts<br>pages/*.tsx</td></tr>
+    <tr><td>Skill 分配与 Key 保存</td><td class="path">routers/agents.py</td><td class="path">skill_loader.py<br>skills/*/skill.json</td></tr>
+    <tr><td>Agent 的请求处理</td><td class="path">agent-container/server.py</td><td class="path">entrypoint.sh<br>workspace_assembler.py</td></tr>
+    <tr><td>容器为什么启动失败</td><td class="path">agent-container/entrypoint.sh</td><td class="path">Dockerfile<br>smoke-test.sh</td></tr>
+    <tr><td>Skill Calls / 用量</td><td class="path">skill_usage.py</td><td class="path">routers/usage.py<br>pages/Usage.tsx</td></tr>
+    <tr><td>IM 绑定与路由</td><td class="path">gateway/bedrock_proxy_h2.js</td><td class="path">routers/portal.py<br>routers/bindings.py</td></tr>
+  </tbody></table></div>
+
+  <h2>9. 学习时的调试方法</h2>
+  <div class="grid"><div class="card"><h3>前端问题</h3><p>浏览器 Network → API 状态码 → FastAPI 路由 → DynamoDB/S3 记录。先确定数据在哪一层丢失。</p></div><div class="card"><h3>Agent 不回复</h3><p>检查 Runtime / ECS 是否可达 → Gateway 是否 ready → OpenClaw provider → Bedrock 模型访问 → IAM 权限。不要打印原始用户消息或密钥。</p></div><div class="card"><h3>Skill 无法调用</h3><p>检查授权记录 → S3 manifest → SSM 参数是否存在 → 环境变量是否注入。只检查变量名和存在性，绝不显示值。</p></div><div class="card"><h3>部署失败</h3><p>先查 CloudFormation 的第一个 <code>CREATE_FAILED</code> 资源。区分 IAM、配额、区域模型、网络、名称冲突和镜像构建失败。</p></div></div>
+
+  <h2>10. 安全与运维底线</h2>
+  <ul><li>绝不提交或输出：<strong>API Key、JWT Secret、Gateway Token、内部 Service Token、用户聊天内容</strong>。</li><li>Skill Key 必须是 SSM SecureString；不要放进 <span class="path">SKILL.md</span>、Git、浏览器返回值或日志。</li><li>生产更新使用新的版本化 ECR tag；先构建和 smoke test，再切 Runtime。</li><li>先查事件再处理失败 Stack；删除 Stack、S3、DynamoDB、EFS 前必须确认数据保留策略。</li><li>最小权限、MFA、预算告警、测试与生产账号隔离是搭建能力的一部分。</li></ul>
+
+  <h2>11. 最终毕业项目</h2>
+  <div class="card good"><h3>在测试环境完成“一个受控动态 Skill”</h3><ol><li>创建一个不依赖真实第三方 Key 的 Skill，包含 <span class="path">skill.json</span> 与 <span class="path">SKILL.md</span>。</li><li>上传或通过项目已有流程让它出现在 S3 Skill Catalog。</li><li>将它分配给一个岗位，再给一个员工授予个人 Skill，解释两者差异。</li><li>从员工 Portal 或 IM 发起一次任务，确认 Agent 有该 Skill。</li><li>在 Usage 页面看到该员工的 Skill Calls；打开 Users 查看按用户统计。</li><li>做一个小改动，使用新的 image tag 构建、验证、更新测试 Stack。</li><li>写一页自己的运行手册：部署步骤、验证点、常见失败与回滚方案。</li></ol><p>完成后，你已经不仅会“使用 AI Agent”，而是能搭建和维护一个多租户企业 Agent 平台的完整基础闭环。</p></div>
+
+  <h2>12. 项目内延伸阅读</h2>
+  <ul><li><a href="ui-guide.html">交互式 UI 指南</a>：先理解产品界面和角色路径。</li><li><a href="architecture-code-map.md">architecture-code-map.md</a>：架构与源码映射。</li><li><a href="ENTERPRISE-OPERATIONS-GUIDE.md">ENTERPRISE-OPERATIONS-GUIDE.md</a>：运行与运维参考。</li><li><a href="design-always-on-fargate.md">design-always-on-fargate.md</a>：Always-On 设计。</li><li><a href="design-tools-skills-phase3.md">design-tools-skills-phase3.md</a>：Skill 平台设计。</li><li><a href="design-usage-cost.md">design-usage-cost.md</a>：用量与成本统计。</li><li><a href="OIDC_SSO_SETUP.md">OIDC_SSO_SETUP.md</a>：SSO 配置专项。</li></ul>
+  <footer>生成目的：学习与测试部署路线。请以仓库当前代码、CloudFormation 模板和受控测试环境的实际状态为准；不要把本页当作生产变更审批或安全审计结论。</footer>
+</main></body></html>

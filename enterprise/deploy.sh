@@ -8,6 +8,7 @@
 #   bash deploy.sh --skip-build     # re-deploy without rebuilding Docker image
 #   bash deploy.sh --skip-seed      # re-deploy without re-seeding DynamoDB
 #   bash deploy.sh --skip-services  # re-deploy without rebuilding services on EC2
+#   bash deploy.sh --build-only     # build + smoke-test candidate image; do not switch runtimes
 #
 # What this script does:
 #   1. Validates prerequisites (AWS CLI, Docker, Python, Node.js)
@@ -51,13 +52,14 @@ for arg in "$@"; do
     --skip-build)    SKIP_DOCKER_BUILD=true ;;
     --skip-seed)     SKIP_SEED=true ;;
     --skip-services) SKIP_SERVICES=true ;;
+    --build-only)    BUILD_ONLY=true ;;
   esac
 done
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 STACK_NAME="${STACK_NAME:-openclaw}"
 REGION="${REGION:-us-east-1}"
-MODEL="${MODEL:-global.anthropic.claude-sonnet-4-5-20250929-v1:0}"
+MODEL="${MODEL:-zai.glm-5}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-c7g.large}"
 KEY_PAIR="${KEY_PAIR:-}"
 EXISTING_VPC_ID="${EXISTING_VPC_ID:-}"
@@ -66,46 +68,101 @@ CREATE_VPC_ENDPOINTS="${CREATE_VPC_ENDPOINTS:-false}"
 ALLOWED_SSH_CIDR="${ALLOWED_SSH_CIDR:-127.0.0.1/32}"
 # IMPORTANT: Table name must match STACK_NAME (IAM policy: table/${StackName})
 DYNAMODB_TABLE="${DYNAMODB_TABLE:-$STACK_NAME}"
-DYNAMODB_REGION="${DYNAMODB_REGION:-$REGION}"
-WORKSPACE_BUCKET_NAME="${WORKSPACE_BUCKET_NAME:-}"
 SKIP_DOCKER_BUILD="${SKIP_DOCKER_BUILD:-false}"
 SKIP_SEED="${SKIP_SEED:-false}"
 SKIP_SERVICES="${SKIP_SERVICES:-false}"
+BUILD_ONLY="${BUILD_ONLY:-false}"
+OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.10.4}"
+NODE_VERSION="${NODE_VERSION:-24.16.0}"
+CLAWHUB_VERSION="${CLAWHUB_VERSION:-0.23.3}"
+BEDROCK_PROVIDER_VERSION="${BEDROCK_PROVIDER_VERSION:-2026.10.4}"
+IMAGE_TAG="${IMAGE_TAG:-openclaw-${OPENCLAW_VERSION}}"
+# ECR tags allow letters, digits and ._- only.
+[[ "$IMAGE_TAG" =~ ^[A-Za-z0-9_.-]{1,128}$ ]] || error "Invalid IMAGE_TAG: $IMAGE_TAG"
+DYNAMODB_REGION="${DYNAMODB_REGION:-$REGION}"
+WORKSPACE_BUCKET_NAME="${WORKSPACE_BUCKET_NAME:-}"
+# Direct container IM bypasses the H2 account-binding gate. Keep it disabled
+# unless the deployment owner explicitly opts in after accepting that trade-off.
+ENABLE_DIRECT_ALWAYS_ON_IM="${ENABLE_DIRECT_ALWAYS_ON_IM:-false}"
 
 # ── Validate required fields ──────────────────────────────────────────────────
-[ -z "${ADMIN_PASSWORD:-}" ]  && error "ADMIN_PASSWORD is required. Set it in .env"
+if [ "$BUILD_ONLY" != "true" ]; then
+  [ -z "${ADMIN_PASSWORD:-}" ] && error "ADMIN_PASSWORD is required. Set it in .env"
+fi
+[[ "$OPENCLAW_VERSION" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+(-[0-9]+)?$ ]] || \
+  error "OPENCLAW_VERSION must be an exact version, got: $OPENCLAW_VERSION"
+[[ "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+  error "NODE_VERSION must be an exact version, got: $NODE_VERSION"
+[[ "$CLAWHUB_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+  error "CLAWHUB_VERSION must be an exact version, got: $CLAWHUB_VERSION"
+[[ "$BEDROCK_PROVIDER_VERSION" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+(-[0-9]+)?$ ]] || \
+  error "BEDROCK_PROVIDER_VERSION must be an exact version, got: $BEDROCK_PROVIDER_VERSION"
+[ "$BUILD_ONLY" = "true" ] && [ "$SKIP_DOCKER_BUILD" = "true" ] && \
+  error "--build-only cannot be combined with --skip-build"
 
 # If ExistingVpcId is set, ExistingSubnetId must also be set
 if [ -n "$EXISTING_VPC_ID" ] && [ -z "$EXISTING_SUBNET_ID" ]; then
   error "EXISTING_SUBNET_ID is required when EXISTING_VPC_ID is set"
 fi
 
-# Auto-generate JWT_SECRET if not provided
-if [ -z "${JWT_SECRET:-}" ]; then
-  JWT_SECRET=$(openssl rand -hex 32)
-  info "Generated JWT_SECRET (not stored to .env — will differ on redeploy)"
-fi
+# Deployment secrets are irrelevant to candidate builds and must not be mutated.
+JWT_SECRET="${JWT_SECRET:-}"
+INTERNAL_API_TOKEN=""
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
   || error "AWS credentials not configured. Run: aws configure"
+
+# Preserve existing logins across redeploys. An explicit non-empty .env value
+# still wins; otherwise reuse SSM and generate only for a genuinely new stack.
+if [ "$BUILD_ONLY" != "true" ] && [ -z "$JWT_SECRET" ]; then
+  JWT_SECRET=$(aws ssm get-parameter \
+    --name "/openclaw/${STACK_NAME}/jwt-secret" \
+    --with-decryption --query 'Parameter.Value' --output text --region "$REGION" 2>/dev/null || true)
+  if [ -z "$JWT_SECRET" ] || [ "$JWT_SECRET" = "None" ]; then
+    JWT_SECRET=$(openssl rand -hex 32)
+    info "Generated JWT_SECRET for a new deployment"
+  else
+    info "Reusing existing JWT_SECRET from SSM"
+  fi
+fi
+
+# Keep one internal service credential across redeploys so the Gateway, Admin
+# Console, AgentCore runtimes, and ECS tasks authenticate each other consistently.
+if [ "$BUILD_ONLY" != "true" ]; then
+  INTERNAL_API_TOKEN=$(aws ssm get-parameter \
+    --name "/openclaw/${STACK_NAME}/internal-api-token" \
+    --with-decryption --query 'Parameter.Value' --output text --region "$REGION" 2>/dev/null || true)
+  if [ -z "$INTERNAL_API_TOKEN" ] || [ "$INTERNAL_API_TOKEN" = "None" ]; then
+    INTERNAL_API_TOKEN=$(openssl rand -hex 32)
+    aws ssm put-parameter --name "/openclaw/${STACK_NAME}/internal-api-token" \
+      --value "$INTERNAL_API_TOKEN" --type SecureString --region "$REGION" >/dev/null
+    info "Generated internal service token"
+  fi
+fi
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  OpenClaw Enterprise — Deploy"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stack:       $STACK_NAME"
-echo "  Region:      $REGION"
-echo "  Account:     $ACCOUNT_ID"
-echo "  Model:       $MODEL"
-echo "  Instance:    $INSTANCE_TYPE"
+echo "  Stack:         $STACK_NAME"
+echo "  Region:        $REGION"
+echo "  Account:       $ACCOUNT_ID"
+echo "  Model:         $MODEL"
+echo "  Instance:      $INSTANCE_TYPE"
+  echo "  OpenClaw:      $OPENCLAW_VERSION"
+  echo "  Node.js:       $NODE_VERSION"
+  echo "  ClawHub:       $CLAWHUB_VERSION"
+  echo "  Bedrock plugin:$BEDROCK_PROVIDER_VERSION"
+  echo "  Image tag:     $IMAGE_TAG"
 if [ -n "$EXISTING_VPC_ID" ]; then
-echo "  VPC:         $EXISTING_VPC_ID (existing)"
-echo "  Subnet:      $EXISTING_SUBNET_ID (existing)"
+  echo "  VPC:           $EXISTING_VPC_ID (existing)"
+  echo "  Subnet:        $EXISTING_SUBNET_ID (existing)"
 else
-echo "  VPC:         (new — will be created)"
+  echo "  VPC:           (new — will be created)"
 fi
 echo "  VPC Endpoints: $CREATE_VPC_ENDPOINTS"
+echo "  Build only:    $BUILD_ONLY"
 echo "  Skip build:    $SKIP_DOCKER_BUILD"
 echo "  Skip seed:     $SKIP_SEED"
 echo "  Skip services: $SKIP_SERVICES"
@@ -119,8 +176,8 @@ CLI_VERSION=$(aws --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1 || echo "
 CLI_MAJOR=$(echo "$CLI_VERSION" | cut -d. -f1)
 CLI_MINOR=$(echo "$CLI_VERSION" | cut -d. -f2)
 if [ "$CLI_MAJOR" -lt 2 ] || { [ "$CLI_MAJOR" -eq 2 ] && [ "$CLI_MINOR" -lt 27 ]; }; then
-  warn "AWS CLI $CLI_VERSION detected. bedrock-agentcore-control requires >= 2.27"
-  warn "Run: pip install --upgrade awscli"
+  warn "AWS CLI $CLI_VERSION detected. Some AgentCore commands may require AWS CLI >= 2.27"
+  warn "Deployment will continue; upgrade only if an AgentCore command is unavailable."
 fi
 success "AWS CLI $CLI_VERSION"
 
@@ -140,10 +197,20 @@ fi
 # No local Docker required.
 
 # ── Step 2: CloudFormation ────────────────────────────────────────────────────
-info "[2/8] Deploying CloudFormation stack..."
+if [ "$BUILD_ONLY" = "true" ]; then
+  info "[2/8] Build-only mode: validating existing CloudFormation stack..."
+  aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" &>/dev/null || \
+    error "--build-only requires an existing stack with EC2, ECR, and S3 build resources"
+else
+  info "[2/8] Deploying CloudFormation stack..."
+fi
 
 CFN_PARAMS="ParameterKey=WorkspaceBucketName,ParameterValue=${WORKSPACE_BUCKET_NAME}"
 CFN_PARAMS="$CFN_PARAMS ParameterKey=OpenClawModel,ParameterValue=${MODEL}"
+CFN_PARAMS="$CFN_PARAMS ParameterKey=OpenClawVersion,ParameterValue=${OPENCLAW_VERSION}"
+CFN_PARAMS="$CFN_PARAMS ParameterKey=NodeVersion,ParameterValue=${NODE_VERSION}"
+CFN_PARAMS="$CFN_PARAMS ParameterKey=AgentImageTag,ParameterValue=${IMAGE_TAG}"
+CFN_PARAMS="$CFN_PARAMS ParameterKey=BedrockModelId,ParameterValue=${MODEL}"
 CFN_PARAMS="$CFN_PARAMS ParameterKey=InstanceType,ParameterValue=${INSTANCE_TYPE}"
 CFN_PARAMS="$CFN_PARAMS ParameterKey=KeyPairName,ParameterValue=${KEY_PAIR}"
 CFN_PARAMS="$CFN_PARAMS ParameterKey=AllowedSSHCIDR,ParameterValue=${ALLOWED_SSH_CIDR}"
@@ -152,54 +219,75 @@ CFN_PARAMS="$CFN_PARAMS ParameterKey=ExistingVpcId,ParameterValue=${EXISTING_VPC
 CFN_PARAMS="$CFN_PARAMS ParameterKey=ExistingSubnetId,ParameterValue=${EXISTING_SUBNET_ID}"
 
 
-# Template is 70KB — exceeds 51,200 byte inline limit, must use S3
-info "  Uploading CloudFormation template to S3..."
-STAGING_BUCKET="openclaw-deploy-${ACCOUNT_ID}-${REGION}"
+# Template is 70KB — exceeds 51,200 byte inline limit, must use S3.
+# Candidate builds do not touch the staging template or CloudFormation.
+if [ "$BUILD_ONLY" != "true" ]; then
+  info "  Uploading CloudFormation template to S3..."
+  STAGING_BUCKET="openclaw-deploy-${ACCOUNT_ID}-${REGION}"
 
-if ! aws s3api head-bucket --bucket "$STAGING_BUCKET" 2>/dev/null; then
-  echo "[info]  Creating staging bucket s3://${STAGING_BUCKET}..."
-  if [ "$REGION" = "us-east-1" ]; then
-    aws s3api create-bucket --bucket "$STAGING_BUCKET" --region "$REGION"
-  else
-    aws s3api create-bucket --bucket "$STAGING_BUCKET" --region "$REGION" \
-      --create-bucket-configuration LocationConstraint="$REGION"
+  if ! aws s3api head-bucket --bucket "$STAGING_BUCKET" 2>/dev/null; then
+    echo "[info]  Creating staging bucket s3://${STAGING_BUCKET}..."
+    if [ "$REGION" = "us-east-1" ]; then
+      aws s3api create-bucket --bucket "$STAGING_BUCKET" --region "$REGION"
+    else
+      aws s3api create-bucket --bucket "$STAGING_BUCKET" --region "$REGION" \
+        --create-bucket-configuration LocationConstraint="$REGION"
+    fi
+    aws s3api put-public-access-block --bucket "$STAGING_BUCKET" \
+      --public-access-block-configuration "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
   fi
-  aws s3api put-public-access-block --bucket "$STAGING_BUCKET" \
-    --public-access-block-configuration "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
-fi
 
-aws s3 cp "$SCRIPT_DIR/clawdbot-bedrock-agentcore-multitenancy.yaml" \
-  "s3://${STAGING_BUCKET}/cfn/clawdbot-bedrock-agentcore-multitenancy.yaml" \
-  --region "$REGION" --quiet
-TEMPLATE_URL="https://${STAGING_BUCKET}.s3.${REGION}.amazonaws.com/cfn/clawdbot-bedrock-agentcore-multitenancy.yaml"
-success "  Template uploaded"
+  aws s3 cp "$SCRIPT_DIR/clawdbot-bedrock-agentcore-multitenancy.yaml" \
+    "s3://${STAGING_BUCKET}/cfn/clawdbot-bedrock-agentcore-multitenancy.yaml" \
+    --region "$REGION" --quiet
+  TEMPLATE_URL="https://${STAGING_BUCKET}.s3.${REGION}.amazonaws.com/cfn/clawdbot-bedrock-agentcore-multitenancy.yaml"
+  success "  Template uploaded"
 
-# Try to create; if stack exists, do an update instead
-STACK_STATUS=$(aws cloudformation describe-stacks \
-  --stack-name "$STACK_NAME" --region "$REGION" \
-  --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+  # Create or update infrastructure.
+  STACK_STATUS=$(aws cloudformation describe-stacks \
+    --stack-name "$STACK_NAME" --region "$REGION" \
+    --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "DOES_NOT_EXIST")
 
-if [ "$STACK_STATUS" = "DOES_NOT_EXIST" ]; then
-  info "  Creating new stack (takes ~8 min)..."
-  aws cloudformation create-stack \
-    --stack-name "$STACK_NAME" \
-    --template-url "$TEMPLATE_URL" \
-    --capabilities CAPABILITY_NAMED_IAM \
-    --region "$REGION" \
-    --parameters $CFN_PARAMS
-  aws cloudformation wait stack-create-complete \
-    --stack-name "$STACK_NAME" --region "$REGION"
+  case "$STACK_STATUS" in
+    DOES_NOT_EXIST)
+      info "  Creating new stack (takes ~8 min)..."
+      aws cloudformation create-stack \
+        --stack-name "$STACK_NAME" \
+        --template-url "$TEMPLATE_URL" \
+        --capabilities CAPABILITY_NAMED_IAM \
+        --region "$REGION" \
+        --parameters $CFN_PARAMS
+      aws cloudformation wait stack-create-complete \
+        --stack-name "$STACK_NAME" --region "$REGION"
+      ;;
+    CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE)
+      info "  Stack exists ($STACK_STATUS) — updating..."
+      if UPDATE_OUTPUT=$(aws cloudformation update-stack \
+          --stack-name "$STACK_NAME" \
+          --template-url "$TEMPLATE_URL" \
+          --capabilities CAPABILITY_NAMED_IAM \
+          --region "$REGION" \
+          --parameters $CFN_PARAMS 2>&1); then
+        aws cloudformation wait stack-update-complete \
+          --stack-name "$STACK_NAME" --region "$REGION"
+      elif echo "$UPDATE_OUTPUT" | grep -q "No updates are to be performed"; then
+        info "  No stack changes needed"
+      else
+        error "CloudFormation update failed: $UPDATE_OUTPUT"
+      fi
+      ;;
+    DELETE_FAILED)
+      error "Stack $STACK_NAME is DELETE_FAILED and cannot be updated. Finish deleting it before redeploying; inspect DELETE_FAILED events first to avoid deleting retained data."
+      ;;
+    *_IN_PROGRESS)
+      error "Stack $STACK_NAME is currently $STACK_STATUS. Wait for the operation to finish, then rerun deploy.sh."
+      ;;
+    *)
+      error "Stack $STACK_NAME is in unsupported state $STACK_STATUS. Resolve or delete the failed stack before redeploying."
+      ;;
+  esac
 else
-  info "  Stack exists ($STACK_STATUS) — updating..."
-  aws cloudformation update-stack \
-    --stack-name "$STACK_NAME" \
-    --template-url "$TEMPLATE_URL" \
-    --capabilities CAPABILITY_NAMED_IAM \
-    --region "$REGION" \
-    --parameters $CFN_PARAMS 2>/dev/null && \
-  aws cloudformation wait stack-update-complete \
-    --stack-name "$STACK_NAME" --region "$REGION" || \
-  info "  No stack changes needed"
+  info "  CloudFormation update skipped; current runtime resources remain unchanged"
 fi
 
 # Get stack outputs
@@ -233,13 +321,13 @@ success "Stack ready — EC2: $INSTANCE_ID | S3: $S3_BUCKET"
 # No local Docker required. Source code is packaged → S3 → EC2 build → ECR push.
 if [ "$SKIP_DOCKER_BUILD" = "true" ]; then
   info "[3/8] Skipping Docker build (--skip-build)"
-  IMAGE_COUNT=$(aws ecr describe-images --repository-name "${STACK_NAME}-multitenancy-agent" \
-    --region "$REGION" --query 'length(imageDetails)' --output text 2>/dev/null || echo "0")
-  if [ "$IMAGE_COUNT" = "0" ] || [ -z "$IMAGE_COUNT" ]; then
-    warn "  ECR repo is empty — image must be pushed before creating the AgentCore Runtime."
-    warn "  Re-run without --skip-build to trigger an EC2 build."
+  if aws ecr describe-images \
+      --repository-name "${STACK_NAME}-multitenancy-agent" \
+      --image-ids "imageTag=${IMAGE_TAG}" \
+      --region "$REGION" &>/dev/null; then
+    success "  Candidate image exists: ${ECR_URI}:${IMAGE_TAG}"
   else
-    success "  ECR repo has $IMAGE_COUNT image(s)"
+    error "Image tag ${IMAGE_TAG} does not exist in ECR. Build it first with --build-only."
   fi
 else
   info "[3/8] Building Agent Container on EC2 (~10-15 min, no local Docker needed)..."
@@ -288,8 +376,9 @@ else
       \"aws s3 cp s3://${S3_BUCKET}/_build/agent-build.tar.gz . --region ${REGION}\",
       \"tar xzf agent-build.tar.gz\",
       \"aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin \${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com\",
-      \"docker build -f enterprise/agent-container/Dockerfile -t \${ECR_URI}:latest enterprise/\",
-      \"docker push \${ECR_URI}:latest\",
+      \"docker build --progress=plain --build-arg OPENCLAW_VERSION=${OPENCLAW_VERSION} --build-arg NODE_VERSION=${NODE_VERSION} --build-arg CLAWHUB_VERSION=${CLAWHUB_VERSION} --build-arg BEDROCK_PROVIDER_VERSION=${BEDROCK_PROVIDER_VERSION} -f enterprise/agent-container/Dockerfile -t \${ECR_URI}:${IMAGE_TAG} enterprise/ > /tmp/openclaw-docker-build.log 2>&1 || { tail -120 /tmp/openclaw-docker-build.log >&2; exit 1; }\",
+      \"docker run --rm --entrypoint /app/smoke-test.sh \${ECR_URI}:${IMAGE_TAG} ${NODE_VERSION} ${OPENCLAW_VERSION} ${BEDROCK_PROVIDER_VERSION} > /tmp/openclaw-smoke.log 2>&1 || { cat /tmp/openclaw-smoke.log >&2; exit 1; }\",
+      \"docker push \${ECR_URI}:${IMAGE_TAG}\",
       \"echo BUILD_AND_PUSH_COMPLETE\"
     ]" \
     --query 'Command.CommandId' --output text)
@@ -308,15 +397,21 @@ else
         success "  Docker build + push complete"
         break ;;
       Failed|Cancelled|TimedOut)
-        STDERR=$(aws ssm get-command-invocation \
+        BUILD_ERROR=$(aws ssm get-command-invocation \
           --command-id "$BUILD_CMD_ID" --instance-id "$INSTANCE_ID" \
-          --region "$REGION" --query 'StandardErrorContent' --output text 2>/dev/null | tail -20)
-        error "Docker build failed ($BUILD_STATUS):\n$STDERR" ;;
+          --region "$REGION" --query 'StandardErrorContent' --output text 2>/dev/null)
+        error "Docker build or smoke test failed ($BUILD_STATUS):\n$BUILD_ERROR" ;;
       *)
         echo -n "." ;;
     esac
   done
   [ "$BUILD_STATUS" != "Success" ] && error "Docker build timed out after 20 min"
+fi
+
+if [ "$BUILD_ONLY" = "true" ]; then
+  success "Candidate image built, smoke-tested, and pushed: ${ECR_URI}:${IMAGE_TAG}"
+  info "AgentCore runtimes, ECS services, and EC2 Gateway were not changed"
+  exit 0
 fi
 
 # ── Step 4: AgentCore Runtime ─────────────────────────────────────────────────
@@ -328,10 +423,10 @@ EXISTING_RUNTIME=$(aws ssm get-parameter \
   --region "$REGION" 2>/dev/null || echo "")
 
 if [ -n "$EXISTING_RUNTIME" ] && [ "$EXISTING_RUNTIME" != "UNKNOWN" ]; then
-  info "  Updating existing runtime $EXISTING_RUNTIME..."
+  info "  Updating existing runtime $EXISTING_RUNTIME to ${IMAGE_TAG}..."
   aws bedrock-agentcore-control update-agent-runtime \
     --agent-runtime-id "$EXISTING_RUNTIME" \
-    --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_URI}:latest\"}}" \
+    --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_URI}:${IMAGE_TAG}\"}}" \
     --role-arn "$EXECUTION_ROLE_ARN" \
     --network-configuration '{"networkMode":"PUBLIC"}' \
     --protocol-configuration '{"serverProtocol":"HTTP"}' \
@@ -339,6 +434,7 @@ if [ -n "$EXISTING_RUNTIME" ] && [ "$EXISTING_RUNTIME" != "UNKNOWN" ]; then
     --environment-variables \
       STACK_NAME="${STACK_NAME}",AWS_REGION="${REGION}",S3_BUCKET="${S3_BUCKET}",\
 BEDROCK_MODEL_ID="${MODEL}",DYNAMODB_TABLE="${DYNAMODB_TABLE}",DYNAMODB_REGION="${DYNAMODB_REGION}",\
+INTERNAL_API_TOKEN="${INTERNAL_API_TOKEN}",ENABLE_DIRECT_ALWAYS_ON_IM="${ENABLE_DIRECT_ALWAYS_ON_IM}",\
 EVENTBRIDGE_SCHEDULE_GROUP="openclaw-cron",CRON_LAMBDA_ARN="${CRON_LAMBDA_ARN}",\
 EVENTBRIDGE_ROLE_ARN="${CRON_SCHEDULER_ROLE_ARN}",IDENTITY_TABLE_NAME="${DYNAMODB_TABLE}" \
     --region "$REGION" &>/dev/null || warn "  Runtime update failed — may need manual update in console"
@@ -347,7 +443,7 @@ else
   info "  Creating new runtime..."
   RUNTIME_ID=$(aws bedrock-agentcore-control create-agent-runtime \
     --agent-runtime-name "${STACK_NAME//-/_}_runtime" \
-    --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_URI}:latest\"}}" \
+    --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_URI}:${IMAGE_TAG}\"}}" \
     --role-arn "$EXECUTION_ROLE_ARN" \
     --network-configuration '{"networkMode":"PUBLIC"}' \
     --protocol-configuration '{"serverProtocol":"HTTP"}' \
@@ -355,7 +451,7 @@ else
     --environment-variables \
       STACK_NAME="${STACK_NAME}",AWS_REGION="${REGION}",S3_BUCKET="${S3_BUCKET}",\
 BEDROCK_MODEL_ID="${MODEL}",DYNAMODB_TABLE="${DYNAMODB_TABLE}",DYNAMODB_REGION="${DYNAMODB_REGION}",\
-EVENTBRIDGE_SCHEDULE_GROUP="openclaw-cron",CRON_LAMBDA_ARN="${CRON_LAMBDA_ARN}",\
+INTERNAL_API_TOKEN="${INTERNAL_API_TOKEN}",EVENTBRIDGE_SCHEDULE_GROUP="openclaw-cron",CRON_LAMBDA_ARN="${CRON_LAMBDA_ARN}",\
 EVENTBRIDGE_ROLE_ARN="${CRON_SCHEDULER_ROLE_ARN}",IDENTITY_TABLE_NAME="${DYNAMODB_TABLE}" \
     --region "$REGION" \
     --query 'agentRuntimeId' --output text)
@@ -375,8 +471,8 @@ aws ssm put-parameter \
 
 # Update ALL AgentCore runtimes to use new Docker image (not just the default one).
 # Production has 4 runtimes (Standard, Restricted, Engineering, Executive) —
-# all must point to the latest image after a Docker rebuild.
-info "  Updating all AgentCore runtimes to latest image..."
+# all must point to the selected versioned image after a validated build.
+info "  Updating all AgentCore runtimes to image ${IMAGE_TAG}..."
 ALL_RUNTIMES=$(aws bedrock-agentcore-control list-agent-runtimes \
   --query 'agentRuntimes[*].agentRuntimeId' --output text --region "$REGION" 2>/dev/null || echo "")
 UPDATED=0
@@ -386,12 +482,29 @@ for RT_ID in $ALL_RUNTIMES; do
   # Get existing role for this runtime (each tier may have a different execution role)
   RT_ROLE=$(aws bedrock-agentcore-control get-agent-runtime \
     --agent-runtime-id "$RT_ID" --query 'roleArn' --output text \
-    --region "$REGION" 2>/dev/null || echo "$EXECUTION_ROLE_ARN")
+    --region "$REGION" 2>/dev/null || echo "")
+  case "$RT_ROLE" in
+    arn:aws:iam::*:role/${STACK_NAME}-*) ;;
+    *) continue ;;  # Never mutate runtimes owned by another stack.
+  esac
+  RUNTIME_ENV=$(aws bedrock-agentcore-control get-agent-runtime \
+    --agent-runtime-id "$RT_ID" --query 'environmentVariables' --output json \
+    --region "$REGION" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    values = json.load(sys.stdin)
+except Exception:
+    values = {}
+values["INTERNAL_API_TOKEN"] = sys.argv[1]
+values["ENABLE_DIRECT_ALWAYS_ON_IM"] = "false"
+print(",".join(f"{k}={v}" for k, v in values.items()))
+' "$INTERNAL_API_TOKEN")
   aws bedrock-agentcore-control update-agent-runtime \
     --agent-runtime-id "$RT_ID" \
-    --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_URI}:latest\"}}" \
+    --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_URI}:${IMAGE_TAG}\"}}" \
     --role-arn "$RT_ROLE" \
     --network-configuration '{"networkMode":"PUBLIC"}' \
+    --environment-variables "$RUNTIME_ENV" \
     --region "$REGION" &>/dev/null && UPDATED=$((UPDATED+1)) || true
 done
 [ $UPDATED -gt 0 ] && info "  Updated $UPDATED additional runtime(s) to new image"
@@ -437,19 +550,19 @@ else
   for TIER_NAME in standard restricted engineering executive; do
     SERVICE_NAME="${STACK_NAME}-tier-${TIER_NAME}"
     case "$TIER_NAME" in
-      standard)    TIER_MODEL="${MODEL:-global.amazon.nova-2-lite-v1:0}"; TIER_GUARDRAIL="$_GUARDRAIL_MODERATE" ;;
-      restricted)  TIER_MODEL="us.deepseek.r1-v1:0"; TIER_GUARDRAIL="$_GUARDRAIL_STRICT" ;;
-      engineering) TIER_MODEL="global.anthropic.claude-sonnet-4-5-20250929-v1:0"; TIER_GUARDRAIL="" ;;
-      executive)   TIER_MODEL="global.anthropic.claude-sonnet-4-6"; TIER_GUARDRAIL="" ;;
+      standard)    TIER_MODEL="${MODEL:-zai.glm-5}"; TIER_GUARDRAIL="$_GUARDRAIL_MODERATE" ;;
+      restricted)  TIER_MODEL="${MODEL:-zai.glm-5}"; TIER_GUARDRAIL="$_GUARDRAIL_STRICT" ;;
+      engineering) TIER_MODEL="${MODEL:-zai.glm-5}"; TIER_GUARDRAIL="" ;;
+      executive)   TIER_MODEL="${MODEL:-zai.glm-5}"; TIER_GUARDRAIL="" ;;
     esac
 
     # Register tier-specific task definition with tier env vars
     TIER_FAMILY="${STACK_NAME}-tier-${TIER_NAME}"
     case "$TIER_NAME" in
-      standard)    TIER_MODEL="${MODEL:-global.amazon.nova-2-lite-v1:0}"; TIER_GUARDRAIL="${GUARDRAIL_MODERATE_ID:-}" ;;
-      restricted)  TIER_MODEL="us.deepseek.r1-v1:0";                     TIER_GUARDRAIL="${GUARDRAIL_STRICT_ID:-}" ;;
-      engineering) TIER_MODEL="global.anthropic.claude-sonnet-4-5-20250929-v1:0"; TIER_GUARDRAIL="" ;;
-      executive)   TIER_MODEL="global.anthropic.claude-sonnet-4-6";       TIER_GUARDRAIL="" ;;
+      standard)    TIER_MODEL="${MODEL:-zai.glm-5}"; TIER_GUARDRAIL="${GUARDRAIL_MODERATE_ID:-}" ;;
+      restricted)  TIER_MODEL="${MODEL:-zai.glm-5}"; TIER_GUARDRAIL="${GUARDRAIL_STRICT_ID:-}" ;;
+      engineering) TIER_MODEL="${MODEL:-zai.glm-5}"; TIER_GUARDRAIL="" ;;
+      executive)   TIER_MODEL="${MODEL:-zai.glm-5}"; TIER_GUARDRAIL="" ;;
     esac
     # Build container environment JSON
     TIER_ENV=$(cat <<ENVJSON
@@ -467,7 +580,10 @@ else
   {"name":"BEDROCK_MODEL_ID","value":"${TIER_MODEL}"},
   {"name":"GUARDRAIL_ID","value":"${TIER_GUARDRAIL}"},
   {"name":"FARGATE_TIER","value":"${TIER_NAME}"},
-  {"name":"SHARED_AGENT_ID","value":"tier-${TIER_NAME}"}
+  {"name":"SHARED_AGENT_ID","value":"tier-${TIER_NAME}"},
+  {"name":"INTERNAL_API_TOKEN","value":"${INTERNAL_API_TOKEN}"},
+  {"name":"ENABLE_SHARED_FARGATE_TIERS","value":"false"},
+  {"name":"ENABLE_DIRECT_ALWAYS_ON_IM","value":"${ENABLE_DIRECT_ALWAYS_ON_IM}"}
 ]
 ENVJSON
 )
@@ -500,6 +616,7 @@ defs = json.load(sys.stdin)
 env = json.loads('''${TIER_ENV}''')
 for d in defs:
     if d.get('name') == 'always-on-agent':
+        d['image'] = '${ECR_URI}:${IMAGE_TAG}'
         d['environment'] = env
         for k in ['cpu','status','taskDefinitionArn','containerInstanceArn','networkBindings','requiredAttributes']:
             d.pop(k, None)
@@ -692,7 +809,7 @@ else
   AWS_REGION="$DYNAMODB_REGION" $SEED_PYTHON seed_roles.py --table "$DYNAMODB_TABLE" --region "$DYNAMODB_REGION" && \
     success "  Roles seeded (admin/manager/employee)"
 
-  AWS_REGION="$DYNAMODB_REGION" $SEED_PYTHON seed_settings.py --table "$DYNAMODB_TABLE" --region "$DYNAMODB_REGION" 2>/dev/null && \
+  AWS_REGION="$DYNAMODB_REGION" MODEL="$MODEL" $SEED_PYTHON seed_settings.py --table "$DYNAMODB_TABLE" --region "$DYNAMODB_REGION" 2>/dev/null && \
     success "  Settings seeded" || warn "  seed_settings.py skipped (not found)"
 
   AWS_REGION="$DYNAMODB_REGION" $SEED_PYTHON seed_knowledge.py --table "$DYNAMODB_TABLE" --region "$DYNAMODB_REGION" 2>/dev/null && \
@@ -748,6 +865,12 @@ DYNAMODB_TABLE=${DYNAMODB_TABLE}
 DYNAMODB_REGION=${DYNAMODB_REGION}
 AGENTCORE_RUNTIME_ID=${RUNTIME_ID}
 BEDROCK_MODEL_ID=${MODEL}
+OPENCLAW_VERSION=${OPENCLAW_VERSION}
+NODE_VERSION=${NODE_VERSION}
+AGENT_IMAGE_TAG=${IMAGE_TAG}
+INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN}
+ENABLE_SHARED_FARGATE_TIERS=false
+ENABLE_DIRECT_ALWAYS_ON_IM=${ENABLE_DIRECT_ALWAYS_ON_IM}
 ECS_CLUSTER=${ECS_CLUSTER}
 ECS_TASK_DEF=${ECS_TASK_DEF}
 ECS_TASK_SG=${ECS_TASK_SG}

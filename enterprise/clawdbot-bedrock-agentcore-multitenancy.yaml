@@ -8,6 +8,9 @@ Metadata:
           default: "Basic Configuration"
         Parameters:
           - OpenClawModel
+          - OpenClawVersion
+          - NodeVersion
+          - AgentImageTag
           - InstanceType
           - KeyPairName
       - Label:
@@ -31,8 +34,8 @@ Metadata:
 Parameters:
   OpenClawModel:
     Type: String
-    Default: "global.amazon.nova-2-lite-v1:0"
-    Description: "Bedrock model ID - Nova 2 Lite offers best price-performance for everyday tasks"
+    Default: "zai.glm-5"
+    Description: "Bedrock model ID. GLM-5 uses in-region Bedrock Runtime inference."
     AllowedValues:
       - "global.amazon.nova-2-lite-v1:0"
       - "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
@@ -42,6 +45,25 @@ Parameters:
       - "global.anthropic.claude-sonnet-4-20250514-v1:0"
       - "us.deepseek.r1-v1:0"
       - "us.meta.llama3-3-70b-instruct-v1:0"
+      - "zai.glm-5"
+
+  OpenClawVersion:
+    Type: String
+    Default: "2026.10.4"
+    AllowedPattern: "^[0-9]{4}\\.[0-9]+\\.[0-9]+(?:-[0-9]+)?$"
+    Description: "Exact OpenClaw npm version. Do not use latest or a version range."
+
+  NodeVersion:
+    Type: String
+    Default: "24.16.0"
+    AllowedPattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    Description: "Exact Node.js version compatible with OpenClaw."
+
+  AgentImageTag:
+    Type: String
+    Default: "openclaw-2026.10.4"
+    AllowedPattern: "^[A-Za-z0-9_.-]{1,128}$"
+    Description: "Versioned ECR tag used by AgentCore and Always-On Fargate."
 
   InstanceType:
     Type: String
@@ -101,7 +123,7 @@ Parameters:
 
   BedrockModelId:
     Type: String
-    Default: "global.amazon.nova-2-lite-v1:0"
+    Default: "zai.glm-5"
     Description: "Bedrock model ID used by the Agent Container inside AgentCore Runtime"
 
   EnableAgentCoreMemory:
@@ -796,14 +818,17 @@ Resources:
           rm -f /tmp/nvm-install.sh
           export NVM_DIR="$HOME/.nvm"
           [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-          nvm install 22
-          nvm use 22
-          nvm alias default 22
+          nvm install "${NodeVersion}"
+          nvm use "${NodeVersion}"
+          nvm alias default "${NodeVersion}"
           npm config set registry https://registry.npmjs.org/
-          npm install -g openclaw@2026.3.24 --timeout=300000 || {
+          npm install -g "openclaw@${OpenClawVersion}" --timeout=300000 || {
             npm cache clean --force
-            npm install -g openclaw@2026.3.24 --timeout=300000
+            npm install -g "openclaw@${OpenClawVersion}" --timeout=300000
           }
+          openclaw --version | grep -F "OpenClaw ${OpenClawVersion}"
+          openclaw agent --help | grep -F -- "--json"
+          openclaw gateway install --help >/dev/null
           if ! grep -q 'NVM_DIR' ~/.bashrc; then
               echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc
               echo '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> ~/.bashrc
@@ -858,7 +883,6 @@ Resources:
               "bind": "loopback",
               "controlUi": {
                 "enabled": true,
-                "allowInsecureAuth": true,
                 "root": "/usr/local/lib/node_modules/openclaw/dist/control-ui"
               },
               "auth": {
@@ -915,7 +939,7 @@ Resources:
           export HOME=/home/ubuntu
           export NVM_DIR="$HOME/.nvm"
           [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-          openclaw daemon install || echo "Daemon install failed"
+          openclaw gateway install || openclaw daemon install || echo "Gateway install failed"
           '
 
           sudo -H -u ubuntu bash -c '
@@ -1520,7 +1544,7 @@ Resources:
       TaskRoleArn: !GetAtt AlwaysOnEcsTaskRole.Arn
       ContainerDefinitions:
         - Name: always-on-agent
-          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${MultitenancyEcrRepository}:latest"
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${MultitenancyEcrRepository}:${AgentImageTag}"
           PortMappings:
             - ContainerPort: 8080
               Protocol: tcp

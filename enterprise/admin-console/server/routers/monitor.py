@@ -28,7 +28,7 @@ from shared import (
     GATEWAY_REGION,
     STACK_NAME,
 )
-from routers.usage import usage_budgets, _get_agent_usage_recent
+from routers.usage import _usage_budgets, _get_agent_usage_recent
 
 router = APIRouter(tags=["monitor"])
 
@@ -145,7 +145,7 @@ def get_action_items():
 
     # Budget
     try:
-        budgets = usage_budgets()
+        budgets = _usage_budgets()
         over = [b for b in budgets if b["status"] in ("over", "warning")]
         if over:
             items.append({"type": "budget", "severity": "warning",
@@ -498,7 +498,7 @@ def get_alert_rules():
 
     # Budget — real
     try:
-        budgets = usage_budgets()
+        budgets = _usage_budgets()
         over = [b for b in budgets if b["status"] in ("over", "warning")]
     except Exception:
         over = []

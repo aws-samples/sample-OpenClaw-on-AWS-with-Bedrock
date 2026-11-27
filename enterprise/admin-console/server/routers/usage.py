@@ -12,6 +12,7 @@ from datetime import datetime, timezone, date, timedelta
 from fastapi import APIRouter, HTTPException, Header
 
 import db
+import s3ops
 from shared import require_auth, require_role, get_dept_scope, DYNAMODB_REGION
 
 router = APIRouter(tags=["usage"])
@@ -59,35 +60,88 @@ def resolve_budget(emp_id: str, department_name: str) -> float:
 # Usage aggregation
 # =========================================================================
 
-def _get_agent_usage_recent() -> dict:
-    """Aggregate recent usage per agent from DynamoDB USAGE# records (last 7 days)."""
-    today = date.today().isoformat()
-    all_usage = db.get_usage_by_date(today)
-    for offset in range(1, 7):
-        past = (date.today() - timedelta(days=offset)).isoformat()
-        past_usage = db.get_usage_by_date(past)
-        for u in past_usage:
-            aid = u.get("agentId", "")
-            if aid and aid not in {uu.get("agentId") for uu in all_usage}:
-                all_usage.append(u)
+def _range_dates(range_name: str) -> list[str]:
+    """Return inclusive UTC calendar dates for a supported reporting range."""
+    today = datetime.now(timezone.utc).date()
+    if range_name == "1d":
+        days = 1
+    elif range_name == "30d":
+        days = 30
+    elif range_name == "mtd":
+        days = today.day
+    else:
+        days = 7
+    return [(today - timedelta(days=offset)).isoformat() for offset in range(days)]
+
+
+def _usage_records(range_name: str = "7d") -> list[dict]:
+    """Read usage records for the selected UTC date range in one paginated query."""
+    selected_dates = set(_range_dates(range_name))
+    return [record for record in db.get_usage_by_date() if record.get("date") in selected_dates]
+
+
+def _canonical_usage_id(stored_id: str, employee_agents: dict[str, str]) -> str:
+    """Map legacy employee-keyed records to their canonical Agent ID."""
+    return employee_agents.get(stored_id, stored_id)
+
+
+def _employee_agent_map() -> dict[str, str]:
+    return {
+        employee["id"]: employee.get("agentId", "")
+        for employee in db.get_employees()
+        if employee.get("id") and employee.get("agentId")
+    }
+
+
+def _scope_agent_ids(user) -> set[str] | None:
+    """Return visible Agent IDs, or None for unrestricted admins."""
+    department_ids = get_dept_scope(user)
+    if department_ids is None:
+        return None
+    employees = db.get_employees()
+    employee_ids = {
+        employee["id"] for employee in employees
+        if employee.get("departmentId") in department_ids
+    }
+    position_ids = {
+        position["id"] for position in db.get_positions()
+        if position.get("departmentId") in department_ids
+    }
+    return {
+        agent["id"] for agent in db.get_agents()
+        if agent.get("id") and (
+            agent.get("employeeId") in employee_ids
+            if agent.get("employeeId")
+            else agent.get("positionId") in position_ids
+        )
+    }
+
+
+def _get_agent_usage_recent(
+    range_name: str = "7d",
+    allowed_agent_ids: set[str] | None = None,
+) -> dict:
+    """Aggregate usage per Agent for the selected reporting range."""
+    employee_agents = _employee_agent_map()
     result = {}
-    for u in all_usage:
-        aid = u.get("agentId", "")
-        if not aid:
+    for record in _usage_records(range_name):
+        raw_id = record.get("agentId", "")
+        agent_id = _canonical_usage_id(raw_id, employee_agents)
+        if not agent_id or (allowed_agent_ids is not None and agent_id not in allowed_agent_ids):
             continue
-        if aid in result:
-            result[aid]["inputTokens"] += u.get("inputTokens", 0)
-            result[aid]["outputTokens"] += u.get("outputTokens", 0)
-            result[aid]["requests"] += u.get("requests", 0)
-            result[aid]["cost"] += float(u.get("cost", 0))
-        else:
-            result[aid] = {
-                "inputTokens": u.get("inputTokens", 0),
-                "outputTokens": u.get("outputTokens", 0),
-                "requests": u.get("requests", 0),
-                "cost": float(u.get("cost", 0)),
-                "model": u.get("model", ""),
-            }
+        usage = result.setdefault(agent_id, {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "requests": 0,
+            "cost": 0.0,
+            "model": record.get("model", ""),
+        })
+        usage["inputTokens"] += record.get("inputTokens", 0)
+        usage["outputTokens"] += record.get("outputTokens", 0)
+        usage["requests"] += record.get("requests", 0)
+        usage["cost"] += float(record.get("cost", 0))
+        if record.get("model"):
+            usage["model"] = record["model"]
     return result
 
 
@@ -130,28 +184,33 @@ def dashboard(authorization: str = Header(default="")):
 # Usage endpoints
 # =========================================================================
 
-@router.get("/api/v1/usage/summary")
-def usage_summary():
-    usage_map = _get_agent_usage_recent()
+def _usage_summary(report_range: str = "7d", allowed_agent_ids: set[str] | None = None):
+    usage_map = _get_agent_usage_recent(report_range, allowed_agent_ids)
     total_input = sum(u["inputTokens"] for u in usage_map.values())
     total_output = sum(u["outputTokens"] for u in usage_map.values())
     total_cost = sum(u["cost"] for u in usage_map.values())
     total_requests = sum(u["requests"] for u in usage_map.values())
-    employees = db.get_employees()
     return {
         "totalInputTokens": total_input,
         "totalOutputTokens": total_output,
         "totalCost": round(total_cost, 2),
         "totalRequests": total_requests,
-        "tenantCount": len([e for e in employees if e.get("agentId")]),
+        "tenantCount": sum(1 for usage in usage_map.values() if usage["requests"] > 0),
     }
 
 
-@router.get("/api/v1/usage/by-department")
-def usage_by_department():
+@router.get("/api/v1/usage/summary")
+def usage_summary(report_range: str = "7d", authorization: str = Header(default="")):
+    user = require_auth(authorization)
+    return _usage_summary(report_range, _scope_agent_ids(user))
+
+
+def _usage_by_department(report_range: str = "7d", allowed_agent_ids: set[str] | None = None):
     agents = db.get_agents()
+    if allowed_agent_ids is not None:
+        agents = [agent for agent in agents if agent.get("id") in allowed_agent_ids]
     positions = db.get_positions()
-    usage_map = _get_agent_usage_recent()
+    usage_map = _get_agent_usage_recent(report_range, allowed_agent_ids)
     pos_to_dept = {p["id"]: p.get("departmentName", "Unknown") for p in positions}
     dept_usage: dict = {}
     for agent in agents:
@@ -170,10 +229,17 @@ def usage_by_department():
     return result
 
 
-@router.get("/api/v1/usage/by-agent")
-def usage_by_agent():
+@router.get("/api/v1/usage/by-department")
+def usage_by_department(report_range: str = "7d", authorization: str = Header(default="")):
+    user = require_auth(authorization)
+    return _usage_by_department(report_range, _scope_agent_ids(user))
+
+
+def _usage_by_agent(report_range: str = "7d", allowed_agent_ids: set[str] | None = None):
     agents = db.get_agents()
-    usage_map = _get_agent_usage_recent()
+    if allowed_agent_ids is not None:
+        agents = [agent for agent in agents if agent.get("id") in allowed_agent_ids]
+    usage_map = _get_agent_usage_recent(report_range, allowed_agent_ids)
     result = []
     for agent in agents:
         if not agent.get("id"):
@@ -184,41 +250,61 @@ def usage_by_agent():
             "agentName": agent.get("name", agent["id"]),
             "employeeName": agent.get("employeeName", ""),
             "positionName": agent.get("positionName", ""),
+            "deployMode": agent.get("deployMode", "serverless"),
             **usage,
         })
     return sorted(result, key=lambda x: x["cost"], reverse=True)
 
 
-_model_usage_cache = {"data": None, "expires": 0}
+@router.get("/api/v1/usage/by-agent")
+def usage_by_agent(report_range: str = "7d", authorization: str = Header(default="")):
+    user = require_auth(authorization)
+    return _usage_by_agent(report_range, _scope_agent_ids(user))
 
-@router.get("/api/v1/usage/by-model")
-def usage_by_model():
-    """Aggregate usage by model (7-day window, cached 5 min)."""
-    if _model_usage_cache["data"] and _time_usage.time() < _model_usage_cache["expires"]:
-        return _model_usage_cache["data"]
 
+_model_usage_cache: dict[str, dict] = {}
+
+
+def _usage_by_model(report_range: str = "7d", allowed_agent_ids: set[str] | None = None):
+    """Aggregate usage by model for the selected reporting range."""
+    cache_range = report_range if report_range in {"1d", "7d", "30d", "mtd"} else "7d"
+    cache_key = f"{cache_range}:{','.join(sorted(allowed_agent_ids)) if allowed_agent_ids is not None else '*'}"
+    cached = _model_usage_cache.get(cache_key)
+    if cached and _time_usage.time() < cached["expires"]:
+        return cached["data"]
+
+    employee_agents = _employee_agent_map()
     model_usage: dict = {}
-    for offset in range(7):
-        d = (date.today() - timedelta(days=offset)).isoformat()
-        records = db.get_usage_by_date(d)
-        for u in records:
-            model = u.get("model", "") or "unknown"
-            if model not in model_usage:
-                model_usage[model] = {"model": model, "inputTokens": 0, "outputTokens": 0, "requests": 0, "cost": 0}
-            model_usage[model]["inputTokens"] += u.get("inputTokens", 0)
-            model_usage[model]["outputTokens"] += u.get("outputTokens", 0)
-            model_usage[model]["requests"] += u.get("requests", 0)
-            model_usage[model]["cost"] += float(u.get("cost", 0))
+    for record in _usage_records(cache_range):
+        agent_id = _canonical_usage_id(record.get("agentId", ""), employee_agents)
+        if allowed_agent_ids is not None and agent_id not in allowed_agent_ids:
+            continue
+        model = record.get("model", "") or "unknown"
+        if model not in model_usage:
+            model_usage[model] = {"model": model, "inputTokens": 0, "outputTokens": 0, "requests": 0, "cost": 0}
+        model_usage[model]["inputTokens"] += record.get("inputTokens", 0)
+        model_usage[model]["outputTokens"] += record.get("outputTokens", 0)
+        model_usage[model]["requests"] += record.get("requests", 0)
+        model_usage[model]["cost"] += float(record.get("cost", 0))
     result = sorted(model_usage.values(), key=lambda x: x["cost"], reverse=True)
-    for r in result:
-        r["cost"] = round(r["cost"], 4)
-    _model_usage_cache["data"] = result
-    _model_usage_cache["expires"] = _time_usage.time() + 300
+    for item in result:
+        item["cost"] = round(item["cost"], 4)
+    _model_usage_cache[cache_key] = {"data": result, "expires": _time_usage.time() + 300}
     return result
 
 
+@router.get("/api/v1/usage/by-model")
+def usage_by_model(report_range: str = "7d", authorization: str = Header(default="")):
+    user = require_auth(authorization)
+    return _usage_by_model(report_range, _scope_agent_ids(user))
+
+
 @router.get("/api/v1/usage/agent/{agent_id}")
-def usage_for_agent(agent_id: str):
+def usage_for_agent(agent_id: str, authorization: str = Header(default="")):
+    user = require_auth(authorization)
+    allowed_agent_ids = _scope_agent_ids(user)
+    if allowed_agent_ids is not None and agent_id not in allowed_agent_ids:
+        raise HTTPException(403, "Agent is outside your department scope")
     records = db.get_usage_for_agent(agent_id)
     records.sort(key=lambda x: x.get("date", ""))
     return [{
@@ -230,71 +316,188 @@ def usage_for_agent(agent_id: str):
     } for r in records]
 
 
-@router.get("/api/v1/usage/trend")
-def usage_trend():
-    """7-day cost trend from DynamoDB USAGE# records."""
+def _usage_trend(report_range: str = "7d", allowed_agent_ids: set[str] | None = None):
+    """Daily cost and request trend for the selected reporting range."""
     try:
-        import boto3 as _b3tr
-        ddb = _b3tr.resource("dynamodb", region_name=db.AWS_REGION)
-        table = ddb.Table(db.TABLE_NAME)
-        now = datetime.now(timezone.utc)
-        daily_costs: dict = {}
-        daily_requests: dict = {}
-        for i in range(7):
-            date_str = (now - timedelta(days=i)).strftime("%Y-%m-%d")
-            daily_costs[date_str] = 0.0
-            daily_requests[date_str] = 0
-
-        from boto3.dynamodb.conditions import Key
-        resp = table.query(
-            IndexName="GSI1",
-            KeyConditionExpression=Key("GSI1PK").eq("TYPE#usage") & Key("GSI1SK").begins_with("USAGE#"),
-            Limit=500)
-        for item in resp.get("Items", []):
-            d = item.get("date", "")
-            if d in daily_costs:
-                daily_costs[d] += float(item.get("cost", 0))
-                daily_requests[d] += int(item.get("requests", 0))
-
-        trend = []
-        for i in range(6, -1, -1):
-            date_str = (now - timedelta(days=i)).strftime("%Y-%m-%d")
-            trend.append({
-                "date": date_str,
-                "cost": round(daily_costs.get(date_str, 0), 4),
-                "requests": daily_requests.get(date_str, 0),
-                "source": "real" if any(v > 0 for v in daily_costs.values()) else "empty",
-            })
-        return trend
+        dates = list(reversed(_range_dates(report_range)))
+        daily_costs = {day: 0.0 for day in dates}
+        daily_requests = {day: 0 for day in dates}
+        employee_agents = _employee_agent_map()
+        for item in _usage_records(report_range):
+            agent_id = _canonical_usage_id(item.get("agentId", ""), employee_agents)
+            if allowed_agent_ids is not None and agent_id not in allowed_agent_ids:
+                continue
+            record_date = item.get("date", "")
+            if record_date in daily_costs:
+                daily_costs[record_date] += float(item.get("cost", 0))
+                daily_requests[record_date] += int(item.get("requests", 0))
+        return [{
+            "date": day,
+            "openclawCost": round(daily_costs[day], 4),
+            "totalRequests": daily_requests[day],
+        } for day in dates]
     except Exception:
         return []
+
+
+@router.get("/api/v1/usage/trend")
+def usage_trend(report_range: str = "7d", authorization: str = Header(default="")):
+    user = require_auth(authorization)
+    return _usage_trend(report_range, _scope_agent_ids(user))
+
+
+def _skill_usage_records(range_name: str = "7d") -> list[dict]:
+    selected_dates = set(_range_dates(range_name))
+    return [record for record in db.get_skill_usage() if record.get("date") in selected_dates]
+
+
+def _skill_record_calls(record: dict) -> int:
+    """Combine disjoint legacy and current counters during rolling upgrades."""
+    return int(record.get("calls", 0)) + int(record.get("activations", 0))
+
+
+def _current_skill_ids() -> set[str]:
+    try:
+        return {
+            item.get("name", "").split("/")[0]
+            for item in s3ops.list_files("_shared/skills/")
+            if item.get("name") and "/" in item["name"]
+        }
+    except Exception:
+        return set()
+
+
+def _usage_by_skill(report_range: str = "7d", allowed_agent_ids: set[str] | None = None):
+    """Aggregate per-turn Skill calls; no static Skill list is required."""
+    current_skills = _current_skill_ids()
+
+    def empty_item(skill_id: str) -> dict:
+        return {
+            "skillId": skill_id,
+            "status": "installed" if skill_id in current_skills else "removed",
+            "calls": 0,
+            "activeUsers": set(),
+            "serverlessCalls": 0,
+            "alwaysOnCalls": 0,
+            "lastUsedAt": "",
+        }
+
+    aggregated: dict[str, dict] = {skill_id: empty_item(skill_id) for skill_id in current_skills}
+    for record in _skill_usage_records(report_range):
+        agent_id = record.get("agentId", "")
+        if allowed_agent_ids is not None and agent_id not in allowed_agent_ids:
+            continue
+        skill_id = record.get("skillId", "")
+        if not skill_id:
+            continue
+        item = aggregated.setdefault(skill_id, empty_item(skill_id))
+        calls = _skill_record_calls(record)
+        item["calls"] += calls
+        employee_id = record.get("employeeId")
+        if employee_id:
+            item["activeUsers"].add(employee_id)
+        if record.get("agentType") == "always-on":
+            item["alwaysOnCalls"] += calls
+        else:
+            item["serverlessCalls"] += calls
+        used_at = record.get("lastUsedAt", record.get("lastActivatedAt", ""))
+        item["lastUsedAt"] = max(item["lastUsedAt"], used_at)
+
+    result = []
+    for item in aggregated.values():
+        item["activeUsers"] = len(item["activeUsers"])
+        # Temporary aliases keep older console clients compatible.
+        item["activations"] = item["calls"]
+        item["serverlessActivations"] = item["serverlessCalls"]
+        item["alwaysOnActivations"] = item["alwaysOnCalls"]
+        item["lastActivatedAt"] = item["lastUsedAt"]
+        result.append(item)
+    return sorted(result, key=lambda value: value["calls"], reverse=True)
+
+
+@router.get("/api/v1/usage/by-skill")
+def usage_by_skill(report_range: str = "7d", authorization: str = Header(default="")):
+    user = require_role(authorization, roles=["admin", "manager"])
+    return _usage_by_skill(report_range, _scope_agent_ids(user))
+
+
+@router.get("/api/v1/usage/skill/{skill_id}/users")
+def usage_skill_users(
+    skill_id: str,
+    report_range: str = "7d",
+    authorization: str = Header(default=""),
+):
+    """Return per-user call counts for one dynamically discovered Skill."""
+    user = require_role(authorization, roles=["admin", "manager"])
+    allowed_agent_ids = _scope_agent_ids(user)
+    employees = {item["id"]: item for item in db.get_employees() if item.get("id")}
+    totals: dict[str, dict] = {}
+    for record in _skill_usage_records(report_range):
+        if record.get("skillId") != skill_id:
+            continue
+        agent_id = record.get("agentId", "")
+        if allowed_agent_ids is not None and agent_id not in allowed_agent_ids:
+            continue
+        employee_id = record.get("employeeId", "")
+        if not employee_id:
+            continue
+        employee = employees.get(employee_id, {})
+        item = totals.setdefault(employee_id, {
+            "employeeId": employee_id,
+            "employeeName": employee.get("name", employee_id),
+            "departmentName": employee.get("departmentName", ""),
+            "calls": 0,
+            "serverlessCalls": 0,
+            "alwaysOnCalls": 0,
+            "lastUsedAt": "",
+        })
+        calls = _skill_record_calls(record)
+        item["calls"] += calls
+        mode_key = "alwaysOnCalls" if record.get("agentType") == "always-on" else "serverlessCalls"
+        item[mode_key] += calls
+        used_at = record.get("lastUsedAt", record.get("lastActivatedAt", ""))
+        item["lastUsedAt"] = max(item["lastUsedAt"], used_at)
+    result = []
+    for item in totals.values():
+        item["activations"] = item["calls"]
+        item["serverlessActivations"] = item["serverlessCalls"]
+        item["alwaysOnActivations"] = item["alwaysOnCalls"]
+        item["lastActivatedAt"] = item["lastUsedAt"]
+        result.append(item)
+    return sorted(result, key=lambda value: value["calls"], reverse=True)
 
 
 # =========================================================================
 # Budgets — hierarchical
 # =========================================================================
 
-@router.get("/api/v1/usage/budgets")
-def usage_budgets():
-    """Department budget tracking with 7-day average projection."""
-    dept_usage = usage_by_department()
+def _usage_budgets(report_range: str = "7d", allowed_agent_ids: set[str] | None = None):
+    """Department budget tracking with an active-day monthly projection."""
+    dept_usage = _usage_by_department(report_range, allowed_agent_ids)
     agents = db.get_agents()
+    if allowed_agent_ids is not None:
+        agents = [agent for agent in agents if agent.get("id") in allowed_agent_ids]
     positions = db.get_positions()
     pos_to_dept = {p["id"]: p.get("departmentName", "Unknown") for p in positions}
+    employee_agents = _employee_agent_map()
+    records = _usage_records(report_range)
 
     result = []
     for dept in dept_usage:
         dept_name = dept["department"]
         budget = resolve_budget("", dept_name)
 
-        # 7-day average projection
+        # Active-day average projection based on the selected range.
         dept_agents = {a["id"] for a in agents
                        if pos_to_dept.get(a.get("positionId", ""), "") == dept_name}
         daily_costs = []
-        for offset in range(7):
-            d = (date.today() - timedelta(days=offset)).isoformat()
-            day_records = db.get_usage_by_date(d)
-            day_cost = sum(float(u.get("cost", 0)) for u in day_records if u.get("agentId") in dept_agents)
+        for day in _range_dates(report_range):
+            day_cost = sum(
+                float(record.get("cost", 0))
+                for record in records
+                if record.get("date") == day
+                and _canonical_usage_id(record.get("agentId", ""), employee_agents) in dept_agents
+            )
             daily_costs.append(day_cost)
         active_days = len([c for c in daily_costs if c > 0]) or 1
         avg_daily = sum(daily_costs) / active_days
@@ -311,15 +514,29 @@ def usage_budgets():
     return result
 
 
+@router.get("/api/v1/usage/budgets")
+def usage_budgets(report_range: str = "7d", authorization: str = Header(default="")):
+    """Return scoped budgets using the selected range's active-day average."""
+    user = require_auth(authorization)
+    return _usage_budgets(report_range, _scope_agent_ids(user))
+
+
 @router.put("/api/v1/usage/budgets")
 def update_budgets(body: dict, authorization: str = Header(default="")):
     """Save hierarchical budget config. Admin only."""
     user = require_role(authorization, roles=["admin"])
     if "global" in body or "departments" in body or "employees" in body:
+        existing = _get_budgets()
         config = {
-            "global": float(body.get("global", 20.0)),
-            "departments": {k: float(v) for k, v in body.get("departments", {}).items()},
-            "employees": {k: float(v) for k, v in body.get("employees", {}).items()},
+            "global": float(body.get("global", existing["global"])),
+            "departments": {
+                **existing.get("departments", {}),
+                **{k: float(v) for k, v in body.get("departments", {}).items()},
+            },
+            "employees": {
+                **existing.get("employees", {}),
+                **{k: float(v) for k, v in body.get("employees", {}).items()},
+            },
         }
     else:
         config = {
